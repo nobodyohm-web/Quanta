@@ -1,0 +1,84 @@
+[package]
+name = "sovereign-web-engine"
+version = "0.4.0"
+description = "Sovereign Web Engine v4 Titan — Defense-Grade Post-Quantum P2P Node"
+authors = ["Sovereign Web Engine Contributors"]
+edition = "2021"
+
+[lib]
+name = "sovereign_web_engine_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ─── Tauri ───
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+# ─── Serialization ───
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ─── Async ───
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# ─── P2P (Iroh / Willow / QUIC) ───
+iroh = "0.98"
+iroh-blobs = "0.100"
+iroh-gossip = "0.98"
+
+# ─── Hashing (BLAKE3 — 10 Go/s verified streaming) ───
+blake3 = "1.8"
+
+# ─── Classical Crypto (Ed25519) ───
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+
+# ─── Symmetric Encryption (AES-256-GCM) ───
+aes-gcm = "0.10"
+
+# ─── Key Derivation (Argon2id) ───
+argon2 = "0.5"
+
+# ─── Memory Safety (zeroize on drop) ───
+zeroize = { version = "1.8", features = ["derive"] }
+
+# ─── Database (libSQL — SQLite + F32_BLOB vectors) ───
+libsql = "0.9"
+
+# ─── Random ───
+rand = "0.8"
+
+# ─── Encoding ───
+hex = "0.4"
+base64 = "0.22"
+
+# ─── Identifiers ───
+uuid = { version = "1", features = ["v4"] }
+
+# ─── Time ───
+chrono = { version = "0.4", features = ["serde"] }
+
+# ─── Logging ───
+log = "0.4"
+env_logger = "0.11"
+
+# ─── Error Handling ───
+anyhow = "1"
+
+# ─── Platform Dirs ───
+dirs = "6"
+
+# ─── Phase 2A : Cryptographie Post-Quantique (NIST FIPS 203/204) ───
+# ml-kem et ml-dsa : conflit ed25519 v2 (dalek) vs v3-rc (module-lattice).
+# Infrastructure prête dans security/hybrid_crypto.rs — réactiver quand
+# ml-kem >= 0.3 et ml-dsa >= 0.2 seront compatibles avec ed25519-dalek v2.
+
+# ─── Phase 2B : Consensus CRDT ───────────────────────────────────
+crdts = "7"        # G-Counter, PN-Counter, OR-Set, LWW-Register
+num-traits = "0.2" # ToPrimitive pour convertir BigInt/BigUint des CRDTs en i64/u64
+
+# ─── Phase 2C : Mesure énergie CPU réelle ────────────────────────
+sysinfo = "0.33"   # CPU usage pour calcul watts réel

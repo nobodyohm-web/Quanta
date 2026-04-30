@@ -1,0 +1,40 @@
+{
+  "name": "tauri-app",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri",
+    "ai:map": "./.agent/tools/generate-map.sh",
+    "ai:check": "npm run check && cd src-tauri && cargo clippy -- -D warnings",
+    "ai:audit": "cd src-tauri && cargo audit",
+    "ai:format": "npx prettier --write . && cd src-tauri && cargo fmt"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@types/dompurify": "^3.0.5",
+    "dompurify": "^3.4.1",
+    "lucide-svelte": "^1.0.1",
+    "marked": "^18.0.2"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tailwindcss/vite": "^4.2.4",
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^25.6.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "tailwindcss": "^4.2.4",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}

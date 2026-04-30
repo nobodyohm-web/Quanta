@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "echo 'Tool: Bash'",
+        "description": "Log bash commands"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "command": "cd src-tauri && cargo check 2>&1 | tail -3",
+        "description": "Auto-check Rust compilation after every file edit"
+      }
+    ]
+  }
+}
