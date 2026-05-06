@@ -184,9 +184,19 @@ pub struct WillowNode {
     /// redundant WantNodes broadcasts when a peer's heads haven't changed
     /// since the last sync round. Key = sender public key hex.
     pub dag_sync: Arc<RwLock<HashMap<String, DagSyncState>>>,
+    /// NET-9: Outstanding Ping nonces — keyed by nonce, value is when we
+    /// broadcast that Ping. The first Pong with a given nonce attributes
+    /// the round-trip time to its sender. Bounded by `MAX_PENDING_PINGS`
+    /// so a non-responsive network can't grow this map without limit.
+    pub pending_pings: Arc<RwLock<HashMap<u64, Instant>>>,
     /// Graceful shutdown token — cancel() to stop all background tasks.
     pub shutdown: CancellationToken,
 }
+
+/// NET-9: Hard cap on outstanding Ping nonces. At PING_INTERVAL=15s we'd
+/// add ~240 entries/hour without responses; capping at 256 keeps memory
+/// bounded while still letting peers respond minutes later.
+pub const MAX_PENDING_PINGS: usize = 256;
 
 impl WillowNode {
     pub fn new() -> Self {
@@ -223,6 +233,7 @@ impl WillowNode {
             blocks_validated: Arc::new(AtomicU64::new(0)),
             known_peers: Arc::new(RwLock::new(HashMap::new())),
             dag_sync: Arc::new(RwLock::new(HashMap::new())),
+            pending_pings: Arc::new(RwLock::new(HashMap::new())),
             shutdown: CancellationToken::new(),
         }
     }

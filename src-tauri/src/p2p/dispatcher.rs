@@ -233,6 +233,18 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         g.stats.bytes_received += raw.len() as u64;
     }
 
+    // NET-9: Per-peer bandwidth/message accounting. Done here, after dedup
+    // (so retransmits don't double-count) but before signature verification
+    // (so even peers whose signature later fails contribute one "bad"
+    // message — useful for spotting noisy peers in metrics).
+    {
+        let mut info = state.node.peer_info.write().await;
+        if let Some(entry) = info.get_mut(&env.sender) {
+            entry.bytes_in = entry.bytes_in.saturating_add(raw.len() as u64);
+            entry.messages_in = entry.messages_in.saturating_add(1);
+        }
+    }
+
     // Fenêtre temporelle ±5 min.
     if !GossipRouter::is_fresh(&env.timestamp) {
         log::debug!("◈ [Dispatch] enveloppe trop ancienne, drop");
@@ -327,13 +339,29 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
         GossipMessage::Pong { nonce } => {
             // NET-4: Pong is also a liveness signal — touch the peer if known.
+            // NET-9: If this Pong matches a Ping we sent, attribute the RTT to
+            // the sender. The first Pong for a nonce keeps the entry; we leave
+            // it in place for any other peer's response (a peer answering late
+            // gets RTT measured against the original send time, which is fine —
+            // it captures the actual one-way + processing delay).
+            let rtt_ms: Option<u64> = {
+                let pending = state.node.pending_pings.read().await;
+                pending.get(&nonce)
+                    .map(|sent_at| sent_at.elapsed().as_millis().min(u64::MAX as u128) as u64)
+            };
             {
                 let mut info = state.node.peer_info.write().await;
                 if let Some(entry) = info.get_mut(&env.sender) {
                     entry.touch();
+                    if let Some(rtt) = rtt_ms {
+                        entry.record_rtt(rtt);
+                    }
                 }
             }
-            log::debug!("◈ [Dispatch] Pong from {} nonce={}", &env.sender[..env.sender.len().min(12)], nonce);
+            log::debug!(
+                "◈ [Dispatch] Pong from {} nonce={} rtt={:?}ms",
+                &env.sender[..env.sender.len().min(12)], nonce, rtt_ms
+            );
         }
         GossipMessage::ReportPeer { peer_id, reason } => {
             handle_report_peer(state, &env.sender, &peer_id, reason).await;

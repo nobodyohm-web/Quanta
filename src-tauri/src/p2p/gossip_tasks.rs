@@ -157,6 +157,10 @@ pub fn spawn_ping_broadcast(state: Arc<AppState>) {
 
 /// Build + sign + broadcast a single Ping envelope. Cheap relative to Hello
 /// (1 u64 payload vs Hello's heads/peers/watts/country/contribs).
+///
+/// NET-9: Records the Ping nonce + send instant in `pending_pings` so the
+/// matching Pong handler can compute RTT. Also bumps `pings_sent` on every
+/// currently-known peer so the loss-rate denominator stays accurate.
 async fn broadcast_ping_once(state: &AppState, nonce: u64) -> Result<(), String> {
     let pk = state.crypto.lock().await.get_identity()
         .map(|i| i.public_key_hex)
@@ -174,6 +178,27 @@ async fn broadcast_ping_once(state: &AppState, nonce: u64) -> Result<(), String>
         pk, msg, env_nonce, timestamp, &sig
     ) {
         state.node.gossip.write().await.mark_seen(&env.id);
+
+        // NET-9: Record the Ping for RTT measurement.
+        let send_instant = std::time::Instant::now();
+        {
+            let mut pending = state.node.pending_pings.write().await;
+            pending.insert(nonce, send_instant);
+            // Hard cap — drop oldest by sweeping if over.
+            if pending.len() > crate::p2p::willow_node::MAX_PENDING_PINGS {
+                let cutoff = std::time::Instant::now()
+                    - std::time::Duration::from_secs(600);
+                pending.retain(|_, sent_at| *sent_at > cutoff);
+            }
+        }
+        // Bump pings_sent for every known peer (denominator of loss ratio).
+        {
+            let mut info = state.node.peer_info.write().await;
+            for entry in info.values_mut() {
+                entry.pings_sent = entry.pings_sent.saturating_add(1);
+            }
+        }
+
         let _ = state.node.gossip_tx.send(env);
     }
     Ok(())
