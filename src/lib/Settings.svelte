@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { check } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { getPrefs, setPrefs, applyTheme, type Prefs } from "./prefs";
 
   let prefs = $state<Prefs>(getPrefs());
@@ -53,6 +55,48 @@
 
   function setLockMinutes(m: number) {
     prefs = { ...prefs, lockMinutes: m };
+  }
+
+  // ── OTA Update ──
+  let updateStatus = $state<"idle" | "checking" | "downloading" | "ready" | "latest" | "error">("idle");
+  let updateVersion = $state("");
+  let updateError = $state("");
+  let downloadProgress = $state(0);
+
+  async function checkForUpdate() {
+    updateStatus = "checking";
+    updateError = "";
+    try {
+      const update = await check();
+      if (update) {
+        updateVersion = update.version;
+        updateStatus = "downloading";
+        let totalBytes = 0;
+        let downloadedBytes = 0;
+        await update.downloadAndInstall((event) => {
+          if ('contentLength' in event && event.contentLength) {
+            totalBytes = event.contentLength as number;
+          }
+          if ('chunkLength' in event && event.chunkLength) {
+            downloadedBytes += event.chunkLength as number;
+            if (totalBytes > 0) {
+              downloadProgress = Math.round((downloadedBytes / totalBytes) * 100);
+            }
+          }
+        });
+        updateStatus = "ready";
+      } else {
+        updateStatus = "latest";
+        setTimeout(() => updateStatus = "idle", 3000);
+      }
+    } catch (e) {
+      updateError = String(e);
+      updateStatus = "error";
+    }
+  }
+
+  async function doRelaunch() {
+    await relaunch();
   }
 </script>
 
@@ -176,6 +220,35 @@
   </section>
   {/if}
 
+  <!-- Mise à jour OTA -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">Mise à jour</h2>
+      <p class="set-sub">Vérifiez et installez les nouvelles versions automatiquement.</p>
+    </header>
+    <div class="update-box">
+      {#if updateStatus === "idle"}
+        <button class="btn btn-accent" onclick={checkForUpdate}>Vérifier les mises à jour</button>
+      {:else if updateStatus === "checking"}
+        <div class="update-info">⏳ Vérification en cours...</div>
+      {:else if updateStatus === "downloading"}
+        <div class="update-info">📦 Téléchargement v{updateVersion}...</div>
+        <div class="ep-bar" style="margin-top:8px">
+          <div class="ep-fill" style="width:{downloadProgress}%"></div>
+        </div>
+        <div class="ep-label">{downloadProgress}%</div>
+      {:else if updateStatus === "ready"}
+        <div class="update-info update-success">✅ v{updateVersion} installée !</div>
+        <button class="btn btn-accent" onclick={doRelaunch}>Relancer l'application</button>
+      {:else if updateStatus === "latest"}
+        <div class="update-info update-success">✅ Vous avez la dernière version.</div>
+      {:else if updateStatus === "error"}
+        <div class="update-info update-err">❌ {updateError}</div>
+        <button class="btn btn-accent" onclick={checkForUpdate}>Réessayer</button>
+      {/if}
+    </div>
+  </section>
+
   <!-- À propos -->
   <section class="set-card">
     <header class="set-head">
@@ -294,6 +367,11 @@
   .about { display: flex; flex-direction: column; gap: 4px; }
   .about-line { font-size: 12px; color: var(--color-text-1); line-height: 1.6; }
   .about-line.muted { color: var(--color-text-3); font-size: 11px; }
+
+  .update-box { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .update-info { font-size: 13px; color: var(--color-text-1); }
+  .update-success { color: #22c55e; }
+  .update-err { color: #ef4444; font-size: 11px; font-family: var(--font-mono); }
 
   @media (max-width: 640px) {
     .econ-grid { grid-template-columns: 1fr 1fr; }
