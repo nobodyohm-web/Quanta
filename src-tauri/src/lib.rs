@@ -485,6 +485,23 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
         cons.ledger.debit(&from, &from, net_uqta);
         cons.ledger.credit(&from, &to, net_uqta);
     }
+
+    // ── CRITICAL: Broadcast transfer TX to peers via gossip ──
+    if let Ok(tx_json) = serde_json::to_string(&tx) {
+        let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let nonce = state.node.gossip.read().await.next_outgoing_nonce();
+        let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&from, nonce, &timestamp, &msg);
+        let sig = crypto.sign(&signable).unwrap_or_default();
+        if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
+            from.clone(), msg, nonce, timestamp, &sig,
+        ) {
+            state.node.gossip.write().await.mark_seen(&env.id);
+            let _ = state.node.gossip_tx.send(env);
+            log::info!("◈ [Transfer] Broadcast {} QUANTA → {}", amount, &to[..12]);
+        }
+    }
+
     let micro = p2p::ledger::MICRO as f64;
     Ok(serde_json::json!({
         "tx": tx,
