@@ -116,10 +116,25 @@ pub enum GossipMessage {
         max_blocks: u64,
     },
     /// Response to RequestChain: a contiguous segment of the chain.
+    ///
+    /// NET-8: Two payload modes coexist:
+    /// 1. Legacy: `blocks_json` carries the per-block JSON strings inline.
+    /// 2. Compressed (preferred): `blocks_compressed` carries gzipped bytes
+    ///    of the same `blocks_json` array, encoded as JSON before compression.
+    ///
+    /// A compatible peer ALWAYS reads `blocks_compressed` first; if absent or
+    /// invalid, it falls back to `blocks_json`. Senders may emit one, the
+    /// other, or both — `#[serde(default)]` keeps everyone interoperable.
     ChainSegment {
+        #[serde(default)]
         blocks_json: Vec<String>,
         /// Total chain height of the sender (so requester knows if more is needed).
         sender_height: u64,
+        /// NET-8: Optional gzipped JSON of the `blocks_json` array. When present,
+        /// receivers should prefer this over the inline field. Wire-format
+        /// compatible with peers that only know about the legacy field.
+        #[serde(default)]
+        blocks_compressed: Option<Vec<u8>>,
     },
     /// Publication/mise à jour d'une page web P2P.
     PublishPage {
@@ -176,6 +191,47 @@ pub enum GossipMessage {
 /// that predate the protocol-version constant.
 fn default_protocol_version() -> u8 {
     1
+}
+
+// ─── NET-8: ChainSegment compression helpers ─────────────────────────────────
+
+/// NET-8: Compress a `blocks_json` array using gzip. Returns `None` if the
+/// input fits in fewer than 256 bytes (compression overhead exceeds savings)
+/// or if encoding fails. Pure-Rust backend, no native deps.
+pub fn compress_blocks(blocks: &[String]) -> Option<Vec<u8>> {
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
+    let json = serde_json::to_vec(blocks).ok()?;
+    if json.len() < 256 {
+        return None; // not worth it
+    }
+    let mut enc = GzEncoder::new(Vec::with_capacity(json.len() / 4), Compression::fast());
+    enc.write_all(&json).ok()?;
+    enc.finish().ok()
+}
+
+/// NET-8: Decompress a gzipped `blocks_json` payload. Hard cap: refuses to
+/// inflate beyond `MAX_DECOMPRESSED_BYTES` (50 MB) to defeat zip-bomb DoS.
+pub fn decompress_blocks(compressed: &[u8]) -> Result<Vec<String>, String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    const MAX_DECOMPRESSED_BYTES: usize = 50 * 1024 * 1024;
+    let mut dec = GzDecoder::new(compressed);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = dec.read(&mut buf)
+            .map_err(|e| format!("decompress read: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > MAX_DECOMPRESSED_BYTES {
+            return Err(format!("decompressed payload would exceed {} bytes", MAX_DECOMPRESSED_BYTES));
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    serde_json::from_slice::<Vec<String>>(&out)
+        .map_err(|e| format!("decompressed JSON parse: {}", e))
 }
 
 /// Raison d'un signalement de pair.
@@ -534,6 +590,60 @@ mod tests {
         match parsed {
             GossipMessage::Hello { version, .. } => assert_eq!(version, 1),
             _ => panic!("expected Hello"),
+        }
+    }
+
+    #[test]
+    fn compress_decompress_roundtrip() {
+        // NET-8: A non-trivial blocks_json must round-trip through gzip cleanly.
+        let blocks: Vec<String> = (0..30)
+            .map(|i| format!(r#"{{"height":{},"prev":"abc{:0>60}","tx":[]}}"#, i, i))
+            .collect();
+        let inline_size: usize = blocks.iter().map(|s| s.len()).sum();
+        let compressed = compress_blocks(&blocks).expect("must compress");
+        // Must be smaller than the inline form for repetitive JSON.
+        assert!(
+            compressed.len() < inline_size,
+            "gzip should reduce repetitive JSON: {} bytes inline vs {} bytes compressed",
+            inline_size, compressed.len()
+        );
+        let decoded = decompress_blocks(&compressed).expect("must decode");
+        assert_eq!(decoded, blocks, "round-trip identity");
+    }
+
+    #[test]
+    fn compress_skips_tiny_payloads() {
+        // For inputs under the 256-byte threshold compression overhead exceeds
+        // savings. Return None so the caller stays on the inline path.
+        let tiny = vec!["a".to_string(); 5];
+        assert!(compress_blocks(&tiny).is_none());
+    }
+
+    #[test]
+    fn decompress_rejects_garbage() {
+        // Malformed gzip must error, never panic.
+        assert!(decompress_blocks(&[0xFF, 0xFE, 0x00, 0x01]).is_err());
+        assert!(decompress_blocks(&[]).is_err());
+    }
+
+    #[test]
+    fn chain_segment_with_compressed_field_deserializes_legacy_default() {
+        // NET-8: A peer sending only `blocks_json` (legacy wire format) must
+        // deserialize cleanly with `blocks_compressed = None`.
+        let legacy = serde_json::json!({
+            "type": "ChainSegment",
+            "data": {
+                "blocks_json": ["{}", "{}"],
+                "sender_height": 7
+            }
+        });
+        let parsed: GossipMessage = serde_json::from_value(legacy).unwrap();
+        match parsed {
+            GossipMessage::ChainSegment { blocks_compressed, sender_height, .. } => {
+                assert!(blocks_compressed.is_none());
+                assert_eq!(sender_height, 7);
+            }
+            _ => panic!("expected ChainSegment"),
         }
     }
 

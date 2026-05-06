@@ -5568,6 +5568,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek 2.2.0",
  "env_logger",
+ "flate2",
  "futures-util",
  "hex",
  "iroh",

@@ -241,6 +241,7 @@ mod tests {
             priority_for(&GossipMessage::ChainSegment {
                 blocks_json: vec![],
                 sender_height: 0,
+                blocks_compressed: None,
             }),
             Priority::Critical
         );

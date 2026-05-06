@@ -344,8 +344,23 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         GossipMessage::RequestChain { from_height, max_blocks } => {
             handle_request_chain(state, &env.sender, from_height, max_blocks).await;
         }
-        GossipMessage::ChainSegment { blocks_json, sender_height } => {
-            handle_chain_segment(state, &env.sender, blocks_json, sender_height).await;
+        GossipMessage::ChainSegment { blocks_json, sender_height, blocks_compressed } => {
+            // NET-8: Prefer compressed payload when present; fall back to inline
+            // legacy `blocks_json` if decompression fails or no compressed bytes.
+            let blocks = match blocks_compressed {
+                Some(bytes) => match crate::p2p::gossip::decompress_blocks(&bytes) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!(
+                            "◈ [NET-8] ChainSegment from {} compressed payload invalid ({}) — falling back to inline",
+                            &env.sender[..env.sender.len().min(12)], e
+                        );
+                        blocks_json
+                    }
+                },
+                None => blocks_json,
+            };
+            handle_chain_segment(state, &env.sender, blocks, sender_height).await;
         }
         GossipMessage::PublishPage { page_json } => {
             match serde_json::from_str::<crate::p2p::page_store::PublishedPage>(&page_json) {
@@ -676,25 +691,56 @@ async fn handle_hello(
     *state.node.peer_country_reports.write().await
         .entry(country.to_string()).or_insert(0) += 1;
 
-    // Calculer les heads qu'on ne connaît pas et demander leur contenu.
+    // NET-7: Incremental DAG sync — only ask if the peer's head set actually
+    // changed since last time, OR the cache is stale (DAG_SYNC_REASK_WINDOW).
+    // This collapses the "re-ask the same heads on every Hello" chatter that
+    // dominated bandwidth for stable networks.
     let our_known = state.node.dag.read().await.known_ids();
     let want = GossipRouter::compute_want(&their_heads, &our_known);
     if !want.is_empty() {
-        let msg = GossipMessage::WantNodes { ids: want };
-        broadcast(state, msg).await;
+        let their_heads_set: std::collections::HashSet<String> =
+            their_heads.iter().cloned().collect();
+        let should_ask = {
+            let cache = state.node.dag_sync.read().await;
+            match cache.get(sender_pk) {
+                None => true,
+                Some(state) => {
+                    state.last_their_heads != their_heads_set
+                        || state.last_asked.elapsed() > crate::p2p::willow_node::DAG_SYNC_REASK_WINDOW
+                }
+            }
+        };
+        if should_ask {
+            let mut cache = state.node.dag_sync.write().await;
+            cache.insert(
+                sender_pk.to_string(),
+                crate::p2p::willow_node::DagSyncState {
+                    last_their_heads: their_heads_set,
+                    last_asked: std::time::Instant::now(),
+                },
+            );
+            drop(cache);
+            let msg = GossipMessage::WantNodes { ids: want };
+            broadcast(state, msg).await;
+        } else {
+            log::debug!(
+                "◈ [NET-7] DAG sync skip: peer {} heads unchanged within reask window",
+                &sender_pk[..sender_pk.len().min(12)]
+            );
+        }
     }
 
-    // Chain sync: request blocks whenever the peer's chain is taller than ours.
+    // NET-6: Chain sync — fan out RequestChain messages when there is a big gap.
+    // For small gaps (<= one segment), keep the single-request path.
+    // For larger gaps we issue up to PARALLEL_CHAIN_FANOUT range requests at
+    // once so multiple peers can serve different windows in parallel.
     let our_height = state.node.ledger.read().await.chain_height();
     if peer_chain_height > our_height {
         log::info!(
             "◈ [Dispatch] Chain sync needed: our height {} < peer height {} — requesting from {}",
             our_height, peer_chain_height, &sender_pk[..sender_pk.len().min(12)]
         );
-        broadcast(state, GossipMessage::RequestChain {
-            from_height: our_height,
-            max_blocks: MAX_CHAIN_SEGMENT,
-        }).await;
+        request_chain_range(state, our_height, peer_chain_height).await;
     }
 
     // NET-2: Peer exchange — auto-connect to peers we don't know yet.
@@ -953,18 +999,39 @@ async fn handle_request_chain(
         return;
     }
 
-    log::info!(
-        "◈ [Dispatch] RequestChain from {} — sending {} blocks (height {} → {})",
-        &sender[..sender.len().min(12)],
-        blocks_json.len(),
-        from_height,
-        from_height + blocks_json.len() as u64,
-    );
     drop(ledger);
 
+    // NET-8: Try to gzip the segment. If compression yields a meaningful
+    // size win we drop the inline `blocks_json` to save bandwidth; otherwise
+    // we send the legacy inline form unchanged.
+    let compressed = crate::p2p::gossip::compress_blocks(&blocks_json);
+    let (inline, compressed_field) = match &compressed {
+        Some(c) if c.len() < (blocks_json.iter().map(|s| s.len()).sum::<usize>() / 2) => {
+            log::info!(
+                "◈ [NET-8] RequestChain {} — {} blocks, {} → {} bytes after gzip",
+                &sender[..sender.len().min(12)],
+                blocks_json.len(),
+                blocks_json.iter().map(|s| s.len()).sum::<usize>(),
+                c.len(),
+            );
+            (Vec::new(), Some(c.clone()))
+        }
+        _ => {
+            log::info!(
+                "◈ [Dispatch] RequestChain from {} — sending {} blocks (height {} → {})",
+                &sender[..sender.len().min(12)],
+                blocks_json.len(),
+                from_height,
+                from_height + blocks_json.len() as u64,
+            );
+            (blocks_json, None)
+        }
+    };
+
     broadcast(state, GossipMessage::ChainSegment {
-        blocks_json,
+        blocks_json: inline,
         sender_height: chain_len,
+        blocks_compressed: compressed_field,
     }).await;
 }
 
@@ -1021,18 +1088,72 @@ async fn handle_chain_segment(
         &sender[..sender.len().min(12)], integrated, rejected, sender_height
     );
 
-    // If sender has more blocks, request the next segment
+    // If sender has more blocks, request the next segment(s) in parallel.
     let our_height = state.node.ledger.read().await.chain_height();
     if our_height < sender_height {
         log::info!(
-            "◈ [Dispatch] Need more blocks: our height {} < sender height {} — requesting next segment",
+            "◈ [Dispatch] Need more blocks: our height {} < sender height {} — fanning out next requests",
             our_height, sender_height
         );
+        request_chain_range(state, our_height, sender_height).await;
+    }
+}
+
+/// NET-6: Maximum parallel `RequestChain` fan-out.
+///
+/// Caps the number of in-flight range requests we issue at once. Iroh-gossip
+/// broadcast means each `RequestChain` reaches every peer; whichever peer
+/// holds the requested window will reply. Multiple non-overlapping windows
+/// let *different* peers respond in parallel instead of one peer serving the
+/// whole catch-up serially.
+///
+/// Trade-off: more fanout = faster catch-up but more redundant traffic and
+/// more competing ChainSegment responses. 4 is the sweet spot — 4×50 = 200
+/// blocks in flight before we wait, which covers ~7h of sealing at our 2-min
+/// cadence.
+pub const PARALLEL_CHAIN_FANOUT: u64 = 4;
+
+/// NET-6: Issue one or more `RequestChain` messages spanning `[from, to)`.
+///
+/// - If the gap is ≤ one segment, sends a single broadcast.
+/// - Otherwise splits the gap into up to `PARALLEL_CHAIN_FANOUT` non-overlapping
+///   `[start, start+MAX_CHAIN_SEGMENT)` windows and broadcasts them all.
+///
+/// Each broadcast travels through the priority queue (Critical lane), reaches
+/// every peer subscribed to the topic, and gets answered by whichever peer
+/// owns blocks at that window. Idempotency in `integrate_remote_block`
+/// guarantees that overlapping responses from multiple peers cannot cause
+/// double-application or fork divergence.
+async fn request_chain_range(state: &Arc<AppState>, from: u64, to: u64) {
+    if to <= from {
+        return;
+    }
+    let total_gap = to - from;
+    if total_gap <= MAX_CHAIN_SEGMENT {
+        // Small gap — one shot is fine.
         broadcast(state, GossipMessage::RequestChain {
-            from_height: our_height,
+            from_height: from,
             max_blocks: MAX_CHAIN_SEGMENT,
         }).await;
+        return;
     }
+    // Big gap — fan out up to PARALLEL_CHAIN_FANOUT windows of MAX_CHAIN_SEGMENT.
+    let window = MAX_CHAIN_SEGMENT;
+    let mut start = from;
+    let mut requests_sent = 0u64;
+    while start < to && requests_sent < PARALLEL_CHAIN_FANOUT {
+        let count = (to - start).min(window);
+        broadcast(state, GossipMessage::RequestChain {
+            from_height: start,
+            max_blocks: count,
+        }).await;
+        start += count;
+        requests_sent += 1;
+    }
+    log::info!(
+        "◈ [NET-6] parallel chain sync: {} requests fanned out covering [{}, {})",
+        requests_sent, from, start
+    );
 }
 
 /// Helper : signe + emballe + push sur le channel gossip_tx (le drain enverra via iroh-gossip).

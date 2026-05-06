@@ -27,13 +27,31 @@ use iroh_gossip::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+// ─── NET-7: Incremental DAG sync state ──────────────────────────────────────
+
+/// Per-peer cache so we only re-ask for DAG nodes when the peer's head set
+/// genuinely changed (or the cache is stale). Avoids redundant WantNodes
+/// chatter every time we receive a periodic Hello.
+#[derive(Debug, Clone)]
+pub struct DagSyncState {
+    /// Hash set of the heads we last saw from this peer.
+    pub last_their_heads: HashSet<String>,
+    /// When we last asked this peer for missing nodes.
+    pub last_asked: Instant,
+}
+
+/// Window after which we re-issue a WantNodes even if heads haven't changed.
+/// 90s is comfortably > Hello interval (120s would skip an entire cycle), so
+/// we still get a periodic re-ask as a backstop against lost messages.
+pub const DAG_SYNC_REASK_WINDOW: Duration = Duration::from_secs(90);
 
 /// B3: Maximum time without a Hello before a peer is considered dead.
 /// Conservative 5-minute TTL. Solana uses 15s; we use 5m for our scale.
@@ -162,6 +180,10 @@ pub struct WillowNode {
     /// NET-1: Registry of peers we've connected to (for auto-reconnection).
     /// Key = Iroh EndpointId string.
     pub known_peers: Arc<RwLock<HashMap<String, KnownPeer>>>,
+    /// NET-7: Per-peer DAG sync state — used by `handle_hello` to skip
+    /// redundant WantNodes broadcasts when a peer's heads haven't changed
+    /// since the last sync round. Key = sender public key hex.
+    pub dag_sync: Arc<RwLock<HashMap<String, DagSyncState>>>,
     /// Graceful shutdown token — cancel() to stop all background tasks.
     pub shutdown: CancellationToken,
 }
@@ -200,6 +222,7 @@ impl WillowNode {
             endpoint_active: Arc::new(RwLock::new(false)),
             blocks_validated: Arc::new(AtomicU64::new(0)),
             known_peers: Arc::new(RwLock::new(HashMap::new())),
+            dag_sync: Arc::new(RwLock::new(HashMap::new())),
             shutdown: CancellationToken::new(),
         }
     }

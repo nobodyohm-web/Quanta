@@ -86,6 +86,9 @@ sysinfo = "0.33"   # CPU usage pour calcul watts réel
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 
+# NET-8: Optional ChainSegment compression (gzip via miniz pure-Rust backend).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 # ─── Tests ────────────────────────────────────────────────────────
 [dev-dependencies]
 proptest = "1"     # Property-based testing for invariants (Shapley, ledger overflow)
