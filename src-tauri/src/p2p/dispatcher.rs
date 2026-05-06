@@ -289,12 +289,12 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         GossipMessage::Hello {
             heads, node_id, watts, country, version: _,
             tasks_completed, blocks_verified, uptime_minutes,
-            chain_height,
+            chain_height, known_peer_ids,
         } => {
             handle_hello(
                 state, &env.sender, &node_id, heads, watts, &country,
                 tasks_completed, blocks_verified, uptime_minutes,
-                chain_height,
+                chain_height, known_peer_ids,
             ).await;
         }
         GossipMessage::WantNodes { ids } => {
@@ -602,6 +602,7 @@ pub fn try_process_raw_gossip(data: &[u8]) -> Result<(), String> {
 /// Hello → enregistre les watts + pays + contributions du peer, demande les nœuds DAG manquants.
 /// B3: updates `peer_info` with `last_seen` for TTL tracking.
 /// STRUCT-6: also stores tasks_completed / blocks_verified / uptime_minutes for Shapley.
+/// NET-2: processes known_peer_ids for automatic mesh discovery.
 #[allow(clippy::too_many_arguments)]
 async fn handle_hello(
     state: &Arc<AppState>,
@@ -614,11 +615,13 @@ async fn handle_hello(
     blocks_verified: u64,
     uptime_minutes: u64,
     peer_chain_height: u64,
+    known_peer_ids: Vec<String>,
 ) {
     log::info!(
-        "◈ [Dispatch] Hello from {} ({} heads, {:.1}W, {}, chain_h={}, tasks={} blocks={} uptime={}m)",
+        "◈ [Dispatch] Hello from {} ({} heads, {:.1}W, {}, chain_h={}, tasks={} blocks={} uptime={}m, peers={})",
         &sender_pk[..sender_pk.len().min(12)], their_heads.len(), watts, country,
         peer_chain_height, tasks_completed, blocks_verified, uptime_minutes,
+        known_peer_ids.len(),
     );
 
     // STRUCT-4: Clamp peer-declared watts to a sane range.
@@ -659,8 +662,6 @@ async fn handle_hello(
     }
 
     // Chain sync: request blocks whenever the peer's chain is taller than ours.
-    // This works for both late-joiners AND normal operation (peer mined while
-    // we were offline, or we just connected).
     let our_height = state.node.ledger.read().await.chain_height();
     if peer_chain_height > our_height {
         log::info!(
@@ -671,6 +672,56 @@ async fn handle_hello(
             from_height: our_height,
             max_blocks: MAX_CHAIN_SEGMENT,
         }).await;
+    }
+
+    // NET-2: Peer exchange — auto-connect to peers we don't know yet.
+    // This enables mesh discovery: each Hello carries the sender's known peers,
+    // so new nodes discover the full network through gossip alone.
+    if !known_peer_ids.is_empty() {
+        let our_known_peers = state.node.known_peers.read().await;
+        let our_ticket = state.node.get_ticket().await.unwrap_or_default();
+        let new_peers: Vec<String> = known_peer_ids.into_iter()
+            .filter(|id| {
+                // Don't connect to ourselves
+                *id != our_ticket
+                // Don't connect to peers we already know
+                && !our_known_peers.contains_key(id)
+                // Basic validation: non-empty
+                && !id.is_empty()
+            })
+            .collect();
+        drop(our_known_peers);
+
+        // Limit auto-discovery to 3 peers per Hello to avoid connection storms
+        for peer_id in new_peers.iter().take(3) {
+            log::info!(
+                "◈ [NET-2] Discovered new peer {} via gossip exchange",
+                &peer_id[..peer_id.len().min(16)]
+            );
+            // Spawn connection attempt in background (non-blocking)
+            let state_clone = state.clone();
+            let peer_id_clone = peer_id.clone();
+            tokio::spawn(async move {
+                // Small delay to avoid thundering herd on startup
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                match state_clone.node.connect_peer(&peer_id_clone).await {
+                    Ok(()) => {
+                        log::info!(
+                            "◈ [NET-2] Auto-connected to discovered peer {}",
+                            &peer_id_clone[..peer_id_clone.len().min(16)]
+                        );
+                        // Trigger Hello to the new peer
+                        crate::p2p::gossip_tasks::trigger_hello_now(&state_clone).await;
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "◈ [NET-2] Failed to auto-connect to {}: {}",
+                            &peer_id_clone[..peer_id_clone.len().min(16)], e
+                        );
+                    }
+                }
+            });
+        }
     }
 }
 

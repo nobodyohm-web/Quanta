@@ -1,9 +1,11 @@
 //! Gossip background tasks — extracted from lib.rs for clarity.
 //!
-//! Three async tasks:
+//! Five async tasks:
 //!   1. Outgoing gossip drain (mpsc → iroh-gossip broadcast)
 //!   2. Incoming gossip dispatch (iroh-gossip events → dispatcher)
 //!   3. Initial Hello broadcast (country + watts announcement)
+//!   4. Dead-peer cleanup (every 30s)
+//!   5. NET-1: Auto-reconnect loop (exponential backoff for lost peers)
 
 use crate::p2p;
 use crate::AppState;
@@ -44,6 +46,7 @@ pub fn spawn_outgoing_drain(state: Arc<AppState>) {
 
 /// Spawn the incoming gossip dispatch task.
 /// Reads iroh-gossip events and routes them through the dispatcher.
+/// NET-1: Also handles NeighborUp/NeighborDown for auto-reconnection.
 pub fn spawn_incoming_dispatch(state: Arc<AppState>) {
     tokio::spawn(async move {
         use futures_util::StreamExt as _;
@@ -54,10 +57,16 @@ pub fn spawn_incoming_dispatch(state: Arc<AppState>) {
                     p2p::dispatcher::dispatch_incoming(&state, &msg.content).await;
                 }
                 Ok(iroh_gossip::api::Event::NeighborUp(id)) => {
-                    log::info!("◈ [Gossip] NeighborUp {}", id);
+                    let id_str = id.to_string();
+                    log::info!("◈ [Gossip] NeighborUp {}", &id_str[..id_str.len().min(16)]);
+                    // NET-1: Mark peer as connected (resets backoff)
+                    state.node.mark_peer_up(&id_str).await;
                 }
                 Ok(iroh_gossip::api::Event::NeighborDown(id)) => {
-                    log::info!("◈ [Gossip] NeighborDown {}", id);
+                    let id_str = id.to_string();
+                    log::info!("◈ [Gossip] NeighborDown {}", &id_str[..id_str.len().min(16)]);
+                    // NET-1: Mark peer as disconnected (triggers reconnection)
+                    state.node.mark_peer_down(&id_str).await;
                 }
                 Ok(iroh_gossip::api::Event::Lagged) => {
                     log::warn!("◈ [Gossip] receiver lagged — messages dropped");
@@ -135,9 +144,19 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
         .get_user(&pk).map(|u| u.uptime_minutes).unwrap_or(0);
     let chain_height = state.node.ledger.read().await.chain_height();
 
+    // NET-2: Collect known peer EndpointIds for mesh discovery
+    let known_peer_ids: Vec<String> = {
+        let kp = state.node.known_peers.read().await;
+        kp.values()
+            .filter(|p| p.connected) // Only share peers that are currently connected
+            .map(|p| p.endpoint_id.clone())
+            .collect()
+    };
+
     let msg = p2p::gossip::GossipRouter::build_hello(
         heads, pk.clone(), watts, country.clone(),
         tasks_completed, 0, uptime_min, chain_height,
+        known_peer_ids,
     );
 
     // Sign and broadcast
@@ -165,6 +184,47 @@ pub fn spawn_peer_cleanup(state: Arc<AppState>) {
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
                     state.node.cleanup_dead_peers().await;
+                }
+            }
+        }
+    });
+}
+
+/// NET-1: Spawn the auto-reconnection task.
+/// Checks every 5s for disconnected known peers and attempts reconnection
+/// with exponential backoff (1s → 2s → 4s → 8s → ... → 60s max, 10 attempts max).
+pub fn spawn_auto_reconnect(state: Arc<AppState>) {
+    let token = state.node.shutdown.clone();
+    tokio::spawn(async move {
+        // Wait for endpoint to be ready
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    log::info!("◈ [NET-1] auto-reconnect shutdown");
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let peers = state.node.peers_needing_reconnect().await;
+                    for (endpoint_id, backoff) in peers {
+                        log::info!(
+                            "◈ [NET-1] Reconnecting to {} (backoff {:?})",
+                            &endpoint_id[..endpoint_id.len().min(16)],
+                            backoff
+                        );
+                        // Wait the backoff delay before attempting
+                        tokio::time::sleep(backoff).await;
+
+                        match state.node.try_reconnect(&endpoint_id).await {
+                            Ok(true) => {
+                                // Trigger immediate Hello after reconnection
+                                trigger_hello_now(&state).await;
+                            }
+                            Ok(false) => {} // Skipped (already connected or exhausted)
+                            Err(_) => {} // Logged inside try_reconnect
+                        }
+                    }
                 }
             }
         }

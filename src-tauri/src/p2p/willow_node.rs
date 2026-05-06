@@ -1,6 +1,7 @@
 // p2p/willow_node.rs — Real Iroh P2P Node
 // Creates a QUIC endpoint, serves content, enables peer connections via tickets.
 // B3: PeerInfo with TTL-based dead peer cleanup.
+// NET-1: Auto-reconnection with exponential backoff for lost peers.
 
 use super::*;
 use super::dispatcher::NonceTracker;
@@ -29,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -41,9 +42,69 @@ const PEER_TTL: Duration = Duration::from_secs(300);
 #[allow(dead_code)] // Documented constant; cleanup interval is hardcoded in lib.rs spawn
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// NET-1: Auto-reconnection constants.
+const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
+const RECONNECT_MAX_ATTEMPTS: u32 = 10;
+
 /// QUANTA gossip topic — fixe pour tous les nœuds, dérivé d'un hash BLAKE3 stable.
 pub fn quanta_topic_id() -> TopicId {
     TopicId::from_bytes(*blake3::hash(b"quanta-network-v1").as_bytes())
+}
+
+// ─── NET-1: Known Peer Registry ─────────────────────────────────────────────
+
+/// State tracking for a known peer (for auto-reconnection).
+#[derive(Debug, Clone)]
+pub struct KnownPeer {
+    /// Iroh EndpointId string (paste-able by users).
+    pub endpoint_id: String,
+    /// Last time we successfully connected or received a message.
+    pub last_connected: Instant,
+    /// Current reconnection attempt count (resets on success).
+    pub reconnect_attempts: u32,
+    /// Whether we're currently trying to reconnect.
+    pub reconnecting: bool,
+    /// Whether this peer is currently connected (NeighborUp received).
+    pub connected: bool,
+}
+
+impl KnownPeer {
+    pub fn new(endpoint_id: String) -> Self {
+        Self {
+            endpoint_id,
+            last_connected: Instant::now(),
+            reconnect_attempts: 0,
+            reconnecting: false,
+            connected: true,
+        }
+    }
+
+    /// Compute the next backoff delay: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped).
+    pub fn next_backoff(&self) -> Duration {
+        let delay = RECONNECT_INITIAL_DELAY
+            .checked_mul(2u32.saturating_pow(self.reconnect_attempts))
+            .unwrap_or(RECONNECT_MAX_DELAY);
+        delay.min(RECONNECT_MAX_DELAY)
+    }
+
+    /// Whether we've exhausted all reconnection attempts.
+    pub fn exhausted(&self) -> bool {
+        self.reconnect_attempts >= RECONNECT_MAX_ATTEMPTS
+    }
+
+    /// Mark peer as successfully connected (resets backoff).
+    pub fn mark_connected(&mut self) {
+        self.last_connected = Instant::now();
+        self.reconnect_attempts = 0;
+        self.reconnecting = false;
+        self.connected = true;
+    }
+
+    /// Mark peer as disconnected (starts backoff cycle).
+    pub fn mark_disconnected(&mut self) {
+        self.connected = false;
+    }
 }
 
 /// Real Iroh P2P Node — QUIC transport + content serving
@@ -95,6 +156,9 @@ pub struct WillowNode {
     /// CRIT-B: Count of remote blocks successfully validated & integrated.
     /// Feeds the Shapley "validation" factor (20% weight).
     pub blocks_validated: Arc<AtomicU64>,
+    /// NET-1: Registry of peers we've connected to (for auto-reconnection).
+    /// Key = Iroh EndpointId string.
+    pub known_peers: Arc<RwLock<HashMap<String, KnownPeer>>>,
     /// Graceful shutdown token — cancel() to stop all background tasks.
     pub shutdown: CancellationToken,
 }
@@ -132,6 +196,7 @@ impl WillowNode {
             puzzle_difficulty: 3,
             endpoint_active: Arc::new(RwLock::new(false)),
             blocks_validated: Arc::new(AtomicU64::new(0)),
+            known_peers: Arc::new(RwLock::new(HashMap::new())),
             shutdown: CancellationToken::new(),
         }
     }
@@ -168,6 +233,7 @@ impl WillowNode {
     /// Le peer doit aussi être abonné au topic QUANTA pour que le sync démarre.
     /// After successful connection, triggers an immediate Hello broadcast
     /// so the peer detects us and chain sync can begin.
+    /// NET-1: Registers the peer in known_peers for auto-reconnection.
     pub async fn connect_peer(&self, peer_id_str: &str) -> Result<(), String> {
         let sender_guard = self.gossip_topic_sender.read().await;
         let sender = sender_guard.as_ref().ok_or("Gossip not initialized")?;
@@ -175,8 +241,97 @@ impl WillowNode {
             .map_err(|e| format!("EndpointId invalide: {}", e))?;
         sender.join_peers(vec![peer_id]).await
             .map_err(|e| format!("join_peers failed: {}", e))?;
+
+        // NET-1: Register in known_peers for auto-reconnect
+        {
+            let mut kp = self.known_peers.write().await;
+            kp.entry(peer_id_str.to_string())
+                .and_modify(|p| p.mark_connected())
+                .or_insert_with(|| KnownPeer::new(peer_id_str.to_string()));
+        }
+
         log::info!("◈ [P2P] Connected to peer {}", &peer_id_str[..peer_id_str.len().min(16)]);
         Ok(())
+    }
+
+    /// NET-1: Mark a peer as disconnected (NeighborDown). Starts backoff cycle.
+    pub async fn mark_peer_down(&self, endpoint_id: &str) {
+        let mut kp = self.known_peers.write().await;
+        if let Some(peer) = kp.get_mut(endpoint_id) {
+            peer.mark_disconnected();
+            log::info!(
+                "◈ [P2P] Peer {} marked down — will auto-reconnect (attempt {})",
+                &endpoint_id[..endpoint_id.len().min(16)],
+                peer.reconnect_attempts + 1
+            );
+        }
+    }
+
+    /// NET-1: Mark a peer as connected (NeighborUp). Resets backoff.
+    pub async fn mark_peer_up(&self, endpoint_id: &str) {
+        let mut kp = self.known_peers.write().await;
+        if let Some(peer) = kp.get_mut(endpoint_id) {
+            peer.mark_connected();
+            log::info!(
+                "◈ [P2P] Peer {} reconnected successfully",
+                &endpoint_id[..endpoint_id.len().min(16)]
+            );
+        }
+    }
+
+    /// NET-1: Try to reconnect to a specific known peer.
+    /// Returns Ok(true) if reconnection succeeded, Ok(false) if skipped, Err if failed.
+    pub async fn try_reconnect(&self, endpoint_id: &str) -> Result<bool, String> {
+        // Check if we should attempt
+        {
+            let mut kp = self.known_peers.write().await;
+            let Some(peer) = kp.get_mut(endpoint_id) else {
+                return Ok(false);
+            };
+            if peer.connected || peer.reconnecting || peer.exhausted() {
+                return Ok(false);
+            }
+            peer.reconnecting = true;
+            peer.reconnect_attempts += 1;
+        }
+
+        // Attempt reconnection
+        let result = self.connect_peer(endpoint_id).await;
+
+        // Update state based on result
+        {
+            let mut kp = self.known_peers.write().await;
+            if let Some(peer) = kp.get_mut(endpoint_id) {
+                peer.reconnecting = false;
+                if result.is_ok() {
+                    peer.mark_connected();
+                }
+            }
+        }
+
+        match &result {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                let kp = self.known_peers.read().await;
+                let attempts = kp.get(endpoint_id)
+                    .map(|p| p.reconnect_attempts).unwrap_or(0);
+                log::warn!(
+                    "◈ [P2P] Reconnect to {} failed (attempt {}/{}): {}",
+                    &endpoint_id[..endpoint_id.len().min(16)],
+                    attempts, RECONNECT_MAX_ATTEMPTS, e
+                );
+                Err(e.clone())
+            }
+        }
+    }
+
+    /// NET-1: Get list of disconnected peers that need reconnection, with their backoff delays.
+    pub async fn peers_needing_reconnect(&self) -> Vec<(String, Duration)> {
+        let kp = self.known_peers.read().await;
+        kp.values()
+            .filter(|p| !p.connected && !p.reconnecting && !p.exhausted())
+            .map(|p| (p.endpoint_id.clone(), p.next_backoff()))
+            .collect()
     }
 
     /// Phase 3 — prend (et consomme) le receiver gossip. À appeler une seule fois
@@ -244,16 +399,22 @@ impl WillowNode {
         let peer_count = self.peer_info.read().await.len() as u32;
         let is_online = *self.endpoint_active.read().await;
         let peer_id = self.node_addr.read().await.clone().unwrap_or_default();
+        let kp = self.known_peers.read().await;
+        let known_peer_count = kp.len() as u32;
+        let connected_known = kp.values().filter(|p| p.connected).count() as u32;
+        drop(kp);
         NodeStatus {
             node_id: self.node_id.clone(),
             peer_id,
             is_online,
             peer_count,
+            known_peers: known_peer_count,
+            connected_peers: connected_known,
             active_subspaces: 0,
             protocol: if is_online {
-                "Iroh QUIC — Connected".into()
+                "Torus P2P v2 — Connected".into()
             } else {
-                "Willow/QUIC — Local Mode".into()
+                "Torus P2P v2 — Local Mode".into()
             },
             puzzle_difficulty: self.puzzle_difficulty,
         }

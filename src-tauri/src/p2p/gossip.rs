@@ -56,6 +56,10 @@ pub enum GossipMessage {
         /// Chain height — so peers can detect if they need to sync.
         #[serde(default)]
         chain_height: u64,
+        /// NET-2: Known peer EndpointIds for mesh discovery.
+        /// Receiving nodes can auto-connect to peers they don't know.
+        #[serde(default)]
+        known_peer_ids: Vec<String>,
     },
     /// "Donne-moi les nœuds avec ces IDs".
     WantNodes {
@@ -264,6 +268,7 @@ impl GossipRouter {
     }
 
     /// Construit un message `Hello` pour initier un sync (V2: watts + pays + STRUCT-6 contribs).
+    #[allow(clippy::too_many_arguments)]
     pub fn build_hello(
         heads: Vec<String>,
         node_id: String,
@@ -273,6 +278,7 @@ impl GossipRouter {
         blocks_verified: u64,
         uptime_minutes: u64,
         chain_height: u64,
+        known_peer_ids: Vec<String>,
     ) -> GossipMessage {
         GossipMessage::Hello {
             heads,
@@ -284,6 +290,7 @@ impl GossipRouter {
             blocks_verified,
             uptime_minutes,
             chain_height,
+            known_peer_ids,
         }
     }
 

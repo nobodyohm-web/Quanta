@@ -655,6 +655,7 @@ pub fn run() {
                 p2p::gossip_tasks::spawn_incoming_dispatch(state.clone());
                 p2p::gossip_tasks::spawn_hello_broadcast(state.clone());
                 p2p::gossip_tasks::spawn_peer_cleanup(state.clone());
+                p2p::gossip_tasks::spawn_auto_reconnect(state.clone());
                 p2p::mining_loop::spawn(state.clone());
                 p2p::state_persistence::spawn_persistence(state.clone());
             });

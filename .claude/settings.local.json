@@ -10,13 +10,17 @@
       "Bash(git log *)",
       "Bash(git diff *)",
       "Bash(git status)",
+      "Bash(git stash *)",
+      "Bash(git merge *)",
       "Bash(grep *)",
       "Bash(find *)",
       "Bash(wc *)",
       "Bash(cat *)",
       "Bash(head *)",
       "Bash(tail *)",
-      "Bash(ls *)"
+      "Bash(ls *)",
+      "Bash(RUST_LOG=* *)",
+      "Bash(tokio-console *)"
     ]
   },
   "effortLevel": "xhigh"

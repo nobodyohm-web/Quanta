@@ -57,6 +57,10 @@ pub struct NodeStatus {
     pub peer_id: String,
     pub is_online: bool,
     pub peer_count: u32,
+    /// NET-1: Total number of peers we've ever connected to.
+    pub known_peers: u32,
+    /// NET-1: Currently connected known peers.
+    pub connected_peers: u32,
     pub active_subspaces: usize,
     pub protocol: String,
     pub puzzle_difficulty: u8,
