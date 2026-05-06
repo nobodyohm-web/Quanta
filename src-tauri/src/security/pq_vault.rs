@@ -8,7 +8,7 @@ use zeroize::Zeroize;
 
 /// PQ-hardened identity (hybrid: Ed25519 + future ML-DSA-65)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TitanIdentity {
+pub struct QuantaIdentity {
     pub public_key_hex: String,
     pub display_name: String,
     pub created_at: String,
@@ -33,7 +33,7 @@ pub struct PQVault;
 
 /// Bundle returned when creating a new identity:
 /// (public identity, raw public key bytes, encrypted secret key, AES-GCM nonce).
-pub type CreatedIdentity = (TitanIdentity, Vec<u8>, Vec<u8>, Vec<u8>);
+pub type CreatedIdentity = (QuantaIdentity, Vec<u8>, Vec<u8>, Vec<u8>);
 
 impl PQVault {
     /// Create a new sovereign identity with Ed25519 + PQ preparation
@@ -52,7 +52,7 @@ impl PQVault {
         // Encrypt the secret key
         let enc = cipher::encrypt_and_wipe(&mut sk_bytes, &enc_key)?;
         
-        let identity = TitanIdentity {
+        let identity = QuantaIdentity {
             public_key_hex: pk.public_key_hex,
             display_name: display_name.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -73,7 +73,7 @@ impl PQVault {
         password: &str,
         display_name: &str,
         created_at: &str,
-    ) -> Result<TitanIdentity, String> {
+    ) -> Result<QuantaIdentity, String> {
         let salt = CryptoEngine::blake3_hash(hex::encode(public_key).as_bytes());
         let enc_key = cipher::derive_key(password, &salt[..16])?;
         let mut sk_bytes = cipher::decrypt(encrypted_sk, &enc_key, nonce)?;
@@ -84,7 +84,7 @@ impl PQVault {
         // Zeroize decrypted secret key immediately
         sk_bytes.zeroize();
 
-        Ok(TitanIdentity {
+        Ok(QuantaIdentity {
             public_key_hex: pk.public_key_hex,
             display_name: display_name.to_string(),
             created_at: created_at.to_string(),

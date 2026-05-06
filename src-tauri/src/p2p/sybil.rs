@@ -11,6 +11,7 @@
 //!   - 1.0 → nœud établi & prouvé     (mining ×1.00)
 
 use crate::p2p::reputation::UserReputation;
+use crate::p2p::ledger::MICRO;
 
 // ─── Poids PoC V2 ───────────────────────────────────────────────────────────
 
@@ -26,10 +27,12 @@ pub struct SybilGuard;
 impl SybilGuard {
     /// Calcule le score PoC global d'un utilisateur [0.0, 1.0].
     pub fn poc_score(rep: &UserReputation) -> f64 {
+        // STRUCT-2: atn_staked is u64 µQTA — convert to QUANTA for the exp curve.
+        let staked_quanta = rep.atn_staked as f64 / MICRO as f64;
         let score = Self::uptime_factor(rep.uptime_minutes) * W_UPTIME
-                  + Self::energy_factor(rep.energy_kwh)    * W_ENERGY
-                  + Self::stake_factor(rep.atn_staked)     * W_STAKE
-                  + Self::age_factor(&rep.joined_at)       * W_AGE;
+                  + Self::energy_factor(rep.energy_kwh)     * W_ENERGY
+                  + Self::stake_factor(staked_quanta)         * W_STAKE
+                  + Self::age_factor(&rep.joined_at)        * W_AGE;
         score.clamp(0.0, 1.0)
     }
 
@@ -56,11 +59,12 @@ impl SybilGuard {
         1.0 - (-2.0 * kwh).exp()
     }
 
-    /// ATN stakés — skin in the game, lock-up irréversible à court terme.
-    /// 0 → 0.0, 1 ATN → 0.18, 5 → 0.63, 20 ATN → 0.98
+    /// Stake — skin in the game, progressive jusqu'à 100 QUANTA.
+    /// 0 → 0.0, 10 → 0.32, 25 → 0.50, 50 → 0.71, 100 → 1.00
+    /// Courbe √(x/100) : chaque QUANTA staké apporte un gain visible.
     fn stake_factor(staked: f64) -> f64 {
         if staked <= 0.0 { return 0.0; }
-        1.0 - (-0.2 * staked).exp()
+        (staked / 100.0).sqrt().min(1.0)
     }
 
     /// Ancienneté — le temps ne se falsifie pas.
@@ -80,18 +84,20 @@ impl SybilGuard {
 mod tests {
     use super::*;
 
-    fn mock_rep(uptime_min: u64, kwh: f64, staked: f64, days_ago: i64) -> UserReputation {
+    /// Helper: `staked_quanta` est en QUANTA (entiers ou décimaux), converti en µQTA en interne.
+    fn mock_rep(uptime_min: u64, kwh: f64, staked_quanta: f64, days_ago: i64) -> UserReputation {
         let joined = (chrono::Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339();
+        let staked_uqta = (staked_quanta * MICRO as f64) as u64;
         UserReputation {
             public_key:       "test".into(),
             trust_score:      10.0,
             status:           crate::p2p::reputation::TrustStatus::New,
-            atn_earned:       0.0,
-            atn_balance:      10.0,
-            atn_staked:       staked,
+            atn_earned:       0,
+            atn_balance:      10 * MICRO,
+            atn_staked:       staked_uqta,
             uptime_minutes:   uptime_min,
             energy_kwh:       kwh,
-            energy_atn_mined: 0.0,
+            energy_atn_mined: 0,
             joined_at:        joined,
         }
     }
@@ -106,7 +112,7 @@ mod tests {
 
     #[test]
     fn established_node_has_high_score() {
-        // Nœud actif depuis 30 jours, 7j uptime, 1 kWh consommé, 5 ATN stakés
+        // Nœud actif depuis 30 jours, 7j uptime, 1 kWh consommé, 5 QUANTA stakés
         let rep = mock_rep(7 * 24 * 60, 1.0, 5.0, 30);
         let score = SybilGuard::poc_score(&rep);
         assert!(score > 0.7, "Nœud établi : score doit être élevé, got {}", score);

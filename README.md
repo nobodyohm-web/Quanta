@@ -1,4 +1,4 @@
-# ◈ Sovereign Web Engine v4 — TITAN
+# ◈ Quanta Protocol v2 — QUANTA
 
 > **Defense-Grade Post-Quantum Web — Willow Protocol, BM25 Search, zeroize Memory Safety**
 
@@ -6,12 +6,12 @@ Moteur souverain de création, synchronisation et navigation de sites P2P sans s
 
 ---
 
-## 🏗️ Architecture v4 "Titan"
+## 🏗️ Architecture v4 "Quanta"
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                   SOVEREIGN WEB ENGINE v4                       │
-│                     "TITAN" — Defense Grade                     │
+│                     "QUANTA" — Defense Grade                     │
 ├─────────────────────┬───────────────────────────────────────────┤
 │   Frontend          │   Backend (Rust Actor Model)              │
 │   Svelte 5 Runes    │                                           │
@@ -48,7 +48,7 @@ Moteur souverain de création, synchronisation et navigation de sites P2P sans s
 
 ## 🔬 Changements v2 → v4
 
-| Aspect | v2 | v4 Titan |
+| Aspect | v2 | v4 Quanta |
 |--------|----|----|
 | **Module structure** | crypto/, network/, storage/ | **security/, p2p/, search/, storage/** |
 | **Identity** | Ed25519 only | **PQ Vault** (Ed25519 + ML-DSA-65 ready) |
@@ -99,7 +99,7 @@ Torus/
 │       └── Dashboard.svelte          # Bento stats + site list
 │
 ├── src-tauri/                        # Backend (Rust)
-│   ├── Cargo.toml                    # v0.4.0 Titan
+│   ├── Cargo.toml                    # v0.4.0 Quanta
 │   ├── src/
 │   │   ├── main.rs                   # Entry point
 │   │   ├── lib.rs                    # 15 Tauri commands + Actor state
@@ -133,7 +133,7 @@ Torus/
 |---------|------|
 | `mod.rs` | `CryptoEngine` + BLAKE3 (hash, keyed MAC, verify) + SecureBuffer (zeroize on drop) |
 | `cipher.rs` | AES-256-GCM + Argon2id + **`encrypt_and_wipe()`** (zeroize le plaintext) |
-| `pq_vault.rs` | `TitanIdentity` (Ed25519 + ML-DSA-65 ready) + **S/Kademlia crypto puzzles** |
+| `pq_vault.rs` | `QuantaIdentity` (Ed25519 + ML-DSA-65 ready) + **S/Kademlia crypto puzzles** |
 
 **zeroize** : Toute donnée sensible (clés privées, mots de passe dérivés) est effacée de la RAM via `zeroize::Zeroize` + `ZeroizeOnDrop`. Empêche les attaques par cold boot / memory dump.
 
@@ -283,4 +283,4 @@ npm run tauri dev
 
 ---
 
-<p align="center"><strong>◈ ENGINE TITAN v4 — Defense-Grade Sovereign Web ◈</strong></p>
+<p align="center"><strong>◈ QUANTA PROTOCOL — Energy Is Value ◈</strong></p>

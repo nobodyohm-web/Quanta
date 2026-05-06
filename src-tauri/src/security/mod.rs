@@ -1,4 +1,4 @@
-// security/mod.rs — Post-Quantum Security Layer (SOVA)
+// security/mod.rs — Post-Quantum Security Layer (QUANTA)
 // ML-KEM (FIPS 203), ML-DSA (FIPS 204), AES-256-GCM, Argon2id, zeroize
 
 pub mod pq_vault;

@@ -2,7 +2,7 @@
 //!
 //! Ce test prouve que :
 //!   1. Deux nœuds Iroh se trouvent via MemoryLookup (sans DNS)
-//!   2. Le gossip topic SOVA fonctionne (broadcast + réception)
+//!   2. Le gossip topic QUANTA fonctionne (broadcast + réception)
 //!   3. Un DagNode inséré par le nœud A est reçu par le nœud B
 //!   4. Le DAG converge entre les deux nœuds
 //!
@@ -17,9 +17,9 @@ mod p2p_integration {
     use iroh_gossip::api::Event;
     use std::time::Duration;
 
-    /// Topic fixe SOVA — BLAKE3("sova-network-v1") tronqué à 32 bytes.
-    fn sova_topic() -> TopicId {
-        let hash = blake3::hash(b"sova-network-v1");
+    /// Topic fixe QUANTA — BLAKE3("quanta-network-v1") tronqué à 32 bytes.
+    fn quanta_topic() -> TopicId {
+        let hash = blake3::hash(b"quanta-network-v1");
         TopicId::from_bytes(*hash.as_bytes())
     }
 
@@ -57,7 +57,7 @@ mod p2p_integration {
         router_a.endpoint().address_lookup().unwrap().add(lookup.clone());
         router_b.endpoint().address_lookup().unwrap().add(lookup);
 
-        let topic = sova_topic();
+        let topic = quanta_topic();
 
         // ── Node B s'abonne et attend ──────────────────
         let b_handle = tokio::spawn(async move {
@@ -96,7 +96,7 @@ mod p2p_integration {
 
         println!("Node A joined topic, broadcasting...");
 
-        // Construire un message SOVA (DagNode simplifié en JSON)
+        // Construire un message QUANTA (DagNode simplifié en JSON)
         let dag_payload = serde_json::json!({
             "type": "mining",
             "pk": "node_a_test_pk",

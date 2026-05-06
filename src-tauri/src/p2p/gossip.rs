@@ -1,4 +1,4 @@
-//! Protocole de gossip P2P — échange d'état entre nœuds SOVA
+//! Protocole de gossip P2P — échange d'état entre nœuds QUANTA
 //!
 //! Les messages gossip sont transportés via Iroh QUIC (existant).
 //! Ce module définit les types de messages et la sérialisation.
@@ -9,8 +9,9 @@
 //!   3. A → B : `HaveNodes { nodes: [...] }` (les nœuds demandés)
 //!   4. B insère les nœuds dans son DAG local
 
-use serde::{Deserialize, Serialize};
 use crate::p2p::merkle_dag::DagNode;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
@@ -20,27 +21,38 @@ pub type MsgId = String;
 /// Enveloppe signée d'un message gossip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipEnvelope {
-    pub id:        MsgId,
+    pub id: MsgId,
     /// Clé publique Ed25519 de l'émetteur
-    pub sender:    String,
-    pub payload:   GossipMessage,
+    pub sender: String,
+    pub payload: GossipMessage,
     /// Signature Ed25519 du payload sérialisé
     pub signature: String,
-    /// Horodatage RFC3339 (fenêtre ±5 min pour anti-replay)
+    /// Horodatage RFC3339 (fenêtre ±90s pour anti-replay)
     pub timestamp: String,
+    /// CRIT-1: Per-sender monotonic nonce for gossip-level anti-replay.
+    /// Must be strictly increasing per sender. Default 0 for backward compat.
+    #[serde(default)]
+    pub nonce: u64,
 }
 
 /// Types de messages gossip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GossipMessage {
-    /// Annonce initiale : "voici mes heads + ma consommation énergie".
+    /// Annonce initiale : "voici mes heads + ma consommation énergie + contributions".
     Hello {
-        heads:      Vec<String>,
-        node_id:    String,
-        version:    u8,
-        watts:      f64,    // watts CPU mesurés (V2 proportional mining)
-        country:    String, // code pays ISO (oracle énergie réseau)
+        heads: Vec<String>,
+        node_id: String,
+        version: u8,
+        watts: f64,      // watts CPU mesurés (V2 proportional mining)
+        country: String, // code pays ISO (oracle énergie réseau)
+        // STRUCT-6: Shapley contribution data — backward compat via #[serde(default)]
+        #[serde(default)]
+        tasks_completed: u64,
+        #[serde(default)]
+        blocks_verified: u64,
+        #[serde(default)]
+        uptime_minutes: u64,
     },
     /// "Donne-moi les nœuds avec ces IDs".
     WantNodes {
@@ -55,12 +67,82 @@ pub enum GossipMessage {
         tx_json: String,
     },
     /// Ping/pong pour mesurer la latence et signaler qu'on est en ligne.
-    Ping { nonce: u64 },
-    Pong { nonce: u64 },
+    Ping {
+        nonce: u64,
+    },
+    Pong {
+        nonce: u64,
+    },
     /// Signalement d'un pair malveillant (votes Sybil, signature invalide…).
     ReportPeer {
         peer_id: String,
-        reason:  ReportReason,
+        reason: ReportReason,
+    },
+    /// D1: Propagation d'un bloc sealed. Les pairs le valident puis l'intègrent.
+    NewBlock {
+        block_json: String,
+    },
+    /// Late-joiner: request chain segments starting from a given block height.
+    /// The receiving peer responds with a ChainSegment.
+    RequestChain {
+        from_height: u64,
+        /// Maximum number of blocks to send back (prevents DoS).
+        max_blocks: u64,
+    },
+    /// Response to RequestChain: a contiguous segment of the chain.
+    ChainSegment {
+        blocks_json: Vec<String>,
+        /// Total chain height of the sender (so requester knows if more is needed).
+        sender_height: u64,
+    },
+    /// Publication/mise à jour d'une page web P2P.
+    PublishPage {
+        page_json: String,
+    },
+    /// Requête de la page d'un wallet par clé publique.
+    RequestPage {
+        author_pk: String,
+    },
+    // ─── V3 Social Web ─────────────────────────────────────────────────
+    /// V3 — Publication/mise à jour d'un enregistrement de domaine `*.torus`.
+    /// Le receveur valide la signature du record avant insertion.
+    PublishDomain {
+        record_json: String,
+    },
+    /// V3 — Délégation d'un sous-domaine (signée par le parent).
+    PublishSubdomain {
+        grant_json: String,
+    },
+    /// V3 — Diffusion d'un site indexé (envoyé au moteur de recherche local).
+    /// `doc_json` = `IndexedDoc` sérialisé (tokens déjà calculés côté émetteur).
+    PublishSite {
+        doc_json: String,
+    },
+    /// V3 — Action sociale signée (Vote / Follow / Tip / Boost).
+    BroadcastSocialAction {
+        action_json: String,
+    },
+    /// V3 — Signalement d'un contenu (cumulé jusqu'au seuil de jury).
+    BroadcastReport {
+        report_json: String,
+    },
+    /// V3 — Vote scellé d'un juré (commit phase).
+    BroadcastJurorCommit {
+        commit_json: String,
+    },
+    /// V3 — Révélation d'un vote de juré (reveal phase).
+    BroadcastJurorReveal {
+        reveal_json: String,
+    },
+    /// V3 — Diffusion d'un nœud forum (Forum / Thread / Comment) tagué par `kind`.
+    PublishForumNode {
+        kind: String, // "forum" | "thread" | "comment"
+        node_json: String,
+    },
+    /// V3.3 — Diffusion d'un manifest de site multi-page (signé par l'auteur).
+    /// Reçu → `page_store.publish_site()`. Vérifie sig + version + contraintes.
+    PublishSiteManifest {
+        manifest_json: String,
     },
 }
 
@@ -71,6 +153,7 @@ pub enum ReportReason {
     SybilSuspected,
     MalformedMessage,
     TxReplay,
+    RateLimitExceeded,
     Other(String),
 }
 
@@ -79,47 +162,124 @@ pub enum ReportReason {
 /// Statistiques de gossip pour le monitoring.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GossipStats {
-    pub messages_sent:     u64,
+    pub messages_sent: u64,
     pub messages_received: u64,
-    pub nodes_synced:      u64,
-    pub peers_reported:    u64,
-    pub bytes_sent:        u64,
-    pub bytes_received:    u64,
+    pub nodes_synced: u64,
+    pub peers_reported: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    /// Messages dropped due to invalid signature
+    pub dropped_signature: u64,
+    /// Messages dropped due to rate limiting
+    pub dropped_rate_limit: u64,
+    /// Messages dropped due to nonce replay
+    pub dropped_nonce: u64,
+    /// P2P pages received from network
+    pub pages_received: u64,
+    /// P2P pages published locally
+    pub pages_published: u64,
+    /// V3 — Domaines publiés ou mis à jour via gossip
+    #[serde(default)]
+    pub domains_published: u64,
+    /// V3 — Sites indexés reçus depuis le réseau
+    #[serde(default)]
+    pub sites_indexed: u64,
+    /// V3 — Actions sociales (like/follow/tip/boost) appliquées
+    #[serde(default)]
+    pub social_actions_applied: u64,
+    /// V3 — Reports modération acceptés
+    #[serde(default)]
+    pub reports_received: u64,
+    /// V3 — Nœuds forum (forum/thread/comment) acceptés
+    #[serde(default)]
+    pub forum_nodes_received: u64,
+    /// V3.3 — Manifests de site multi-page acceptés
+    #[serde(default)]
+    pub site_manifests_received: u64,
 }
+
+/// MOD-2: Maximum number of message IDs retained for deduplication.
+/// Oldest entries are evicted once this limit is reached.
+const MAX_SEEN_MESSAGES: usize = 100_000;
 
 /// Routeur gossip — gère les messages entrants et sortants.
 pub struct GossipRouter {
     /// Hashes des messages déjà traités (anti-replay)
     seen_messages: std::collections::HashSet<MsgId>,
+    /// MOD-2: Insertion-order queue for bounded LRU eviction of seen_messages.
+    seen_order: std::collections::VecDeque<MsgId>,
     pub stats: GossipStats,
+    /// CRIT-A: Monotonic outgoing nonce — starts at 1, never 0.
+    outgoing_nonce: AtomicU64,
 }
 
 impl GossipRouter {
     pub fn new() -> Self {
         Self {
             seen_messages: std::collections::HashSet::new(),
+            seen_order: std::collections::VecDeque::new(),
             stats: GossipStats::default(),
+            outgoing_nonce: AtomicU64::new(1),
         }
+    }
+
+    /// CRIT-A: Get and increment the outgoing nonce (atomic, no &mut needed).
+    pub fn next_outgoing_nonce(&self) -> u64 {
+        self.outgoing_nonce.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Marque un message comme vu.
     /// Retourne `false` si le message était déjà connu (duplicate/replay).
+    /// MOD-2: Evicts oldest entries when the seen set exceeds MAX_SEEN_MESSAGES.
     pub fn mark_seen(&mut self, msg_id: &str) -> bool {
-        self.seen_messages.insert(msg_id.to_string())
+        let is_new = self.seen_messages.insert(msg_id.to_string());
+        if is_new {
+            self.seen_order.push_back(msg_id.to_string());
+            while self.seen_order.len() > MAX_SEEN_MESSAGES {
+                if let Some(old) = self.seen_order.pop_front() {
+                    self.seen_messages.remove(&old);
+                }
+            }
+        }
+        is_new
     }
 
-    /// Vérifie la fenêtre temporelle d'un message (±5 min).
+    /// Number of unique message IDs currently tracked (for tests + monitoring).
+    pub fn seen_messages_count(&self) -> usize {
+        self.seen_messages.len()
+    }
+
+    /// Vérifie la fenêtre temporelle d'un message (±90s).
+    /// Tightened from ±5min to reduce replay attack window
+    /// while tolerating reasonable clock drift.
     pub fn is_fresh(timestamp: &str) -> bool {
         let Ok(ts) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
             return false;
         };
         let drift = (chrono::Utc::now().timestamp() - ts.timestamp()).unsigned_abs();
-        drift <= 300
+        drift <= 90
     }
 
-    /// Construit un message `Hello` pour initier un sync (V2 : inclut watts + pays).
-    pub fn build_hello(heads: Vec<String>, node_id: String, watts: f64, country: String) -> GossipMessage {
-        GossipMessage::Hello { heads, node_id, version: 1, watts, country }
+    /// Construit un message `Hello` pour initier un sync (V2: watts + pays + STRUCT-6 contribs).
+    pub fn build_hello(
+        heads: Vec<String>,
+        node_id: String,
+        watts: f64,
+        country: String,
+        tasks_completed: u64,
+        blocks_verified: u64,
+        uptime_minutes: u64,
+    ) -> GossipMessage {
+        GossipMessage::Hello {
+            heads,
+            node_id,
+            version: 1,
+            watts,
+            country,
+            tasks_completed,
+            blocks_verified,
+            uptime_minutes,
+        }
     }
 
     /// Calcule les IDs manquants par rapport à `our_known`.
@@ -127,22 +287,51 @@ impl GossipRouter {
         their_heads: &[String],
         our_known: &std::collections::HashSet<String>,
     ) -> Vec<String> {
-        their_heads.iter()
+        their_heads
+            .iter()
             .filter(|id| !our_known.contains(*id))
             .cloned()
             .collect()
     }
 
+    /// STRUCT-1: Produce the canonical bytes that MUST be signed for an envelope.
+    ///
+    /// Covers: sender + nonce + timestamp + payload — so that none of these
+    /// fields can be tampered with after signing.
+    ///
+    /// This is the ONLY function callers should use to produce signable data.
+    pub fn signable_envelope_bytes(
+        sender: &str,
+        nonce: u64,
+        timestamp: &str,
+        payload: &GossipMessage,
+    ) -> Vec<u8> {
+        // Canonical format: JSON array [sender, nonce, timestamp, payload]
+        // Using serde_json ensures deterministic serialization.
+        let canonical = serde_json::json!([sender, nonce, timestamp, payload]);
+        serde_json::to_vec(&canonical).unwrap_or_default()
+    }
+
+    /// Legacy helper — returns just the payload bytes (for backward compat).
+    /// NEW CODE SHOULD USE `signable_envelope_bytes()` INSTEAD.
+    #[deprecated(note = "Use signable_envelope_bytes() for STRUCT-1 compliant signing")]
+    pub fn payload_bytes(payload: &GossipMessage) -> Vec<u8> {
+        serde_json::to_vec(payload).unwrap_or_default()
+    }
+
     /// Phase 3 — construit une enveloppe signée prête à être broadcastée.
-    /// Le caller fournit `sig_bytes` (Ed25519 du payload sérialisé) ; cet appel
-    /// reste synchrone pour rester utilisable depuis tout contexte.
+    ///
+    /// STRUCT-1: The caller must sign the bytes produced by `signable_envelope_bytes()`
+    /// which covers sender + nonce + timestamp + payload.
+    ///
+    /// The `sig_bytes` MUST be the Ed25519 signature of `signable_envelope_bytes(sender, nonce, &timestamp, &payload)`.
     pub fn wrap_outgoing(
         sender: String,
         payload: GossipMessage,
         sig_bytes: &[u8],
     ) -> Result<GossipEnvelope, String> {
-        let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-        let id = hex::encode(blake3::hash(&bytes).as_bytes());
+        let payload_json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+        let id = hex::encode(blake3::hash(&payload_json).as_bytes());
         let timestamp = chrono::Utc::now().to_rfc3339();
         Ok(GossipEnvelope {
             id,
@@ -150,18 +339,55 @@ impl GossipRouter {
             payload,
             signature: hex::encode(sig_bytes),
             timestamp,
+            nonce: 0,
         })
     }
 
-    /// Phase 3 — sérialise la même charge utile que `wrap_outgoing` aurait signée,
-    /// pour permettre au caller de produire la signature à la bonne granularité.
-    pub fn payload_bytes(payload: &GossipMessage) -> Vec<u8> {
-        serde_json::to_vec(payload).unwrap_or_default()
+    /// STRUCT-1: Build + sign a complete envelope in one step.
+    ///
+    /// This is the recommended production API. It:
+    /// 1. Accepts the pre-computed timestamp (MUST match what was signed)
+    /// 2. Takes the pre-computed signature of `signable_envelope_bytes(sender, nonce, timestamp, payload)`
+    /// 3. Returns the complete envelope
+    ///
+    /// **Critical**: The `timestamp` MUST be the same value used in `signable_envelope_bytes()`
+    /// when computing the signature. Otherwise verification will fail.
+    pub fn build_signed_envelope(
+        sender: String,
+        payload: GossipMessage,
+        nonce: u64,
+        timestamp: String,
+        sig_bytes: &[u8],
+    ) -> Result<GossipEnvelope, String> {
+        let payload_json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+        let id = hex::encode(blake3::hash(&payload_json).as_bytes());
+        Ok(GossipEnvelope {
+            id,
+            sender,
+            payload,
+            signature: hex::encode(sig_bytes),
+            timestamp,
+            nonce,
+        })
+    }
+
+    /// CRIT-1: wrap_outgoing with explicit nonce for anti-replay.
+    pub fn wrap_outgoing_with_nonce(
+        sender: String,
+        payload: GossipMessage,
+        sig_bytes: &[u8],
+        nonce: u64,
+    ) -> Result<GossipEnvelope, String> {
+        let mut env = Self::wrap_outgoing(sender, payload, sig_bytes)?;
+        env.nonce = nonce;
+        Ok(env)
     }
 }
 
 impl Default for GossipRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── Snapshot sérialisable ──────────────────────────────────────────────────
@@ -169,20 +395,32 @@ impl Default for GossipRouter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipRouterSnapshot {
     pub seen_messages: std::collections::HashSet<MsgId>,
+    /// MOD-2: Eviction order — persisted so bounds hold across restarts.
+    #[serde(default)]
+    pub seen_order: std::collections::VecDeque<MsgId>,
     pub stats: GossipStats,
+    /// CRIT-A: Persisted outgoing nonce so it never resets on restart.
+    #[serde(default = "default_nonce")]
+    pub outgoing_nonce: u64,
 }
+
+fn default_nonce() -> u64 { 1 }
 
 impl GossipRouter {
     pub fn snapshot(&self) -> GossipRouterSnapshot {
         GossipRouterSnapshot {
             seen_messages: self.seen_messages.clone(),
+            seen_order: self.seen_order.clone(),
             stats: self.stats.clone(),
+            outgoing_nonce: self.outgoing_nonce.load(Ordering::Relaxed),
         }
     }
     pub fn restore(snap: GossipRouterSnapshot) -> Self {
         Self {
             seen_messages: snap.seen_messages,
+            seen_order: snap.seen_order,
             stats: snap.stats,
+            outgoing_nonce: AtomicU64::new(snap.outgoing_nonce.max(1)),
         }
     }
 }
@@ -196,14 +434,20 @@ mod tests {
     #[test]
     fn mark_seen_deduplication() {
         let mut router = GossipRouter::new();
-        assert!(router.mark_seen("msg_001"), "Premier message doit être accepté");
+        assert!(
+            router.mark_seen("msg_001"),
+            "Premier message doit être accepté"
+        );
         assert!(!router.mark_seen("msg_001"), "Doublon doit être rejeté");
     }
 
     #[test]
     fn is_fresh_rejects_old() {
         let old_ts = "2020-01-01T00:00:00Z";
-        assert!(!GossipRouter::is_fresh(old_ts), "Vieux timestamp doit être refusé");
+        assert!(
+            !GossipRouter::is_fresh(old_ts),
+            "Vieux timestamp doit être refusé"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // User preferences — stored in localStorage, applied app-wide.
-// No secrets here. Identity & ATN balance live elsewhere (encrypted vault, ledger).
+// No secrets here. Identity & QUANTA balance live elsewhere (encrypted vault, ledger).
 
 export type Theme = "light" | "dark" | "auto";
 
@@ -9,17 +9,23 @@ export interface Prefs {
   confirmThreshold: number;  // ATN amount above which transfers prompt confirmation
 }
 
-const KEY = "titan.prefs.v1";
+const LEGACY_KEY = "titan.prefs.v1";
+const KEY = "quanta.prefs.v1";
 
 const DEFAULT_PREFS: Prefs = {
-  theme: "light",
+  theme: "dark",
   lockMinutes: 15,
   confirmThreshold: 100,
 };
 
 export function getPrefs(): Prefs {
   try {
-    const raw = localStorage.getItem(KEY);
+    // Migrate from legacy key if present
+    let raw = localStorage.getItem(KEY);
+    if (!raw) {
+      raw = localStorage.getItem(LEGACY_KEY);
+      if (raw) { localStorage.setItem(KEY, raw); localStorage.removeItem(LEGACY_KEY); }
+    }
     if (!raw) return { ...DEFAULT_PREFS };
     const p = JSON.parse(raw) as Partial<Prefs>;
     return {

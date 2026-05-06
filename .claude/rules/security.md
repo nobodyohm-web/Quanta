@@ -1,5 +1,5 @@
 ---
-description: Règles de sécurité cryptographique pour le protocole SOVA
+description: Règles de sécurité cryptographique pour le protocole QUANTA
 paths: ["src-tauri/src/security/**", "src-tauri/src/p2p/ledger.rs"]
 ---
 

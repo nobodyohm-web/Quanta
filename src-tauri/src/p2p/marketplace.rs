@@ -1,12 +1,12 @@
 #![allow(dead_code)] // Module Phase 3 — pas encore intégré
-//! Marketplace de Calcul Distribué — SOVA V2
+//! Marketplace de Calcul Distribué — QUANTA V2
 //!
 //! Permet aux utilisateurs de soumettre des tâches de calcul (IA training,
 //! rendu 3D, simulation scientifique) et aux nœuds de les exécuter en échange
-//! de SOVA tokens.
+//! de QUANTA tokens.
 //!
 //! Flux :
-//!   1. Client soumet Task { payload, sova_reward, deadline }
+//!   1. Client soumet Task { payload, quanta_reward, deadline }
 //!   2. Le réseau gossipe la tâche
 //!   3. Les nœuds disponibles clament la tâche (premier arrivé)
 //!   4. Le nœud exécute, soumet le résultat + proof
@@ -16,9 +16,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use chrono::Utc;
+use super::ledger::MICRO;
 
-/// Burn rate pour soumission de tâche (2%)
-const TASK_BURN_RATE: f64 = 0.02;
+/// Burn rate pour soumission de tâche (2% — calculé en intégers : amount * 2 / 100).
+const TASK_BURN_NUM: u64 = 2;
+const TASK_BURN_DEN: u64 = 100;
+
+#[inline]
+fn compute_task_burn(reward_uqta: u64) -> u64 {
+    reward_uqta * TASK_BURN_NUM / TASK_BURN_DEN
+}
 
 /// Statut d'une tâche de calcul
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,7 +59,7 @@ pub enum TaskType {
     GenericWasm { wasm_hash: String },
 }
 
-/// Une tâche de calcul distribuée
+/// Une tâche de calcul distribuée. Montants en µQTA.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeTask {
     /// ID unique (BLAKE3 du contenu)
@@ -61,10 +68,10 @@ pub struct ComputeTask {
     pub submitter: String,
     /// Type et paramètres du calcul
     pub task_type: TaskType,
-    /// Récompense en SOVA (le soumetteur paye)
-    pub reward_sova: f64,
-    /// Montant brûlé (2% du reward)
-    pub burn_amount: f64,
+    /// Récompense en µQTA (le soumetteur paye)
+    pub reward_qta: u64,
+    /// Montant brûlé en µQTA (2% du reward)
+    pub burn_amount: u64,
     /// Deadline (RFC3339)
     pub deadline: String,
     /// Statut courant
@@ -101,14 +108,19 @@ pub struct Marketplace {
     pub stats: MarketplaceStats,
 }
 
+/// Stats marketplace. Montants monétaires en µQTA.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MarketplaceStats {
     pub tasks_submitted: u64,
     pub tasks_completed: u64,
     pub tasks_failed: u64,
-    pub total_sova_paid: f64,
-    pub total_sova_burned: f64,
+    /// µQTA payés cumulés
+    pub total_qta_paid: u64,
+    /// µQTA brûlés cumulés
+    pub total_qta_burned: u64,
     pub total_watt_minutes: f64,
+    /// CRIT-2: µQTA currently locked in escrow (not yet paid or refunded)
+    pub escrow_locked: u64,
 }
 
 impl Marketplace {
@@ -120,29 +132,29 @@ impl Marketplace {
         }
     }
 
-    /// Soumettre une nouvelle tâche de calcul.
-    /// Le soumetteur doit avoir reward_sova + burn sur son solde.
+    /// Soumettre une nouvelle tâche de calcul (reward QUANTA).
+    /// Le soumetteur doit avoir reward_qta + burn sur son solde.
     pub fn submit_task(
         &mut self,
         submitter: &str,
         task_type: TaskType,
-        reward_sova: f64,
+        reward_qta: u64,
         deadline: &str,
         estimated_watt_minutes: f64,
     ) -> Result<ComputeTask, String> {
-        if reward_sova <= 0.0 {
+        if reward_qta == 0 {
             return Err("Reward must be positive".into());
         }
 
-        let burn_amount = reward_sova * TASK_BURN_RATE;
-        let payload = format!("{}:{}:{:?}:{}", submitter, reward_sova, task_type, deadline);
+        let burn_amount = compute_task_burn(reward_qta);
+        let payload = format!("{}:{}:{:?}:{}", submitter, reward_qta, task_type, deadline);
         let id = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
 
         let task = ComputeTask {
             id: id[..32].to_string(),
             submitter: submitter.to_string(),
             task_type,
-            reward_sova,
+            reward_qta,
             burn_amount,
             deadline: deadline.to_string(),
             status: TaskStatus::Pending,
@@ -152,8 +164,53 @@ impl Marketplace {
 
         self.tasks.insert(task.id.clone(), task.clone());
         self.stats.tasks_submitted += 1;
-        self.stats.total_sova_burned += burn_amount;
+        self.stats.total_qta_burned += burn_amount;
         Ok(task)
+    }
+
+    /// B2 — Submit a task WITH balance verification and escrow locking.
+    ///
+    /// This is the secure version of `submit_task()` that prevents submitting
+    /// tasks without sufficient funds.
+    ///
+    /// Flow:
+    /// 1. Verify submitter has balance ≥ reward + burn (2%)
+    /// 2. Lock funds by moving them to ESCROW account in the ledger
+    /// 3. Register the task in the marketplace
+    pub fn submit_task_with_escrow(
+        &mut self,
+        ledger: &mut super::ledger::Ledger,
+        submitter: &str,
+        task_type: TaskType,
+        reward_qta: u64,
+        deadline: &str,
+        estimated_watt_minutes: f64,
+    ) -> Result<ComputeTask, String> {
+        if reward_qta == 0 {
+            return Err("Reward must be positive".into());
+        }
+
+        let burn_amount = compute_task_burn(reward_qta);
+        let total_cost = reward_qta + burn_amount; // reward to worker + 2% burn
+
+        // B2: Check balance BEFORE creating the task
+        let balance = ledger.balance_of(submitter);
+        if balance < total_cost {
+            return Err(format!(
+                "Insufficient balance for task: need {:.6} QUANTA (reward {:.6} + burn {:.6}), have {:.6}",
+                total_cost as f64 / MICRO as f64,
+                reward_qta as f64 / MICRO as f64,
+                burn_amount as f64 / MICRO as f64,
+                balance as f64 / MICRO as f64,
+            ));
+        }
+
+        // CRIT-2 fix: lock the submitter's balance into ESCROW.
+        let _escrow_tx = ledger.build_escrow_lock_tx(submitter, total_cost);
+        self.stats.escrow_locked += total_cost;
+
+        // Create the task (delegates to internal submit_task)
+        self.submit_task(submitter, task_type, reward_qta, deadline, estimated_watt_minutes)
     }
 
     /// Un worker réclame une tâche en attente.
@@ -194,17 +251,27 @@ impl Marketplace {
         Ok(())
     }
 
-    /// Valide un résultat et libère le paiement.
+    /// Valide un résultat et libère le paiement depuis l'escrow.
     /// En Phase 2 : validation simple (le résultat existe).
     /// En Phase 4 : vérification ZK proof via RISC Zero.
-    pub fn validate_and_pay(&mut self, task_id: &str) -> Result<(String, f64), String> {
+    /// CRIT-2 fix: now takes a mutable ledger to credit the worker from escrow.
+    pub fn validate_and_pay(
+        &mut self,
+        task_id: &str,
+        ledger: &mut super::ledger::Ledger,
+    ) -> Result<(String, u64), String> {
         let task = self.tasks.get_mut(task_id).ok_or("Task not found")?;
 
         match &task.status {
             TaskStatus::Submitted { worker_id, result_hash } => {
                 let worker = worker_id.clone();
                 let _hash = result_hash.clone();
-                let reward = task.reward_sova - task.burn_amount;
+                // task.burn_amount is already 2% of reward_qta; net = reward - burn
+                let net_reward = task.reward_qta - task.burn_amount;
+
+                // CRIT-2: Release escrow funds to worker via ledger
+                ledger.escrow_release_to(&worker, net_reward);
+                // The burn_amount stays burned (already debited from submitter via ESCROW)
 
                 task.status = TaskStatus::Completed {
                     worker_id: worker.clone(),
@@ -212,26 +279,34 @@ impl Marketplace {
                 };
 
                 self.stats.tasks_completed += 1;
-                self.stats.total_sova_paid += reward;
+                self.stats.total_qta_paid += net_reward;
+                self.stats.escrow_locked = self.stats.escrow_locked
+                    .saturating_sub(task.reward_qta + task.burn_amount);
 
                 // Accumuler les watt-minutes pour le Shapley
                 if let Some(result) = self.results.get(task_id) {
                     self.stats.total_watt_minutes += result.watts_used * result.execution_secs / 60.0;
                 }
 
-                Ok((worker, reward))
+                Ok((worker, net_reward))
             }
             _ => Err("Task not in submitted state".into()),
         }
     }
 
     /// Expire les tâches dont la deadline est dépassée.
-    pub fn expire_tasks(&mut self) {
+    /// CRIT-2 fix: now takes a ledger to refund escrowed funds to the submitter.
+    pub fn expire_tasks(&mut self, ledger: &mut super::ledger::Ledger) {
         let now = Utc::now().to_rfc3339();
         for task in self.tasks.values_mut() {
             if matches!(task.status, TaskStatus::Pending | TaskStatus::Claimed { .. })
                 && task.deadline < now
             {
+                // CRIT-2: Refund escrowed funds to submitter on expiry
+                let total_cost = task.reward_qta + task.burn_amount;
+                ledger.escrow_release_to(&task.submitter, total_cost);
+                self.stats.escrow_locked = self.stats.escrow_locked.saturating_sub(total_cost);
+
                 task.status = TaskStatus::Expired;
                 self.stats.tasks_failed += 1;
             }
@@ -289,11 +364,12 @@ mod tests {
     #[test]
     fn test_submit_and_claim() {
         let mut mp = Marketplace::new();
+        // 10 QUANTA reward QUANTA
         let task = mp.submit_task(
             "submitter_pk", TaskType::Scientific { program_hash: "abc".into() },
-            10.0, "2030-01-01T00:00:00Z", 500.0
+            10 * MICRO, "2030-01-01T00:00:00Z", 500.0
         ).unwrap();
-        assert_eq!(task.burn_amount, 0.2); // 2% of 10
+        assert_eq!(task.burn_amount, MICRO / 5); // 2% of 10 QUANTA = 0.2 QUANTA = 200_000 µQTA
         assert!(matches!(task.status, TaskStatus::Pending));
 
         mp.claim_task(&task.id, "worker_pk").unwrap();
@@ -304,9 +380,11 @@ mod tests {
     #[test]
     fn test_full_lifecycle() {
         let mut mp = Marketplace::new();
+        let mut ledger = super::super::ledger::Ledger::new();
+        // 100 QUANTA reward
         let task = mp.submit_task(
             "sub", TaskType::GenericWasm { wasm_hash: "hash".into() },
-            100.0, "2030-01-01T00:00:00Z", 1000.0
+            100 * MICRO, "2030-01-01T00:00:00Z", 1000.0
         ).unwrap();
 
         mp.claim_task(&task.id, "worker").unwrap();
@@ -322,9 +400,10 @@ mod tests {
         };
         mp.submit_result(result).unwrap();
 
-        let (worker, reward) = mp.validate_and_pay(&task.id).unwrap();
+        let (worker, reward) = mp.validate_and_pay(&task.id, &mut ledger).unwrap();
         assert_eq!(worker, "worker");
-        assert!((reward - 98.0).abs() < 0.01); // 100 - 2% burn = 98
+        // 100 QUANTA - 2% burn = 98 QUANTA = 98 * MICRO µQTA
+        assert_eq!(reward, 98 * MICRO);
         assert_eq!(mp.stats.tasks_completed, 1);
     }
 
@@ -333,7 +412,7 @@ mod tests {
         let mut mp = Marketplace::new();
         let task = mp.submit_task(
             "sub", TaskType::Scientific { program_hash: "x".into() },
-            50.0, "2030-01-01T00:00:00Z", 200.0
+            50 * MICRO, "2030-01-01T00:00:00Z", 200.0
         ).unwrap();
         mp.claim_task(&task.id, "worker_a").unwrap();
 

@@ -31,7 +31,7 @@ pub enum AlgorithmStatus {
 }
 
 impl CryptoBOM {
-    /// Current TITAN v4 CBOM — used for audit reporting
+    /// Current QUANTA v4 CBOM — used for audit reporting
     pub fn current() -> Self {
         Self {
             signing: AlgorithmEntry {

@@ -1,4 +1,4 @@
-# SOVA — The World's Computational Energy Protocol
+# QUANTA — The World's Computational Energy Protocol
 
 ## A Decentralized Network Where Every Computer Turns Its Energy Into Value — For Its Owner and For Science
 
@@ -8,7 +8,7 @@
 
 ## Abstract
 
-SOVA is a decentralized protocol that transforms the electrical energy consumed by everyday computers into a verifiable, tradeable digital asset. Unlike Proof-of-Work cryptocurrencies that deliberately waste energy, SOVA measures the real power consumption of participating nodes and rewards them proportionally from a fixed network-wide emission pool. Idle computing resources are automatically directed toward useful scientific computation — protein folding, climate modeling, AI training — creating a distributed supercomputer funded by the collective. The protocol uses Conflict-free Replicated Data Types (CRDTs) for lock-free consensus, zero-knowledge proofs (RISC Zero) for trustless work verification, and Shapley Value distribution for mathematically fair rewards. A Burn-and-Mint Equilibrium mechanism prevents inflation while keeping supply unlimited. A DeSci DAO allocates 5% of all emissions to fund scientific research voted on by participants.
+QUANTA is a decentralized protocol that transforms the electrical energy consumed by everyday computers into a verifiable, tradeable digital asset. Unlike Proof-of-Work cryptocurrencies that deliberately waste energy, QUANTA measures the real power consumption of participating nodes and rewards them proportionally from a fixed network-wide emission pool. Idle computing resources are automatically directed toward useful scientific computation — protein folding, climate modeling, AI training — creating a distributed supercomputer funded by the collective. The protocol uses Conflict-free Replicated Data Types (CRDTs) for lock-free consensus, zero-knowledge proofs (RISC Zero) for trustless work verification, and Shapley Value distribution for mathematically fair rewards. A Burn-and-Mint Equilibrium mechanism prevents inflation while keeping supply unlimited. A DeSci DAO allocates 5% of all emissions to fund scientific research voted on by participants.
 
 **The first protocol where consuming energy = creating value = advancing science.**
 
@@ -43,10 +43,10 @@ Meanwhile, Bitcoin consumes 150 TWh per year to solve puzzles with no purpose ot
 
 ### 1.2 The Solution
 
-SOVA connects these two problems:
+QUANTA connects these two problems:
 
-1. **Your computer already consumes energy.** SOVA measures it and rewards you proportionally.
-2. **Your idle CPU/GPU can do useful work.** SOVA directs it toward science, AI training, and 3D rendering.
+1. **Your computer already consumes energy.** QUANTA measures it and rewards you proportionally.
+2. **Your idle CPU/GPU can do useful work.** QUANTA directs it toward science, AI training, and 3D rendering.
 3. **Everyone benefits.** More participants = more total energy = higher token value for all.
 
 ### 1.3 Design Principles
@@ -64,35 +64,35 @@ SOVA connects these two problems:
 
 ### 2.1 Fixed Network Emission
 
-The network emits a **constant** 100 SOVA per hour, regardless of participant count.
+The network emits a **constant** 100 QUANTA per hour, regardless of participant count.
 
 ```
-NETWORK_EMISSION_PER_HOUR = 100.0 SOVA  // always, forever
+NETWORK_EMISSION_PER_HOUR = 100.0 QUANTA  // always, forever
 ```
 
 This rate does not change. No halving. No epoch. No algorithm adjusts it.
 
 ### 2.2 Proportional Distribution
 
-The 100 SOVA/hour are distributed among all active nodes proportionally to their measured energy consumption:
+The 100 QUANTA/hour are distributed among all active nodes proportionally to their measured energy consumption:
 
 ```
 my_share = (my_watts / total_network_watts) × NETWORK_EMISSION_PER_HOUR
 ```
 
 A laptop at 15W in a network totaling 50,000W:
-→ 15/50,000 × 100 = 0.03 SOVA/hour
+→ 15/50,000 × 100 = 0.03 QUANTA/hour
 
 A video editing workstation at 300W:
-→ 300/50,000 × 100 = 0.6 SOVA/hour
+→ 300/50,000 × 100 = 0.6 QUANTA/hour
 
 ### 2.3 Why More Users = Higher Value
 
 ```
-value(1 SOVA) = total_network_energy_kWh / total_SOVA_in_circulation
+value(1 QUANTA) = total_network_energy_kWh / total_QUANTA_in_circulation
 ```
 
-| Participants | Total Power | SOVA/hour | Value per SOVA | Earnings/hour (50W node) |
+| Participants | Total Power | QUANTA/hour | Value per QUANTA | Earnings/hour (50W node) |
 |-------------|-------------|-----------|---------------|--------------------------|
 | 100 | 5 kW | 100 | €0.0075 | €0.0075 |
 | 10,000 | 500 kW | 100 | €0.75 | €0.75 |
@@ -128,23 +128,23 @@ The protocol embeds verified electricity prices for 33 countries (Eurostat/EIA Q
 
 Country detection is performed offline via system timezone. No external API calls.
 
-The network-weighted average price creates natural **energy arbitrage**: a miner in India (€0.072/kWh) produces SOVA at low cost, while a buyer in Denmark (€0.368/kWh) prefers purchasing over mining. Both profit.
+The network-weighted average price creates natural **energy arbitrage**: a miner in India (€0.072/kWh) produces QUANTA at low cost, while a buyer in Denmark (€0.368/kWh) prefers purchasing over mining. Both profit.
 
 ---
 
 ## 3. Three Contribution Modes
 
-Every node operates in one of three modes, switching automatically based on system load:
+Every node operates in one of three modes, switching automatically based on system load. **All modes include validation** — verifying other nodes' blocks is automatic and rewarded via the Shapley "validation" factor (20%).
 
 ### 3.1 Active Mode — You Work, You Mine
 
-When the user is actively using their computer (coding, editing video, gaming), the CPU/GPU consumes watts. These watts are measured in real time and converted to SOVA.
+When the user is actively using their computer (coding, editing video, gaming), the CPU/GPU consumes watts. These watts are measured in real time and converted to QUANTA.
 
-- SOVA runs in background (<1% CPU overhead)
+- QUANTA runs in background (<1% CPU overhead)
 - No user action required
-- Higher workload = more watts = more SOVA
+- Higher workload = more watts = more QUANTA
 
-**Multiplier: ×1.0**
+→ You earn on **all 4 Shapley axes**: energy (30%) + work (35% if compute tasks available) + validation (20%) + uptime (15%).
 
 ### 3.2 Research Mode — Your Idle Computer Helps Science
 
@@ -153,22 +153,20 @@ When the computer is idle (night, break, screensaver), it automatically executes
 - **Scientific computing** via BOINC (protein folding, climate modeling, astrophysics)
 - **AI training** via Federated Learning (privacy-preserving, data never leaves the machine)
 - **3D rendering** for studios and artists
-- **Custom tasks** submitted by laboratories paying in SOVA
+- **Custom tasks** submitted by laboratories paying in QUANTA
 
 The work is cryptographically verified (see Section 5).
 
-**Multiplier: ×2.0** (verified useful work)
+→ **The most profitable mode.** You score high on all 4 axes, especially useful work (35%).
 
-### 3.3 Validator Mode — You Verify, You Earn
+### 3.3 Guardian Mode — You Secure the Network
 
-When the CPU is under 10% utilization and no research tasks are queued, the node acts as a validator:
+Low-power device (Raspberry Pi, old laptop, $1/month VPS) → the node doesn't actively mine but **verifies every block**, confirms transactions, and maintains network consistency.
 
-- Receives blocks from peers via gossip
-- Verifies signatures and ZK-proofs
-- Confirms transactions
-- Inserts verified data into local DAG
-
-**Multiplier: ×0.1** (security contribution)
+→ You earn via **validation (20%) + uptime (15%) = 35% of Shapley**. In a 1,000-node network, a guardian earns ~0.035 QTA/h. That's modest, but:
+  - **Near-zero cost** (a Raspberry Pi consumes 3W = €0.0004/h)
+  - **Net positive** as soon as QTA > €0.01
+  - **Essential to the network** — more guardians = more security for everyone
 
 ---
 
@@ -187,7 +185,7 @@ Lloyd Shapley's value function (Nobel Prize in Economics, 2012) is the only math
 - **Linearity**: Total reward equals the sum of individual contributions
 - **Null Player**: Zero contribution = zero reward
 
-### 4.3 SOVA's Shapley Score
+### 4.3 QUANTA's Shapley Score
 
 ```
 Shapley(node_i) = 0.30 × energy_factor        // watts consumed (real cost)
@@ -202,7 +200,7 @@ This ensures that a node contributing useful computation earns more than one mer
 
 ### 4.4 Approximation
 
-Exact Shapley computation is O(2^n) — intractable for large networks. SOVA uses randomized Monte Carlo approximation, achieving O(n) complexity with ε < 0.01 error margin, as documented in cooperative game theory literature.
+Exact Shapley computation is O(2^n) — intractable for large networks. QUANTA uses randomized Monte Carlo approximation, achieving O(n) complexity with ε < 0.01 error margin, as documented in cooperative game theory literature.
 
 ---
 
@@ -235,7 +233,7 @@ Step 4: Node publishes: (result, proof, CPU_model)
 Step 5: Validators verify the proof (~1ms, no re-computation)
 Step 6: Energy is DERIVED:
         proven_flops × joules_per_flop[CPU_model] = certified_energy
-Step 7: Node receives SOVA proportional to certified energy
+Step 7: Node receives QUANTA proportional to certified energy
 ```
 
 **RISC Zero**: Open-source zkVM, Rust-native, $40M funded, production-deployed. The developer writes normal Rust code; RISC Zero automatically generates a cryptographic proof that the code executed correctly with the given inputs/outputs.
@@ -258,13 +256,13 @@ Energy-per-FLOP table (public data):
 
 ### 6.1 Emission
 
-- **Rate**: 100 SOVA/hour, constant, forever
+- **Rate**: 100 QUANTA/hour, constant, forever
 - **Distribution**: Proportional to Shapley score
-- **DeSci Reserve**: 5% (5 SOVA/hour) → DeSci DAO treasury
+- **DeSci Reserve**: 5% (5 QUANTA/hour) → DeSci DAO treasury
 
 ### 6.2 Burn-and-Mint Equilibrium (BME)
 
-Every network action burns a percentage of SOVA tokens:
+Every network action burns a percentage of QUANTA tokens:
 
 | Action | Burn Rate |
 |--------|-----------|
@@ -280,19 +278,19 @@ Inspired by Render Network (BME model, $4B market cap) and Ethereum EIP-1559.
 ### 6.3 Floor Price
 
 ```
-floor_price(1 SOVA) = total_network_kWh × avg_electricity_price / total_SOVA
+floor_price(1 QUANTA) = total_network_kWh × avg_electricity_price / total_QUANTA
 ```
 
 The floor price rises mechanically as the network grows. The market price on exchanges can exceed the floor (supply/demand) but cannot rationally fall below the energy cost to produce it.
 
 ### 6.4 Demand Sources
 
-Unlike pure energy certificates, SOVA has real demand drivers:
+Unlike pure energy certificates, QUANTA has real demand drivers:
 
-1. **Laboratories** pay SOVA to submit computation tasks to the network
-2. **AI startups** pay SOVA for distributed training and inference
-3. **Studios** pay SOVA for 3D rendering
-4. **Validators** stake SOVA for governance rights
+1. **Laboratories** pay QUANTA to submit computation tasks to the network
+2. **AI startups** pay QUANTA for distributed training and inference
+3. **Studios** pay QUANTA for 3D rendering
+4. **Validators** stake QUANTA for governance rights
 5. **Traders** arbitrage geographic energy price differences
 
 ---
@@ -306,7 +304,7 @@ Unlike pure energy certificates, SOVA has real demand drivers:
 
 CRDT types used:
 - **PN-Counters**: Account balances (increment/decrement)
-- **G-Counters**: Network metrics (total_watts, total_sova_minted, total_kwh — monotonically increasing)
+- **G-Counters**: Network metrics (total_watts, total_quanta_minted, total_kwh — monotonically increasing)
 
 ### 7.2 Merkle DAG
 
@@ -338,7 +336,7 @@ These algebraic properties guarantee **eventual consistency** without leader ele
 
 ### 8.1 Iroh QUIC
 
-SOVA uses [Iroh](https://iroh.computer/) for peer-to-peer connectivity:
+QUANTA uses [Iroh](https://iroh.computer/) for peer-to-peer connectivity:
 
 - **QUIC**: UDP-based, encrypted, multiplexed
 - **NAT traversal**: Built-in hole punching via relay servers
@@ -388,18 +386,18 @@ Malicious nodes (fake watts, invalid proofs, network attacks) face progressive p
 ```
 Tier 1 — FREE (BOINC)
   → Volunteer scientific computing
-  → Funded by network emission (95 SOVA/h)
+  → Funded by network emission (95 QUANTA/h)
   → Every idle node contributes automatically
 
 Tier 2 — PAID (Tasks)
   → Labs/studios submit compute jobs
-  → Pay in SOVA (2% burned)
+  → Pay in QUANTA (2% burned)
   → Nodes execute and earn per-task payment
 
 Tier 3 — PREMIUM (Dedicated GPU)
   → Continuous GPU rental
   → Reverse auction (like Akash Network)
-  → SOVA smart contract manages payment
+  → QUANTA smart contract manages payment
 ```
 
 ### 10.2 Federated Learning
@@ -407,10 +405,10 @@ Tier 3 — PREMIUM (Dedicated GPU)
 For AI workloads requiring data privacy:
 
 1. A lab submits a model architecture + partitioned dataset
-2. Each SOVA node trains on its local partition
+2. Each QUANTA node trains on its local partition
 3. Gradients are aggregated via Secure Aggregation (encrypted)
 4. The improved global model is published in the DAG
-5. The lab pays in SOVA; participating nodes earn ×3 multiplier
+5. The lab pays in QUANTA; participating nodes earn ×3 multiplier
 
 Data never leaves the participant's machine → native GDPR compliance.
 
@@ -419,7 +417,7 @@ Data never leaves the participant's machine → native GDPR compliance.
 Nodes may allocate 10-100 GB of disk space for distributed storage:
 - Research datasets, AI models, task results
 - Verified via periodic Proof-of-Replication challenges
-- Bonus: ×0.5 on SOVA earnings (additive to compute rewards)
+- Bonus: ×0.5 on QUANTA earnings (additive to compute rewards)
 - Inspired by Filecoin ($10B market cap)
 
 ---
@@ -428,13 +426,13 @@ Nodes may allocate 10-100 GB of disk space for distributed storage:
 
 ### 11.1 Treasury
 
-5% of all emissions (5 SOVA/hour) flow to the DeSci treasury.
+5% of all emissions (5 QUANTA/hour) flow to the DeSci treasury.
 
 ### 11.2 Governance
 
-- **1 staked SOVA = 1 vote**
+- **1 staked QUANTA = 1 vote**
 - **Proposals**: Fund a scientific project, adjust parameters (emission, burn rates, energy prices)
-- **Quorum**: 10% of staked SOVA
+- **Quorum**: 10% of staked QUANTA
 - **Majority**: 66% to pass
 - **Execution**: Automatic via on-chain logic
 
@@ -460,7 +458,7 @@ The CRDT PN-Counter tracks balances as monotonic deltas. A debit cannot be repla
 
 ### 12.4 Consensus Capture
 
-SOVA uses CRDTs, not voting. There is no "majority" to capture. State convergence is guaranteed by algebraic properties of the data structures. A 51% attack is architecturally impossible.
+QUANTA uses CRDTs, not voting. There is no "majority" to capture. State convergence is guaranteed by algebraic properties of the data structures. A 51% attack is architecturally impossible.
 
 ### 12.5 Task Poisoning
 
@@ -481,20 +479,20 @@ A malicious task submitter could attempt to distribute harmful code. Mitigation:
 | **Phase 2: Hardening** | 1 month | Cross-validation, passive validator, public testnet | 📋 |
 | **Phase 3: Useful Work** | 2-4 months | BOINC integration, task marketplace, DeSci DAO | 📋 |
 | **Phase 4: ZK-Proof** | 6+ months | RISC Zero integration, trustless verification | 📋 |
-| **Phase 5: Bridge** | 3-6 months | wSOVA ERC-20, Uniswap listing | 📋 |
+| **Phase 5: Bridge** | 3-6 months | wQUANTA ERC-20, Uniswap listing | 📋 |
 | **Phase 6: Scale** | 12+ months | Federated Learning, Proof of Storage, GPU marketplace | 📋 |
 
 ---
 
 ## 14. Conclusion
 
-SOVA represents a fundamental rethinking of what a cryptocurrency can be. By combining measured energy consumption (not wasted), useful scientific computation (not empty hashing), Shapley-fair distribution (not first-come-first-served), zero-knowledge verification (not trust), and democratic science funding (not centralized grants), the protocol creates a system where every participant benefits from every other participant's presence.
+QUANTA represents a fundamental rethinking of what a cryptocurrency can be. By combining measured energy consumption (not wasted), useful scientific computation (not empty hashing), Shapley-fair distribution (not first-come-first-served), zero-knowledge verification (not trust), and democratic science funding (not centralized grants), the protocol creates a system where every participant benefits from every other participant's presence.
 
 The network is not a zero-sum game. It is a positive-sum system where more participants means more total energy, more computational power for science, more demand from research institutions, and higher value for everyone.
 
 The reference implementation is written in Rust for memory safety and performance, runs as a lightweight desktop application via Tauri, and communicates over Iroh's QUIC transport with built-in NAT traversal. The core protocol has been verified with 25 passing tests, zero compiler warnings, and a successful 2-node P2P gossip exchange.
 
-**Install SOVA. Your computer helps cure cancer while you sleep. You get paid for it.**
+**Install QUANTA. Your computer helps cure cancer while you sleep. You get paid for it.**
 
 ---
 

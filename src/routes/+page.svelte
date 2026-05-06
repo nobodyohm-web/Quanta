@@ -1,12 +1,18 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import NavBar from "$lib/NavBar.svelte";
+  import Sidebar from "$lib/Sidebar.svelte";
   import Wallet from "$lib/Wallet.svelte";
   import Dashboard from "$lib/Dashboard.svelte";
+  import Network from "$lib/Network.svelte";
+  import Profile from "$lib/Profile.svelte";
+  import Explorer from "$lib/Explorer.svelte";
+  import Browser from "$lib/Browser.svelte";
+  import PageBuilder from "$lib/PageBuilder.svelte";
+  import Forums from "$lib/Forums.svelte";
+  import Subscriptions from "$lib/Subscriptions.svelte";
   import CommandPalette from "$lib/CommandPalette.svelte";
   import Welcome from "$lib/Welcome.svelte";
   import StrengthMeter from "$lib/StrengthMeter.svelte";
-  import TopBar from "$lib/TopBar.svelte";
   import HelpModal from "$lib/HelpModal.svelte";
   import Settings from "$lib/Settings.svelte";
   import { getPrefs, applyTheme } from "$lib/prefs";
@@ -14,7 +20,7 @@
 
   type Step = "check" | "welcome" | "create" | "unlock" | "recovery" | "confirm";
 
-  let view = $state("wallet");
+  let view = $state("dashboard");
   let ready = $state(false);
   let loading = $state(true);
   let step = $state<Step>("check");
@@ -45,7 +51,7 @@
       const t = e.target as HTMLElement;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       const map: Record<string, string> = {
-        "1": "wallet", "2": "network", "3": "settings",
+        "1": "dashboard", "2": "wallet", "3": "network", "4": "profile", "5": "explorer",
       };
       const v = map[e.key];
       if (v) { e.preventDefault(); nav(v); }
@@ -135,12 +141,23 @@
 {#if loading}
   <div class="load-screen">
     <div class="load-inner">
-      <span class="load-logo">SOVA</span>
+      <span class="load-logo">QUANTA</span>
       <span class="load-sub">Chargement…</span>
     </div>
   </div>
 {:else if !ready && step === "welcome"}
-  <Welcome onContinue={() => step = "create"} />
+  <Welcome
+    onCreated={async (created_pk) => {
+      pk = created_pk;
+      try {
+        recoveryKey = await invoke<string>("get_recovery_key");
+      } catch { recoveryKey = ""; }
+      // Skip the forced recovery screen — go straight to the app.
+      // Recovery key remains visible later via Profile / Settings.
+      ready = true;
+    }}
+    onSwitchToUnlock={() => step = "unlock"}
+  />
 
 {:else if !ready && step === "recovery"}
   <div class="setup-screen">
@@ -224,15 +241,21 @@
     </div>
   </div>
 {:else}
-  <div class="app">
-    <TopBar onHelp={() => helpOpen = true} />
-    <main class="main">
-      {#if view === "wallet"}<Wallet />
-      {:else if view === "network"}<Dashboard />
+  <div class="app-shell">
+    <Sidebar activeView={view} onNavigate={nav} />
+    <main class="main-content">
+      {#if view === "browser"}<Browser />
+      {:else if view === "builder"}<PageBuilder />
+      {:else if view === "forums"}<Forums />
+      {:else if view === "subscriptions"}<Subscriptions />
+      {:else if view === "dashboard"}<Dashboard />
+      {:else if view === "wallet"}<Wallet />
+      {:else if view === "network"}<Network />
+      {:else if view === "profile"}<Profile />
+      {:else if view === "explorer"}<Explorer />
       {:else if view === "settings"}<Settings />
-      {:else}<Wallet />{/if}
+      {:else}<Dashboard />{/if}
     </main>
-    <NavBar activeView={view} onNavigate={nav} />
   </div>
   <CommandPalette isOpen={cmdOpen} onClose={() => cmdOpen = false} onCommand={handleCmd} />
   <HelpModal isOpen={helpOpen} onClose={() => helpOpen = false} />
@@ -325,13 +348,5 @@
     font-size: 11px; font-weight: 700;
   }
 
-  .app {
-    display: flex; flex-direction: column;
-    height: 100vh; overflow: hidden;
-    background: var(--color-bg-0);
-  }
-  .main {
-    flex: 1; overflow: hidden;
-    background: var(--color-bg-0);
-  }
+  /* Layout handled by app.css .app-shell and .main-content */
 </style>

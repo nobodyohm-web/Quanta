@@ -42,7 +42,7 @@
 
     <div class="help-tabs">
       <button class="help-tab" class:active={tab === "start"} onclick={() => tab = "start"}>Démarrage</button>
-      <button class="help-tab" class:active={tab === "economy"} onclick={() => tab = "economy"}>Économie ATN</button>
+      <button class="help-tab" class:active={tab === "economy"} onclick={() => tab = "economy"}>Économie QUANTA</button>
       <button class="help-tab" class:active={tab === "security"} onclick={() => tab = "security"}>Sécurité</button>
       <button class="help-tab" class:active={tab === "shortcuts"} onclick={() => tab = "shortcuts"}>Raccourcis</button>
     </div>
@@ -51,34 +51,32 @@
       {#if tab === "start"}
         <h3 class="help-h3">Premiers pas</h3>
         <ol class="help-ol">
-          <li><b>Créez du contenu</b> — chaque site publié vaut 1 ATN et +3 points de confiance.</li>
+          <li><b>Créez du contenu</b> — chaque site publié génère du QUANTA et booste votre confiance.</li>
           <li><b>Publiez en P2P</b> — un clic, et votre site devient un subspace synchronisé via Iroh QUIC.</li>
-          <li><b>Recevez des vues, likes, aides</b> — chaque interaction est une transaction signée sur votre chaîne ATN.</li>
-          <li><b>Restez connecté</b> — le simple fait d'être en ligne mine 1 ATN/heure (énergie réelle convertie).</li>
+          <li><b>Restez connecté</b> — le simple fait d'être en ligne mine du QUANTA (énergie réelle convertie, Shapley).</li>
+          <li><b>Recevez des interactions</b> — chaque action est une transaction signée sur votre chaîne QUANTA.</li>
         </ol>
         <p class="help-tip">Astuce : utilisez ⌘+K pour naviguer instantanément entre les vues.</p>
 
       {:else if tab === "economy"}
-        <h3 class="help-h3">Comment l'ATN prend de la valeur</h3>
-        <p class="help-p">Chaque ATN est adossé à une dépense énergétique réelle (15W × kWh × 0.15 €/kWh). Cela fixe une valeur plancher : <b>1 ATN ≥ 0.0023 EUR</b>. Au-delà, c'est l'utilité du réseau qui détermine le prix.</p>
+        <h3 class="help-h3">Comment le QUANTA prend de la valeur</h3>
+        <p class="help-p">Chaque QUANTA est adossé à une dépense énergétique réelle. Le prix de l'énergie de votre pays fixe une valeur plancher. Au-delà, c'est l'utilité du réseau qui détermine le prix.</p>
 
         <table class="help-table">
-          <thead><tr><th>Action</th><th>Récompense</th><th>Confiance</th></tr></thead>
+          <thead><tr><th>Mécanisme</th><th>Détail</th></tr></thead>
           <tbody>
-            <tr><td>Créer un site</td><td>+1 ATN</td><td>+3</td></tr>
-            <tr><td>Vue reçue</td><td>+0.1 ATN</td><td>—</td></tr>
-            <tr><td>Like reçu</td><td>+1 ATN</td><td>+1</td></tr>
-            <tr><td>Like donné</td><td>+0.1 ATN</td><td>—</td></tr>
-            <tr><td>Aide validée</td><td>+5 ATN</td><td>+5</td></tr>
-            <tr><td>Mining (1 min)</td><td>+0.0167 ATN</td><td>—</td></tr>
+            <tr><td>Émission</td><td>100 QUANTA/h (fixe, pas de halving)</td></tr>
+            <tr><td>Distribution</td><td>Shapley Value (énergie 30% + travail 35% + validation 20% + uptime 15%)</td></tr>
+            <tr><td>Burn</td><td>1% de chaque transfert détruit (déflationniste)</td></tr>
+            <tr><td>Plancher</td><td>Indexé sur le coût énergie réel du réseau</td></tr>
           </tbody>
         </table>
 
-        <p class="help-p">Toutes les transactions sont scellées dans des blocs immuables au moins toutes les 5 minutes, ou dès que 10 transactions sont en attente.</p>
+        <p class="help-p">Toutes les transactions sont scellées dans des blocs immuables et propagées via gossip.</p>
 
       {:else if tab === "security"}
         <h3 class="help-h3">Garanties cryptographiques</h3>
-        <p class="help-p">TITAN n'utilise que des primitives auditées. Aucun protocole maison.</p>
+        <p class="help-p">QUANTA n'utilise que des primitives cryptographiques auditées. Aucun protocole maison.</p>
         {#if audit}
           <div class="help-grid">
             <div class="help-cell">

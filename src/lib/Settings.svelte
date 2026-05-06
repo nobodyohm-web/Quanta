@@ -6,6 +6,9 @@
   let nodeTicket = $state<string>("");
   let ticketCopied = $state(false);
   let economy = $state<any>(null);
+  let peerInput = $state("");
+  let connectStatus = $state<"idle" | "ok" | "error">("idle");
+  let connectMsg = $state("");
 
   $effect(() => {
     setPrefs(prefs);
@@ -26,6 +29,22 @@
     await navigator.clipboard.writeText(nodeTicket);
     ticketCopied = true;
     setTimeout(() => ticketCopied = false, 1600);
+  }
+
+  async function connectPeer() {
+    if (!peerInput.trim()) return;
+    connectStatus = "idle";
+    connectMsg = "";
+    try {
+      await invoke("connect_peer", { peerId: peerInput.trim() });
+      connectStatus = "ok";
+      connectMsg = "Connecté !";
+      peerInput = "";
+      setTimeout(() => { connectStatus = "idle"; connectMsg = ""; }, 3000);
+    } catch (e: any) {
+      connectStatus = "error";
+      connectMsg = String(e);
+    }
   }
 
   function setTheme(t: "light" | "dark" | "auto") {
@@ -79,7 +98,7 @@
       <span class="set-label">Confirmation pour transferts > </span>
       <input class="input set-input" type="number" min="0" step="1"
         bind:value={prefs.confirmThreshold} placeholder="100" />
-      <span class="set-suffix">ATN</span>
+      <span class="set-suffix">QUANTA</span>
     </div>
   </section>
 
@@ -87,7 +106,7 @@
   <section class="set-card">
     <header class="set-head">
       <h2 class="set-title">Partage de nœud</h2>
-      <p class="set-sub">Donnez ce ticket à un pair pour qu'il vous trouve sur le réseau Iroh.</p>
+      <p class="set-sub">Donnez ce ticket à un pair pour qu'il vous trouve sur le réseau.</p>
     </header>
     <div class="ticket-box">
       <code class="ticket-val">{nodeTicket}</code>
@@ -97,50 +116,62 @@
     </div>
   </section>
 
-  <!-- Économie ATN -->
+  <!-- Connecter un pair -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">Connecter un pair</h2>
+      <p class="set-sub">Collez le ticket d'un autre nœud pour le rejoindre sur le réseau QUANTA.</p>
+    </header>
+    <div class="connect-box">
+      <input class="input connect-input" type="text" bind:value={peerInput}
+        placeholder="Coller le ticket du pair ici..." />
+      <button class="btn btn-accent" onclick={connectPeer} disabled={!peerInput.trim()}>Connecter</button>
+    </div>
+    {#if connectMsg}
+      <div class="connect-msg" class:ok={connectStatus === "ok"} class:err={connectStatus === "error"}>
+        {connectMsg}
+      </div>
+    {/if}
+  </section>
+
+  <!-- Économie QUANTA V2 -->
   {#if economy}
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Économie ATN — temps réel</h2>
-      <p class="set-sub">Halving Bitcoin-like, supply asymptotique 200k ATN.</p>
+      <h2 class="set-title">Économie QUANTA — temps réel</h2>
+      <p class="set-sub">Émission fixe 100 QUANTA/h. Pas de halving. Distribution Shapley.</p>
     </header>
     <div class="econ-grid">
       <div class="econ-cell">
         <span class="ec-lab">Supply circulante</span>
         <span class="ec-val">{economy.circulating?.toFixed(2) ?? "0"}</span>
-        <span class="ec-meta">ATN</span>
+        <span class="ec-meta">QUANTA</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Brûlés</span>
         <span class="ec-val">{economy.total_burned?.toFixed(2) ?? "0"}</span>
-        <span class="ec-meta">ATN — déflationniste</span>
+        <span class="ec-meta">QUANTA — déflationniste</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Halving #{economy.halving_epoch ?? 0}</span>
-        <span class="ec-val">{economy.atn_until_next_halving?.toFixed(0) ?? "0"}</span>
-        <span class="ec-meta">ATN avant le suivant</span>
+        <span class="ec-lab">Émission</span>
+        <span class="ec-val">100</span>
+        <span class="ec-meta">QUANTA/h (fixe, pas de halving)</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Votre taux</span>
         <span class="ec-val">{economy.mining_rate_per_hour?.toFixed(4) ?? "0"}</span>
-        <span class="ec-meta">ATN/h (trust × halving)</span>
+        <span class="ec-meta">QUANTA/h (Shapley × énergie)</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Trust score</span>
         <span class="ec-val">{economy.your_trust_score?.toFixed(0) ?? "0"}</span>
-        <span class="ec-meta">jusqu'à 3× le mining</span>
+        <span class="ec-meta">influence votre part Shapley</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Plancher énergie</span>
         <span class="ec-val">{economy.atn_floor_eur?.toFixed(4) ?? "0"}</span>
-        <span class="ec-meta">EUR par ATN</span>
+        <span class="ec-meta">EUR par QUANTA</span>
       </div>
-    </div>
-    <div class="econ-progress">
-      <div class="ep-bar">
-        <div class="ep-fill" style="width:{Math.min(100, ((economy.total_mined % 100000) / 1000)).toFixed(1)}%"></div>
-      </div>
-      <span class="ep-label">{(economy.total_mined % 100000).toFixed(0)} / 100 000 ATN avant le prochain halving</span>
     </div>
   </section>
   {/if}
@@ -151,8 +182,8 @@
       <h2 class="set-title">À propos</h2>
     </header>
     <div class="about">
-      <span class="about-line"><b>TITAN</b> · Sovereign Web Engine v5</span>
-      <span class="about-line">Tauri 2.0 · Svelte 5 · libSQL · Iroh QUIC · Ed25519 · BLAKE3 · AES-256-GCM · Argon2id</span>
+      <span class="about-line"><b>QUANTA</b> · Torus Protocol v2</span>
+      <span class="about-line">Tauri 2.0 · Svelte 5 · libSQL · Iroh QUIC · Ed25519 · BLAKE3 · AES-256-GCM</span>
       <span class="about-line muted">Vos données ne quittent jamais cet appareil sans votre signature.</span>
     </div>
   </section>
@@ -209,6 +240,32 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
+  .connect-box {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .connect-input {
+    flex: 1;
+    font-family: var(--font-mono); font-size: 11px;
+    padding: 10px 12px;
+    background: var(--color-bg-2); border: 1px solid var(--color-border);
+    border-radius: var(--radius); color: var(--color-text-1);
+  }
+  .connect-input::placeholder { color: var(--color-text-3); }
+  .btn-accent {
+    padding: 8px 16px; font-size: 12px; font-weight: 600;
+    background: var(--color-accent); color: #fff;
+    border: none; border-radius: var(--radius); cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn-accent:hover { opacity: 0.85; }
+  .btn-accent:disabled { opacity: 0.4; cursor: default; }
+  .connect-msg {
+    margin-top: 8px; padding: 6px 10px;
+    border-radius: var(--radius); font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .connect-msg.ok { background: rgba(34,197,94,0.12); color: #22c55e; }
+  .connect-msg.err { background: rgba(239,68,68,0.12); color: #ef4444; }
   .econ-grid {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
     margin-bottom: 12px;

@@ -1,15 +1,28 @@
-// lib.rs — Sovereign Web Engine v4 "Titan" Core
-// Defense-grade Actor system: security, p2p, search, storage
+//! QUANTA Protocol v1.0 — Energy-indexed Sovereign P2P Protocol.
+//!
+//! Architecture:
+//! - `security/` — Ed25519 identity, PQ Vault, hybrid crypto
+//! - `p2p/` — Gossip, ledger, reputation, consensus, mining, marketplace
+//! - `storage/` — SQLite persistence layer
+//!
+//! Background tasks (all respect `CancellationToken` for graceful shutdown):
+//! - Mining loop (60s interval)
+//! - Gossip outgoing drain (mpsc → iroh)
+//! - Gossip incoming dispatch (iroh → dispatcher)
+//! - Peer cleanup (30s dead-peer TTL)
+//! - State persistence (30s snapshot to SQLite)
 
 mod security;
 mod p2p;
 mod storage;
+mod commands_v3;
 
 use security::{CryptoEngine, pq_vault::PQVault};
 use p2p::willow_node::WillowNode;
 use storage::db::Database;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tauri::Manager;
 
 pub struct AppState {
     pub crypto: Mutex<CryptoEngine>,
@@ -17,7 +30,109 @@ pub struct AppState {
     pub node: WillowNode,
 }
 
-// ─── Identity (PQ Vault) ────────────────────────────────────────
+// ─── P2P Web Publishing ─────────────────────────────────────────
+
+#[tauri::command]
+async fn publish_page(state: tauri::State<'_, Arc<AppState>>, title: String, content: String) -> Result<(), String> {
+    // Get our public key
+    let pk = {
+        let crypto = state.crypto.lock().await;
+        crypto.get_identity()
+            .map(|id| id.public_key_hex)
+            .map_err(|e| e.to_string())?
+    };
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_secs();
+
+    let version = {
+        let store = state.node.page_store.read().await;
+        store.get_page(&pk).map(|p| p.version + 1).unwrap_or(1)
+    };
+
+    // Sign the content
+    let signable_content = format!("{}:{}:{}", pk, version, content);
+    let sig_bytes = {
+        let crypto = state.crypto.lock().await;
+        crypto.sign(signable_content.as_bytes())?
+    };
+    let signature = hex::encode(&sig_bytes);
+
+    let page = p2p::page_store::PublishedPage {
+        author_pk: pk.clone(),
+        content,
+        title,
+        updated_at: timestamp,
+        signature,
+        version,
+    };
+
+    // Store locally
+    {
+        let mut store = state.node.page_store.write().await;
+        store.publish(page.clone())?;
+    }
+
+    // Broadcast to network via gossip channel
+    let page_json = serde_json::to_string(&page).map_err(|e| e.to_string())?;
+    let msg = p2p::gossip::GossipMessage::PublishPage { page_json };
+    let ts = chrono::Utc::now().to_rfc3339();
+    let nonce = state.node.gossip.read().await.next_outgoing_nonce();
+    let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
+    let env_sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
+    let env = p2p::gossip::GossipRouter::build_signed_envelope(pk, msg, nonce, ts, &env_sig)
+        .map_err(|e| e.to_string())?;
+    state.node.gossip.write().await.mark_seen(&env.id);
+    let _ = state.node.gossip_tx.send(env);
+    state.node.gossip.write().await.stats.pages_published += 1;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_page(state: tauri::State<'_, Arc<AppState>>, pk: String) -> Result<serde_json::Value, String> {
+    let store = state.node.page_store.read().await;
+    match store.get_page(&pk) {
+        Some(page) => serde_json::to_value(page).map_err(|e| e.to_string()),
+        None => Err("Page non trouvée".into()),
+    }
+}
+
+#[tauri::command]
+async fn list_pages(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let store = state.node.page_store.read().await;
+    let pages: Vec<_> = store.list_pages().iter().map(|p| {
+        serde_json::json!({
+            "author_pk": p.author_pk,
+            "title": p.title,
+            "updated_at": p.updated_at,
+            "version": p.version,
+            "size": p.content.len(),
+        })
+    }).collect();
+    Ok(serde_json::Value::Array(pages))
+}
+
+#[tauri::command]
+async fn get_gossip_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let g = state.node.gossip.read().await;
+    Ok(serde_json::json!({
+        "messages_sent": g.stats.messages_sent,
+        "messages_received": g.stats.messages_received,
+        "bytes_sent": g.stats.bytes_sent,
+        "bytes_received": g.stats.bytes_received,
+        "nodes_synced": g.stats.nodes_synced,
+        "peers_reported": g.stats.peers_reported,
+        "dropped_signature": g.stats.dropped_signature,
+        "dropped_rate_limit": g.stats.dropped_rate_limit,
+        "dropped_nonce": g.stats.dropped_nonce,
+        "pages_received": g.stats.pages_received,
+        "pages_published": g.stats.pages_published,
+    }))
+}
+
+// ─── Identity (PQ Vault) ─────────────────────────────────────────
 
 #[tauri::command]
 async fn check_identity(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
@@ -28,7 +143,7 @@ async fn check_identity(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, 
 #[tauri::command]
 async fn create_identity(
     state: tauri::State<'_, Arc<AppState>>, display_name: String, password: String,
-) -> Result<security::pq_vault::TitanIdentity, String> {
+) -> Result<security::pq_vault::QuantaIdentity, String> {
     let display_name = display_name.trim().to_string();
     if display_name.is_empty() { return Err("Le nom d'affichage est requis".into()); }
     if password.len() < 8 { return Err("Mot de passe trop court (min. 8)".into()); }
@@ -45,7 +160,7 @@ async fn create_identity(
 #[tauri::command]
 async fn unlock_identity(
     state: tauri::State<'_, Arc<AppState>>, password: String,
-) -> Result<security::pq_vault::TitanIdentity, String> {
+) -> Result<security::pq_vault::QuantaIdentity, String> {
     let db = state.db.lock().await;
     let kp = db.as_ref().ok_or("DB not ready")?.get_active_keypair().await?.ok_or("No identity")?;
     let mut engine = state.crypto.lock().await;
@@ -80,6 +195,26 @@ async fn get_node_status(state: tauri::State<'_, Arc<AppState>>) -> Result<p2p::
     Ok(state.node.get_status().await)
 }
 
+/// Returns the current node contribution mode based on real-time CPU watts.
+#[tauri::command]
+async fn get_node_mode() -> Result<serde_json::Value, String> {
+    let watts = p2p::energy::estimate_watts();
+    let mode = if watts < 5.0 {
+        p2p::shapley::NodeMode::Guardian
+    } else {
+        p2p::shapley::NodeMode::Active
+    };
+    Ok(serde_json::json!({
+        "mode": mode,
+        "watts": watts,
+        "label": match mode {
+            p2p::shapley::NodeMode::Guardian => "Guardian 🛡️",
+            p2p::shapley::NodeMode::Active => "Active ⚡",
+            p2p::shapley::NodeMode::Research => "Research 🔬",
+        },
+    }))
+}
+
 // ─── Security Audit (CBOM + Monitoring) ─────────────────────────
 
 #[tauri::command]
@@ -111,7 +246,7 @@ async fn get_node_ticket(state: tauri::State<'_, Arc<AppState>>) -> Result<Strin
 }
 
 /// Phase 4 — connecte ce nœud à un peer via son EndpointId Iroh.
-/// Le peer doit aussi être abonné au topic SOVA pour que le sync démarre.
+/// Le peer doit aussi être abonné au topic QUANTA pour que le sync démarre.
 #[tauri::command]
 async fn connect_peer(state: tauri::State<'_, Arc<AppState>>, peer_id: String) -> Result<(), String> {
     let peer_id = peer_id.trim().to_string();
@@ -125,19 +260,62 @@ async fn connect_peer(state: tauri::State<'_, Arc<AppState>>, peer_id: String) -
 async fn get_my_reputation(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
     let rep = state.node.reputation.read().await;
-    Ok(serde_json::json!(rep.get_user(&pk)))
+    let micro = p2p::ledger::MICRO as f64;
+    // Convert µQTA → QUANTA for frontend display
+    match rep.get_user(&pk) {
+        Some(user) => Ok(serde_json::json!({
+            "public_key": user.public_key,
+            "trust_score": user.trust_score,
+            "status": user.status,
+            "atn_earned": user.atn_earned as f64 / micro,
+            "atn_balance": user.atn_balance as f64 / micro,
+            "atn_staked": user.atn_staked as f64 / micro,
+            "uptime_minutes": user.uptime_minutes,
+            "energy_kwh": user.energy_kwh,
+            "energy_atn_mined": user.energy_atn_mined as f64 / micro,
+            "joined_at": user.joined_at,
+        })),
+        None => Ok(serde_json::json!({
+            "public_key": pk,
+            "trust_score": 0.0,
+            "status": "New",
+            "atn_earned": 0.0,
+            "atn_balance": 0.0,
+            "atn_staked": 0.0,
+            "uptime_minutes": 0,
+            "energy_kwh": 0.0,
+            "energy_atn_mined": 0.0,
+            "joined_at": "",
+        })),
+    }
 }
 
 #[tauri::command]
 async fn transfer_atn(state: tauri::State<'_, Arc<AppState>>, to_pk: String, amount: f64) -> Result<(), String> {
     let my_pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
-    state.node.reputation.write().await.transfer(&my_pk, &to_pk, amount)
+    let uqta = quanta_to_uqta(amount)?;
+    state.node.reputation.write().await.transfer(&my_pk, &to_pk, uqta)
 }
 
 #[tauri::command]
 async fn stake_atn(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Result<f64, String> {
     let my_pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
-    state.node.reputation.write().await.stake(&my_pk, amount)
+    let uqta = quanta_to_uqta(amount)?;
+    let staked_uqta = state.node.reputation.write().await.stake(&my_pk, uqta)?;
+    Ok(staked_uqta as f64 / p2p::ledger::MICRO as f64)
+}
+
+/// STRUCT-2: Convert a frontend-supplied QUANTA value (f64) to µQTA (u64) safely.
+/// Rejects negatives, NaN, infinities, and values that would overflow u64.
+fn quanta_to_uqta(amount: f64) -> Result<u64, String> {
+    if !amount.is_finite() || amount < 0.0 {
+        return Err("Montant invalide".into());
+    }
+    let uqta_f = amount * p2p::ledger::MICRO as f64;
+    if uqta_f >= u64::MAX as f64 {
+        return Err("Montant trop grand".into());
+    }
+    Ok(uqta_f.round() as u64)
 }
 
 #[tauri::command]
@@ -148,7 +326,7 @@ async fn get_trust_leaderboard(state: tauri::State<'_, Arc<AppState>>) -> Result
 #[tauri::command]
 async fn get_energy_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let rep = state.node.reputation.read().await;
-    let (kwh, mined, uptime) = rep.network_energy_stats();
+    let (kwh, mined_uqta, uptime) = rep.network_energy_stats();
     drop(rep);
     // Phase 3 — moyenne réseau : si des peers ont rapporté leur pays, utiliser
     // la moyenne pondérée ; sinon le prix local du pays détecté.
@@ -164,7 +342,7 @@ async fn get_energy_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<serd
     drop(oracle);
     Ok(serde_json::json!({
         "kwh_consumed": kwh,
-        "atn_mined": mined,
+        "atn_mined": mined_uqta as f64 / p2p::ledger::MICRO as f64,
         "uptime_minutes": uptime,
         "atn_floor_eur": floor,
     }))
@@ -197,7 +375,7 @@ async fn get_consensus_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<s
 #[tauri::command]
 async fn get_network_health(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let stats = state.node.ledger.read().await.stats();
-    let total_sova_supply = stats.total_mined;
+    let total_quanta_supply = stats.total_mined as f64 / p2p::ledger::MICRO as f64;
 
     // PoC score de l'identité courante (si présente)
     let pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
@@ -229,7 +407,7 @@ async fn get_network_health(state: tauri::State<'_, Arc<AppState>>) -> Result<se
     let node = state.node.get_status().await;
 
     Ok(serde_json::json!({
-        "total_sova_supply": total_sova_supply,
+        "total_quanta_supply": total_quanta_supply,
         "emission_model": "fixed",
         "emission_per_hour": 100.0,
         "energy_price_local_eur": energy_price_local_eur,
@@ -253,13 +431,26 @@ async fn get_ledger_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<serd
 #[tauri::command]
 async fn get_recent_txs(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let ledger = state.node.ledger.read().await;
-    Ok(serde_json::json!(ledger.recent_txs(50)))
+    let micro = p2p::ledger::MICRO as f64;
+    // Convert µQTA amounts to QUANTA for frontend display
+    let txs: Vec<serde_json::Value> = ledger.recent_txs(50).iter().map(|tx| {
+        serde_json::json!({
+            "id": tx.id,
+            "from": tx.from,
+            "to": tx.to,
+            "amount": tx.amount as f64 / micro,
+            "tx_type": tx.tx_type,
+            "timestamp": tx.timestamp,
+        })
+    }).collect();
+    Ok(serde_json::json!(txs))
 }
 
 #[tauri::command]
 async fn get_balance(state: tauri::State<'_, Arc<AppState>>, pk: String) -> Result<f64, String> {
     let ledger = state.node.ledger.read().await;
-    Ok(ledger.balance_of(&pk))
+    // STRUCT-2: balance is u64 µQTA — convert to QUANTA (f64) for the frontend.
+    Ok(ledger.balance_of(&pk) as f64 / p2p::ledger::MICRO as f64)
 }
 
 #[tauri::command]
@@ -271,25 +462,25 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     if amount <= 0.0 || amount > 1_000_000.0 {
         return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
     }
+    let uqta = quanta_to_uqta(amount)?;
     let crypto = state.crypto.lock().await;
     let from = crypto.get_identity()?.public_key_hex;
     let mut ledger = state.node.ledger.write().await;
-    let (tx, burn_amount) = ledger.transfer_with_burn(&from, &to, amount, &crypto)?;
-    let net_amount = amount - burn_amount;
-    // Mirror the transfer on the in-memory reputation balances so the UI stays in sync
+    let (tx, burn_uqta) = ledger.transfer_with_burn(&from, &to, uqta, &crypto)?;
+    let net_uqta = uqta - burn_uqta;
     drop(ledger);
-    let _ = state.node.reputation.write().await.transfer(&from, &to, net_amount);
-    // Phase 3 — double-ledger : refléter le transfert net dans le PN-Counter CRDT
+    let _ = state.node.reputation.write().await.transfer(&from, &to, net_uqta);
+    // Phase 3 — double-ledger : refléter le transfert net dans le PN-Counter CRDT (µQTA).
     {
-        let milli = (net_amount * 1000.0) as u64;
         let mut cons = state.node.consensus.write().await;
-        cons.ledger.debit(&from, &from, milli);
-        cons.ledger.credit(&from, &to, milli);
+        cons.ledger.debit(&from, &from, net_uqta);
+        cons.ledger.credit(&from, &to, net_uqta);
     }
+    let micro = p2p::ledger::MICRO as f64;
     Ok(serde_json::json!({
         "tx": tx,
-        "burn_amount": burn_amount,
-        "net_amount": net_amount,
+        "burn_amount": burn_uqta as f64 / micro,
+        "net_amount": net_uqta as f64 / micro,
     }))
 }
 
@@ -304,28 +495,30 @@ async fn verify_ledger(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_j
     }))
 }
 
-/// V2 — Snapshot of the SOVA economy: supply, emission rate, burn total.
+/// V2 — Snapshot of the QUANTA economy: supply, emission rate, burn total (in QUANTA, f64 for UI).
 #[tauri::command]
 async fn get_economy_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let stats = state.node.ledger.read().await.stats();
-    let burned = state.node.ledger.read().await.total_burned();
-    let total_mined = stats.total_mined;
+    let burned_uqta = state.node.ledger.read().await.total_burned();
+    let total_mined_uqta = stats.total_mined;
+    let circulating_uqta = total_mined_uqta.saturating_sub(burned_uqta);
+    let micro = p2p::ledger::MICRO as f64;
     let floor = p2p::reputation::ReputationEngine::atn_floor_eur();
     Ok(serde_json::json!({
-        "total_mined": total_mined,
-        "total_burned": burned,
-        "circulating": (total_mined - burned).max(0.0),
+        "total_mined": total_mined_uqta as f64 / micro,
+        "total_burned": burned_uqta as f64 / micro,
+        "circulating": circulating_uqta as f64 / micro,
         "emission_model": "fixed",
         "emission_per_hour": 100.0,
         "emission_per_minute": 100.0 / 60.0,
-        "sova_floor_eur": floor,
+        "quanta_floor_eur": floor,
     }))
 }
 
 // ─── Marketplace Compute (Phase 3) ──────────────────────────────
 
 /// Soumet une tâche compute. `task_type` ∈ {"scientific","ml_training","render_3d","wasm"}.
-/// Le soumetteur paye `reward` SOVA (2% brûlé via BME, 98% au worker).
+/// Le soumetteur paye `reward QUANTA (2% brûlé via BME, 98% au worker).
 #[tauri::command]
 async fn submit_compute_task(
     state: tauri::State<'_, Arc<AppState>>,
@@ -359,8 +552,11 @@ async fn submit_compute_task(
         },
     };
 
+    let reward_uqta = quanta_to_uqta(reward)?;
     let mut mp = state.node.marketplace.write().await;
-    let task = mp.submit_task(&submitter, kind, reward, &deadline, 0.0)?;
+    // CRIT-3 fix: use escrow path that verifies balance before creating the task
+    let mut ledger = state.node.ledger.write().await;
+    let task = mp.submit_task_with_escrow(&mut ledger, &submitter, kind, reward_uqta, &deadline, 0.0)?;
     Ok(serde_json::json!(task))
 }
 
@@ -399,256 +595,46 @@ pub fn run() {
         .setup(move |_app| {
             let state = app_state.clone();
             tauri::async_runtime::spawn(async move {
-                // Init DB
+                // ── Init Database ────────────────────────────────────
                 let data_dir = dirs::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("sovereign-web-engine");
-                let db_path = data_dir.join("swe_titan.db");
-                match Database::new(&db_path).await {
+                    .join("quanta-protocol");
+                // Auto-migrate from legacy DB name
+                let legacy_path = data_dir.join("swe_titan.db");
+                let db_path = data_dir.join("quanta.db");
+                if legacy_path.exists() && !db_path.exists() {
+                    let _ = std::fs::rename(&legacy_path, &db_path);
+                    log::info!("◈ [Quanta] Migrated DB: swe_titan.db → quanta.db");
+                }
+                match storage::db::Database::new(&db_path).await {
                     Ok(database) => {
-                        // ── Phase 1.1: Restore persisted state ───────────
-                        if let Ok(Some(json)) = database.load_state("ledger").await {
-                            if let Ok(snap) = serde_json::from_str::<p2p::ledger::LedgerSnapshot>(&json) {
-                                let restored = p2p::ledger::Ledger::restore(snap);
-                                // Phase 3.1: Verify chain integrity on load
-                                match restored.verify_chain() {
-                                    Ok((vb, vt)) => {
-                                        log::info!("◈ [Titan] Ledger restored & verified ({} blocks, {} txs)", vb, vt);
-                                        *state.node.ledger.write().await = restored;
-                                    }
-                                    Err(e) => {
-                                        log::error!("◈ [Titan] Ledger CORRUPTED — starting fresh: {}", e);
-                                        // Corrupted chain: do NOT restore, keep fresh genesis
-                                    }
-                                }
-                            }
-                        }
-                        if let Ok(Some(json)) = database.load_state("reputation").await {
-                            if let Ok(snap) = serde_json::from_str::<p2p::reputation::ReputationSnapshot>(&json) {
-                                let user_count = snap.users.len();
-                                *state.node.reputation.write().await = p2p::reputation::ReputationEngine::restore(snap);
-                                log::info!("◈ [Titan] Reputation restored ({} users)", user_count);
-                            }
-                        }
-                        // attention + notifications: removed in V2 pure crypto
-                        // Phase 4 — restauration DAG / consensus CRDT / gossip router.
-                        if let Ok(Some(json)) = database.load_state("dag").await {
-                            if let Ok(snap) = serde_json::from_str::<p2p::merkle_dag::DagSnapshot>(&json) {
-                                let count = snap.nodes.len();
-                                *state.node.dag.write().await = p2p::merkle_dag::MerkleDAG::restore(snap);
-                                log::info!("◈ [Titan] DAG restored ({} nodes)", count);
-                            }
-                        }
-                        if let Ok(Some(json)) = database.load_state("consensus").await {
-                            if let Ok(snap) = serde_json::from_str::<p2p::consensus::ConsensusSnapshot>(&json) {
-                                let n_accounts = snap.ledger.balances.len();
-                                *state.node.consensus.write().await = p2p::consensus::ConsensusEngine::restore(snap);
-                                log::info!("◈ [Titan] CRDT consensus restored ({} accounts)", n_accounts);
-                            }
-                        }
-                        if let Ok(Some(json)) = database.load_state("gossip").await {
-                            if let Ok(snap) = serde_json::from_str::<p2p::gossip::GossipRouterSnapshot>(&json) {
-                                let seen = snap.seen_messages.len();
-                                *state.node.gossip.write().await = p2p::gossip::GossipRouter::restore(snap);
-                                log::info!("◈ [Titan] Gossip router restored ({} seen msgs)", seen);
-                            }
-                        }
-
+                        // Restore all persisted state
+                        p2p::state_persistence::restore_state(&state, &database).await;
                         *state.db.lock().await = Some(database);
-                        log::info!("◈ [Titan] libSQL initialized at {:?}", db_path);
+                        log::info!("◈ [Quanta] libSQL initialized at {:?}", db_path);
                     }
-                    Err(e) => log::error!("◈ [Titan] DB init failed: {}", e),
+                    Err(e) => log::error!("◈ [Quanta] DB init failed: {}", e),
                 }
-                // Init Iroh P2P endpoint
+
+                // ── Init Iroh P2P endpoint ───────────────────────────
                 match state.node.init_endpoint().await {
-                    Ok(()) => log::info!("◈ [Titan] Iroh QUIC endpoint active"),
-                    Err(e) => log::warn!("◈ [Titan] P2P offline: {} (local mode)", e),
+                    Ok(()) => log::info!("◈ [Quanta] Iroh QUIC endpoint active"),
+                    Err(e) => log::warn!("◈ [Quanta] P2P offline: {} (local mode)", e),
                 }
 
-                // Phase 4 — drain des enveloppes gossip sortantes : broadcast réel via iroh-gossip.
-                // Si le topic n'a pas pu être souscrit, on accumule juste les stats.
-                let gs = state.clone();
-                tokio::spawn(async move {
-                    if let Some(mut rx) = gs.node.take_gossip_receiver().await {
-                        while let Some(env) = rx.recv().await {
-                            let bytes = serde_json::to_vec(&env).unwrap_or_default();
-                            let len = bytes.len();
-                            let topic_sender = gs.node.gossip_topic_sender.read().await.clone();
-                            if let Some(sender) = topic_sender {
-                                if let Err(e) = sender.broadcast(bytes.into()).await {
-                                    log::warn!("◈ [Gossip] broadcast failed: {}", e);
-                                    continue;
-                                }
-                            }
-                            let mut g = gs.node.gossip.write().await;
-                            g.stats.messages_sent += 1;
-                            g.stats.bytes_sent += len as u64;
-                            log::debug!("◈ [Gossip] outgoing {} bytes id={}", len, &env.id[..env.id.len().min(12)]);
-                        }
-                    }
-                });
-
-                // Phase 4 — dispatcher des messages gossip entrants (iroh-gossip Stream).
-                let ds = state.clone();
-                tokio::spawn(async move {
-                    use futures_util::StreamExt as _;
-                    let Some(mut rx) = ds.node.take_gossip_topic_receiver().await else { return; };
-                    while let Some(event) = rx.next().await {
-                        match event {
-                            Ok(iroh_gossip::api::Event::Received(msg)) => {
-                                p2p::dispatcher::dispatch_incoming(&ds, &msg.content).await;
-                            }
-                            Ok(iroh_gossip::api::Event::NeighborUp(id)) => {
-                                log::info!("◈ [Gossip] NeighborUp {}", id);
-                            }
-                            Ok(iroh_gossip::api::Event::NeighborDown(id)) => {
-                                log::info!("◈ [Gossip] NeighborDown {}", id);
-                            }
-                            Ok(iroh_gossip::api::Event::Lagged) => {
-                                log::warn!("◈ [Gossip] receiver lagged — messages dropped");
-                            }
-                            Err(e) => {
-                                log::warn!("◈ [Gossip] event error: {}", e);
-                            }
-                        }
-                    }
-                });
-
-                // Phase 3 — annonce initiale : "voici mon code pays" pour la moyenne réseau.
-                // S'exécute une fois ; les peers qui reçoivent ce Hello mettent à jour
-                // leur table peer_country_reports et donc leur prix énergie moyen.
-                let hs = state.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    let pk = hs.crypto.lock().await.get_identity()
-                        .map(|i| i.public_key_hex).unwrap_or_default();
-                    if pk.is_empty() { return; }
-                    let country = p2p::energy::EnergyOracle::detect_country().to_string();
-                    let watts = p2p::energy::estimate_watts();
-                    // Marque notre propre rapport pour que la moyenne réseau parte juste.
-                    hs.node.peer_country_reports.write().await.insert(country.clone(), 1);
-                    let heads = hs.node.dag.read().await.heads();
-                    let msg = p2p::gossip::GossipRouter::build_hello(heads, pk.clone(), watts, country.clone());
-                    let bytes = p2p::gossip::GossipRouter::payload_bytes(&msg);
-                    let sig = hs.crypto.lock().await.sign(&bytes).unwrap_or_default();
-                    if let Ok(env) = p2p::gossip::GossipRouter::wrap_outgoing(pk, msg, &sig) {
-                        hs.node.gossip.write().await.mark_seen(&env.id);
-                        let _ = hs.node.gossip_tx.send(env);
-                    }
-                    log::info!("◈ [Gossip] Hello broadcast (country={})", country);
-                });
-
-                // Uptime mining: mint ATN every 60s based on energy cost + halving + quality
-                let ms = state.clone();
-                tokio::spawn(async move {
-                    const MINE_INTERVAL_SECS: u64 = 60;
-                    const SEAL_EVERY_N_TICKS: u32 = 5;              // 5 minutes between blocks max
-                    let mut tick: u32 = 0;
-
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(MINE_INTERVAL_SECS)).await;
-                        let pk = ms.crypto.lock().await.get_identity()
-                            .map(|i| i.public_key_hex).unwrap_or_default();
-                        if pk.is_empty() { continue; }
-
-                        // V2: Read total supply for DAG metadata (no halving)
-                        let total_mined = ms.node.ledger.read().await.stats().total_mined;
-
-                        // V2: agréger les watts des pairs pour le mining proportionnel
-                        let my_watts = p2p::energy::estimate_watts();
-                        let peer_watts = ms.node.peer_watts.read().await;
-                        let total_network_watts = peer_watts.values().sum::<f64>() + my_watts;
-                        drop(peer_watts);
-
-                        // Phase 3 — uptime_tick retourne (atn, kwh_réel) ; on propage le kwh
-                        // mesuré au ledger pour ancrer la valeur ATN à l'énergie effective.
-                        let (atn, kwh) = ms.node.reputation.write().await.uptime_tick(&pk, total_mined, total_network_watts);
-                        ms.node.ledger.write().await.mine_tx(&pk, atn, kwh);
-
-                        // Phase 3 — chaque mining tick devient un nœud dans le Merkle-DAG,
-                        // prêt pour le consensus multi-nœuds via gossip.
-                        let payload = serde_json::to_vec(&serde_json::json!({
-                            "type": "mining",
-                            "pk": &pk,
-                            "atn": atn,
-                            "kwh": kwh,
-                            "model": "fixed_100h",
-                        })).unwrap_or_default();
-                        let parents = ms.node.dag.read().await.heads();
-                        let parents = if parents.is_empty() { vec!["genesis".into()] } else { parents };
-                        let dag_node = p2p::merkle_dag::DagNode::new(parents, payload, pk.clone());
-                        let _ = ms.node.dag.write().await.insert(dag_node);
-
-                        // Phase 3 — broadcast l'évènement aux pairs (drain Iroh dès qu'un peer arrive).
-                        // Sérialisation de la tx minée pour permettre aux pairs de la rejouer.
-                        if let Ok(tx_json) = serde_json::to_string(
-                            &ms.node.ledger.read().await.recent_txs(1).first().cloned(),
-                        ) {
-                            let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
-                            let bytes = p2p::gossip::GossipRouter::payload_bytes(&msg);
-                            let sig = ms.crypto.lock().await.sign(&bytes).unwrap_or_default();
-                            if let Ok(env) = p2p::gossip::GossipRouter::wrap_outgoing(pk.clone(), msg, &sig) {
-                                ms.node.gossip.write().await.mark_seen(&env.id);
-                                let _ = ms.node.gossip_tx.send(env);
-                            }
-                        }
-
-                        tick = tick.wrapping_add(1);
-
-                        // Force-seal so rewards (likes, views, creates) don't pile up forever
-                        // when the user is solo (block fills < 10 tx threshold otherwise).
-                        if tick.is_multiple_of(SEAL_EVERY_N_TICKS) {
-                            if let Some(b) = ms.node.ledger.write().await.seal_if_pending(&pk, 0.0) {
-                                log::info!("◈ [Ledger] Block #{} sealed ({} tx)", b.index, b.transactions.len());
-                            }
-                        }
-                    }
-                });
-                // ── Phase 1.1: Periodic state persistence (every 30s) ────
-                let ps = state.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        // Step 1: Snapshot engines (short read locks, released immediately)
-                        let ledger_json = {
-                            let snap = ps.node.ledger.read().await.snapshot();
-                            serde_json::to_string(&snap).unwrap_or_default()
-                        };
-                        let rep_json = {
-                            let snap = ps.node.reputation.read().await.snapshot();
-                            serde_json::to_string(&snap).unwrap_or_default()
-                        };
-                        // Phase 4 — DAG / consensus CRDT / gossip router
-                        let dag_json = {
-                            let snap = ps.node.dag.read().await.snapshot();
-                            serde_json::to_string(&snap).unwrap_or_default()
-                        };
-                        let cons_json = {
-                            let snap = ps.node.consensus.read().await.snapshot();
-                            serde_json::to_string(&snap).unwrap_or_default()
-                        };
-                        let gos_json = {
-                            let snap = ps.node.gossip.read().await.snapshot();
-                            serde_json::to_string(&snap).unwrap_or_default()
-                        };
-                        // Step 2: Write to DB (db lock only, no engine locks held)
-                        let db_guard = ps.db.lock().await;
-                        if let Some(db) = db_guard.as_ref() {
-                            let _ = db.save_state("ledger", &ledger_json).await;
-                            let _ = db.save_state("reputation", &rep_json).await;
-                            let _ = db.save_state("dag", &dag_json).await;
-                            let _ = db.save_state("consensus", &cons_json).await;
-                            let _ = db.save_state("gossip", &gos_json).await;
-                            log::debug!("◈ [Titan] State persisted to disk");
-                        }
-                    }
-                });
+                // ── Spawn background tasks ───────────────────────────
+                p2p::gossip_tasks::spawn_outgoing_drain(state.clone());
+                p2p::gossip_tasks::spawn_incoming_dispatch(state.clone());
+                p2p::gossip_tasks::spawn_hello_broadcast(state.clone());
+                p2p::gossip_tasks::spawn_peer_cleanup(state.clone());
+                p2p::mining_loop::spawn(state.clone());
+                p2p::state_persistence::spawn_persistence(state.clone());
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
-            get_node_status,
+            get_node_status, get_node_mode,
             get_security_audit,
             get_node_ticket, connect_peer,
             get_my_reputation, transfer_atn, stake_atn, get_trust_leaderboard,
@@ -657,7 +643,57 @@ pub fn run() {
             verify_ledger,
             get_economy_stats,
             submit_compute_task, get_pending_tasks, get_marketplace_stats,
+            publish_page, get_page, list_pages,
+            get_gossip_stats,
+            // V3.2 — Domains
+            commands_v3::claim_domain,
+            commands_v3::pay_domain_rent,
+            commands_v3::overbid_domain,
+            commands_v3::resolve_domain,
+            commands_v3::list_my_domains,
+            commands_v3::grant_subdomain,
+            // V3.2 — Search
+            commands_v3::index_my_page,
+            commands_v3::search_pages,
+            commands_v3::search_stats,
+            // V3.2 — Social
+            commands_v3::social_vote,
+            commands_v3::social_follow,
+            commands_v3::social_tip,
+            commands_v3::social_boost,
+            commands_v3::get_page_social_stats,
+            commands_v3::get_creator_social_stats,
+            // V3.2 — Modération
+            commands_v3::submit_moderation_report,
+            commands_v3::juror_commit,
+            commands_v3::juror_reveal,
+            commands_v3::finalize_case,
+            commands_v3::get_open_cases,
+            // V3.2 — Forums
+            commands_v3::forum_create,
+            commands_v3::thread_create,
+            commands_v3::comment_create,
+            commands_v3::list_forums,
+            commands_v3::list_threads,
+            commands_v3::list_comments,
+            // V3.3 — Sites multi-pages + assets
+            commands_v3::publish_site,
+            commands_v3::get_site_page,
+            commands_v3::get_site_asset,
+            commands_v3::list_sites,
+            // V3.2 — Trust graph
+            commands_v3::trust_score_for,
+            // V3.3 — Subscriptions feed
+            commands_v3::list_my_subscriptions,
+            commands_v3::subscriptions_feed,
         ])
-        .run(tauri::generate_context!())
-        .expect("SWE Titan v5 failed to launch");
+        .build(tauri::generate_context!())
+        .expect("QUANTA Protocol v1.0 failed to build")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                log::info!("◈ [Quanta] App exit — signaling graceful shutdown");
+                let state: tauri::State<'_, Arc<AppState>> = app_handle.state();
+                state.node.shutdown.cancel();
+            }
+        });
 }

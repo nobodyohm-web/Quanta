@@ -1,10 +1,13 @@
-//! Moteur de consensus CRDT pour SOVA
+//! Moteur de consensus CRDT pour QUANTA
 //!
 //! Utilise des CRDTs (Conflict-free Replicated Data Types) pour garantir
 //! la convergence déterministe entre nœuds sans leader ni votes.
 //!
 //! Types CRDT utilisés :
-//!   - `PNCounter<String>` — balances SOVA (positif/négatif, entier millième)
+//!   - `PNCounter<String>` — balances QUANTA en µQTA (entier, déterministe).
+//!
+//! STRUCT-2: Le CRDT travaille en µQTA (1 QUANTA = 1_000_000 µQTA) pour s'aligner
+//! sur le ledger linéaire et éliminer la dérive f64.
 //!
 //! Principe de fusion : merge(A, B) = union(max per actor) — idempotent, commutatif.
 
@@ -15,12 +18,12 @@ use std::collections::HashMap;
 
 // ─── Ledger CRDT ────────────────────────────────────────────────────────────
 
-/// Registre de balances ATN convergent basé sur PN-Counter.
+/// Registre de balances QUANTA convergent basé sur PN-Counter.
 ///
-/// Convention : 1 unité = 1 milliATN (pour éviter l'arithmétique flottante).
+/// Convention : 1 unité = 1 µQTA (microQTA, déterministe, pas d'arithmétique flottante).
 /// Fusion entre nœuds : max par acteur par direction (convergent).
 pub struct CrdtLedger {
-    /// user_pk → PN-Counter (crédits - débits en milliATN)
+    /// user_pk → PN-Counter (crédits - débits en µQTA)
     balances: HashMap<String, PNCounter<String>>,
 }
 
@@ -29,34 +32,54 @@ impl CrdtLedger {
         Self { balances: HashMap::new() }
     }
 
-    /// Crédite `milliATN` au destinataire, émis par `actor`.
-    pub fn credit(&mut self, actor: &str, recipient: &str, milli_atn: u64) {
+    /// STRUCT-5: Maximum µQTA per single CRDT operation to prevent O(n) DoS.
+    /// 10_000_000 µQTA = 10 QUANTA — large transfers should be split into batches.
+    const MAX_CRDT_BATCH: u64 = 10_000_000;
+
+    /// Crédite `uqta` au destinataire, émis par `actor`.
+    /// STRUCT-5: Capped at MAX_CRDT_BATCH to prevent DoS from large values.
+    pub fn credit(&mut self, actor: &str, recipient: &str, uqta: u64) {
+        let clamped = uqta.min(Self::MAX_CRDT_BATCH);
+        if uqta > Self::MAX_CRDT_BATCH {
+            log::warn!(
+                "◈ [CRDT] credit capped: {} → {} µQTA for {}",
+                uqta, clamped, &recipient[..recipient.len().min(12)]
+            );
+        }
         let counter = self.balances
             .entry(recipient.to_string())
             .or_default();
-        for _ in 0..milli_atn {
+        for _ in 0..clamped {
             let op = counter.inc(actor.to_string());
             counter.apply(op);
         }
     }
 
-    /// Débite `milli_atn` de l'émetteur, opération signée par `actor`.
-    pub fn debit(&mut self, actor: &str, sender: &str, milli_atn: u64) {
+    /// Débite `uqta` de l'émetteur, opération signée par `actor`.
+    /// STRUCT-5: Capped at MAX_CRDT_BATCH to prevent DoS from large values.
+    pub fn debit(&mut self, actor: &str, sender: &str, uqta: u64) {
+        let clamped = uqta.min(Self::MAX_CRDT_BATCH);
+        if uqta > Self::MAX_CRDT_BATCH {
+            log::warn!(
+                "◈ [CRDT] debit capped: {} → {} µQTA for {}",
+                uqta, clamped, &sender[..sender.len().min(12)]
+            );
+        }
         let counter = self.balances
             .entry(sender.to_string())
             .or_default();
-        for _ in 0..milli_atn {
+        for _ in 0..clamped {
             let op = counter.dec(actor.to_string());
             counter.apply(op);
         }
     }
 
-    /// Balance en ATN (plancher à 0 — pas de balance négative).
-    pub fn balance_of(&self, pk: &str) -> f64 {
+    /// Balance en µQTA (plancher à 0 — pas de balance négative).
+    pub fn balance_of(&self, pk: &str) -> u64 {
         self.balances
             .get(pk)
-            .map(|c| c.read().to_i64().unwrap_or(0).max(0) as f64 / 1000.0)
-            .unwrap_or(0.0)
+            .map(|c| c.read().to_i64().unwrap_or(0).max(0) as u64)
+            .unwrap_or(0)
     }
 
     /// Fusionne deux ledgers CRDT — commmutatif, associatif, idempotent.
@@ -145,10 +168,11 @@ mod tests {
     #[test]
     fn credit_debit_balance() {
         let mut ledger = CrdtLedger::new();
+        // 5_000 µQTA = 0.0.5 QUANTA
         ledger.credit("node_a", "user_1", 5_000);
-        assert!((ledger.balance_of("user_1") - 5.0).abs() < 0.001);
+        assert_eq!(ledger.balance_of("user_1"), 5_000);
         ledger.debit("node_a", "user_1", 2_000);
-        assert!((ledger.balance_of("user_1") - 3.0).abs() < 0.001);
+        assert_eq!(ledger.balance_of("user_1"), 3_000);
     }
 
     #[test]
@@ -161,7 +185,7 @@ mod tests {
         let bal1 = a.balance_of("alice");
         a.merge(&b);
         let bal2 = a.balance_of("alice");
-        assert!((bal1 - bal2).abs() < 0.001, "Merge doit être idempotent");
+        assert_eq!(bal1, bal2, "Merge doit être idempotent");
     }
 
     #[test]

@@ -109,12 +109,12 @@ cargo check
 
 ---
 
-## ÉTAPE 8 — Minimum transfer = 0.01 SOVA
+## ÉTAPE 8 — Minimum transfer = 0.01 QUANTA
 
 Dans ledger.rs, transfer_with_burn() :
 ```rust
 if amount < 0.01 {
-    return Err("Minimum transfer: 0.01 SOVA".into());
+    return Err("Minimum transfer: 0.01 QUANTA".into());
 }
 ```
 
@@ -128,7 +128,7 @@ cargo check
 cd /Users/alex/Desktop/Torus
 git init
 git add -A
-git commit -m "V2.0 — SOVA Protocol: proportional mining, Shapley, burn-and-mint, marketplace"
+git commit -m "V2.0 — QUANTA Protocol: proportional mining, Shapley, burn-and-mint, marketplace"
 ```
 
 ---

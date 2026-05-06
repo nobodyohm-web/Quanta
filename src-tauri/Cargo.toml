@@ -1,12 +1,12 @@
 [package]
-name = "sovereign-web-engine"
-version = "0.4.0"
-description = "Sovereign Web Engine v4 Titan — Defense-Grade Post-Quantum P2P Node"
-authors = ["Sovereign Web Engine Contributors"]
+name = "quanta-protocol"
+version = "1.0.0"
+description = "QUANTA Protocol — Energy-Indexed Decentralized Network"
+authors = ["Quanta Protocol Contributors"]
 edition = "2021"
 
 [lib]
-name = "sovereign_web_engine_lib"
+name = "quanta_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -23,6 +23,7 @@ serde_json = "1"
 
 # ─── Async ───
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 
 # ─── P2P (Iroh / Willow / QUIC) ───
@@ -82,3 +83,7 @@ num-traits = "0.2" # ToPrimitive pour convertir BigInt/BigUint des CRDTs en i64/
 
 # ─── Phase 2C : Mesure énergie CPU réelle ────────────────────────
 sysinfo = "0.33"   # CPU usage pour calcul watts réel
+
+# ─── Tests ────────────────────────────────────────────────────────
+[dev-dependencies]
+proptest = "1"     # Property-based testing for invariants (Shapley, ledger overflow)

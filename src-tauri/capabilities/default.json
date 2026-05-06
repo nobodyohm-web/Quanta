@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Full capability set for the Sovereign Web Engine main window",
+  "description": "Full capability set for the Quanta Protocol main window",
   "windows": ["main"],
   "permissions": [
     "core:default",
