@@ -230,6 +230,7 @@ mod tests {
                 uptime_minutes: 0,
                 chain_height: 0,
                 known_peer_ids: vec![],
+                display_name: None,
             }),
             Priority::Critical
         );

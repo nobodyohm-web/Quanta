@@ -175,6 +175,8 @@ pub struct PeerInfo {
     pub pongs_received: u64,
     /// NET-9: First time we ever observed this peer (for uptime ratio).
     pub first_seen: Instant,
+    /// NET-15: Optional sanitised display_name advertised by this peer.
+    pub display_name: Option<String>,
 }
 
 impl PeerInfo {
@@ -194,6 +196,7 @@ impl PeerInfo {
             pings_sent: 0,
             pongs_received: 0,
             first_seen: now,
+            display_name: None,
         }
     }
 

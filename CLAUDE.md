@@ -177,9 +177,26 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 - Chaque envelope = signature Ed25519 + nonce monotone + timestamp (±90s)
 - Canonical signing: `signable_envelope_bytes(sender, nonce, timestamp, payload)`
 - Anti-replay : dedup par envelope ID (LRU 100K)
-- Rate limiting : max 30 msg/min par peer
+- Rate limiting **adaptatif** (NET-13) : `sqrt(peers/4) × 30 msg/min` clamped to [15, 120]
 - Banning : 3 reports → ban 1h (auto-expire)
 - DoS guard : max 10 MB par envelope, max 50 blocs par ChainSegment
+- Eclipse warning (NET-12) : >80% des peers partageant le même préfixe pubkey 8-hex → warning
+
+### Network V2 hardening (NET-3 → NET-16)
+- **NET-3** : priority queue sortante 4-lanes (Critical/High/Medium/Low)
+- **NET-4** : Hello 120s + Ping 15s léger pour la liveness
+- **NET-5** : `TORUS_PROTOCOL_VERSION = 2` ; peers incompatibles loggués
+- **NET-6** : chain sync parallèle (fanout = 4 fenêtres × 50 blocs)
+- **NET-7** : DAG sync incrémental — skip WantNodes si heads inchangées
+- **NET-8** : ChainSegment gzip optionnel (50 MB inflate cap)
+- **NET-9** : RTT (EWMA), bytes_in/messages_in par peer
+- **NET-10** : score qualité 0-100 (latency 50pts + loss 30pts + uptime 20pts)
+- **NET-11** : `get_network_topology` 2-hop view
+- **NET-12** : eclipse heuristic (80% prefix collision)
+- **NET-13** : rate limit adaptatif sqrt-scaling
+- **NET-14** : mempool TTL 10 min + cap 1000 tx
+- **NET-15** : peer nicknames signés (`display_name` 32 chars)
+- **NET-16** : events Tauri `torus://chain-sync-progress` pour la barre de sync
 
 ---
 

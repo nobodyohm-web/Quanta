@@ -28,6 +28,14 @@ pub struct AppState {
     pub crypto: Mutex<CryptoEngine>,
     pub db: Mutex<Option<Database>>,
     pub node: WillowNode,
+    /// NET-15: Optional human-readable display name embedded in our outgoing
+    /// Hello messages. The wallet's Ed25519 signature on the envelope already
+    /// authenticates the name; sanitisation happens at receive time.
+    pub display_name: tokio::sync::RwLock<Option<String>>,
+    /// NET-16: Cached Tauri AppHandle, populated during `.setup()`. Used by
+    /// background tasks (e.g. chain-sync handlers) to emit progress events
+    /// to the frontend without holding a handle through every call site.
+    pub app_handle: tokio::sync::RwLock<Option<tauri::AppHandle>>,
 }
 
 // ─── P2P Web Publishing ─────────────────────────────────────────
@@ -211,6 +219,7 @@ async fn get_peer_metrics(
         };
         serde_json::json!({
             "public_key": pk,
+            "display_name": p.display_name,
             "country": p.country,
             "watts": p.watts,
             "last_rtt_ms": p.last_rtt_ms,
@@ -232,6 +241,28 @@ async fn get_peer_metrics(
         qb.cmp(&qa)
     });
     Ok(rows)
+}
+
+/// NET-15: Set our outgoing display name. Sanitised before storage; subsequent
+/// Hello broadcasts will carry it. Pass `None` (or an empty string) to clear.
+#[tauri::command]
+async fn set_display_name(
+    state: tauri::State<'_, Arc<AppState>>,
+    name: Option<String>,
+) -> Result<Option<String>, String> {
+    let sanitised = name
+        .as_deref()
+        .and_then(p2p::gossip::sanitize_display_name);
+    *state.display_name.write().await = sanitised.clone();
+    Ok(sanitised)
+}
+
+/// NET-15: Read the currently advertised display name.
+#[tauri::command]
+async fn get_display_name(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    Ok(state.display_name.read().await.clone())
 }
 
 /// NET-11: 2-hop network topology view. Returns the local node + each known
@@ -689,6 +720,8 @@ pub fn run() {
         crypto: Mutex::new(CryptoEngine::new()),
         db: Mutex::new(None),
         node: WillowNode::new(),
+        display_name: tokio::sync::RwLock::new(None),
+        app_handle: tokio::sync::RwLock::new(None),
     });
 
     tauri::Builder::default()
@@ -696,9 +729,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(app_state.clone())
-        .setup(move |_app| {
+        .setup(move |app| {
             let state = app_state.clone();
+            // NET-16: Cache the AppHandle so background tasks can emit events.
+            let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                *state.app_handle.write().await = Some(handle);
                 // ── Init Database ────────────────────────────────────
                 let data_dir = dirs::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -742,6 +778,7 @@ pub fn run() {
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
             get_node_status, get_node_mode,
             get_peer_metrics, get_network_topology,
+            set_display_name, get_display_name,
             get_security_audit,
             get_node_ticket, connect_peer,
             get_my_reputation, transfer_atn, stake_atn, get_trust_leaderboard,

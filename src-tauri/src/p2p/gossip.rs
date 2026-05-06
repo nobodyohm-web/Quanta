@@ -79,6 +79,14 @@ pub enum GossipMessage {
         /// Receiving nodes can auto-connect to peers they don't know.
         #[serde(default)]
         known_peer_ids: Vec<String>,
+        /// NET-15: Optional display name for the frontend.
+        /// Trimmed to MAX_DISPLAY_NAME_LEN by the dispatcher; carrying a longer
+        /// string is treated as adversarial input and clamped without rejection.
+        /// The Hello envelope is already Ed25519-signed, so an attacker can't
+        /// inject a name without the wallet's private key — backward compat is
+        /// guaranteed by `#[serde(default)]`.
+        #[serde(default)]
+        display_name: Option<String>,
     },
     /// "Donne-moi les nœuds avec ces IDs".
     WantNodes {
@@ -191,6 +199,33 @@ pub enum GossipMessage {
 /// that predate the protocol-version constant.
 fn default_protocol_version() -> u8 {
     1
+}
+
+/// NET-15: Maximum length of a peer-supplied display_name, in bytes.
+/// Anything longer is silently truncated by the dispatcher to defeat
+/// abuse (huge names spam the UI; control characters break terminals).
+pub const MAX_DISPLAY_NAME_LEN: usize = 32;
+
+/// NET-15: Sanitize a peer-supplied display name.
+/// Returns `None` if empty after sanitisation. Strips control chars and
+/// truncates to `MAX_DISPLAY_NAME_LEN` UTF-8 bytes (truncating at a char
+/// boundary to avoid producing invalid UTF-8).
+pub fn sanitize_display_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Truncate at a char boundary up to MAX_DISPLAY_NAME_LEN bytes.
+    let mut end = MAX_DISPLAY_NAME_LEN.min(cleaned.len());
+    while !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(cleaned[..end].to_string())
 }
 
 // ─── NET-8: ChainSegment compression helpers ─────────────────────────────────
@@ -349,6 +384,7 @@ impl GossipRouter {
     }
 
     /// Construit un message `Hello` pour initier un sync (V2: watts + pays + STRUCT-6 contribs).
+    /// NET-15: Optional `display_name` for human-readable peer labels in the UI.
     #[allow(clippy::too_many_arguments)]
     pub fn build_hello(
         heads: Vec<String>,
@@ -360,6 +396,7 @@ impl GossipRouter {
         uptime_minutes: u64,
         chain_height: u64,
         known_peer_ids: Vec<String>,
+        display_name: Option<String>,
     ) -> GossipMessage {
         GossipMessage::Hello {
             heads,
@@ -372,6 +409,7 @@ impl GossipRouter {
             uptime_minutes,
             chain_height,
             known_peer_ids,
+            display_name,
         }
     }
 
@@ -561,7 +599,7 @@ mod tests {
         // NET-5: every freshly built Hello must announce TORUS_PROTOCOL_VERSION
         // so peers can reason about compat.
         let hello = GossipRouter::build_hello(
-            vec![], "n".into(), 10.0, "FR".into(), 0, 0, 0, 0, vec![]
+            vec![], "n".into(), 10.0, "FR".into(), 0, 0, 0, 0, vec![], None
         );
         match hello {
             GossipMessage::Hello { version, .. } => {
@@ -569,6 +607,30 @@ mod tests {
             }
             _ => panic!("expected Hello variant"),
         }
+    }
+
+    #[test]
+    fn sanitize_display_name_strips_control_and_truncates() {
+        // NET-15: control chars dropped, whitespace trimmed, capped at MAX.
+        assert_eq!(sanitize_display_name(""), None);
+        assert_eq!(sanitize_display_name("   "), None);
+        assert_eq!(sanitize_display_name("\t\nhi"), Some("hi".into()));
+        let long = "a".repeat(100);
+        let sanitized = sanitize_display_name(&long).unwrap();
+        assert!(sanitized.len() <= MAX_DISPLAY_NAME_LEN);
+    }
+
+    #[test]
+    fn sanitize_display_name_preserves_unicode_at_boundary() {
+        // Multi-byte char near the cap should not be split mid-codepoint.
+        let mut s = String::from("alex");
+        // Repeat a 4-byte emoji until close to cap.
+        while s.len() + 4 <= MAX_DISPLAY_NAME_LEN + 4 {
+            s.push('🚀');
+        }
+        let sanitised = sanitize_display_name(&s).unwrap();
+        // Must still be valid UTF-8 (rust String enforces this) and within cap.
+        assert!(sanitised.len() <= MAX_DISPLAY_NAME_LEN);
     }
 
     #[test]

@@ -251,10 +251,14 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
             .collect()
     };
 
+    // NET-15: read optional display_name from settings (None for now — wired
+    // up so the frontend can populate it later via a Tauri command).
+    let display_name = state.display_name.read().await.clone();
+
     let msg = p2p::gossip::GossipRouter::build_hello(
         heads, pk.clone(), watts, country.clone(),
         tasks_completed, 0, uptime_min, chain_height,
-        known_peer_ids,
+        known_peer_ids, display_name,
     );
 
     // Sign and broadcast

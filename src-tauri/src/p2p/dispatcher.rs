@@ -335,7 +335,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         GossipMessage::Hello {
             heads, node_id, watts, country, version,
             tasks_completed, blocks_verified, uptime_minutes,
-            chain_height, known_peer_ids,
+            chain_height, known_peer_ids, display_name,
         } => {
             // NET-5: Protocol version compatibility check. We never reject —
             // unknown fields already default thanks to #[serde(default)] — but
@@ -356,7 +356,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             handle_hello(
                 state, &env.sender, &node_id, heads, watts, &country,
                 tasks_completed, blocks_verified, uptime_minutes,
-                chain_height, known_peer_ids,
+                chain_height, known_peer_ids, display_name,
             ).await;
         }
         GossipMessage::WantNodes { ids } => {
@@ -716,7 +716,15 @@ async fn handle_hello(
     uptime_minutes: u64,
     peer_chain_height: u64,
     known_peer_ids: Vec<String>,
+    display_name: Option<String>,
 ) {
+    // NET-15: Sanitize the peer-supplied display_name (strip control chars,
+    // trim, truncate to MAX_DISPLAY_NAME_LEN). The signed envelope already
+    // proves the wallet owner picked the name, but we still don't trust the
+    // bytes to be displayable — sanitization is purely a UI-safety guard.
+    let sanitized_name = display_name
+        .as_deref()
+        .and_then(crate::p2p::gossip::sanitize_display_name);
     log::info!(
         "◈ [Dispatch] Hello from {} ({} heads, {:.1}W, {}, chain_h={}, tasks={} blocks={} uptime={}m, peers={})",
         &sender_pk[..sender_pk.len().min(12)], their_heads.len(), watts, country,
@@ -736,6 +744,8 @@ async fn handle_hello(
     }
 
     // B3 + STRUCT-6: Update peer_info with liveness + contribution data.
+    // NET-15: Also persist the sanitised display_name (None unsets it, which
+    // means the peer dropped its nickname).
     {
         let mut info = state.node.peer_info.write().await;
         let entry = info.entry(sender_pk.to_string()).or_insert_with(|| {
@@ -746,6 +756,7 @@ async fn handle_hello(
         entry.tasks_completed = tasks_completed;
         entry.blocks_verified = blocks_verified;
         entry.uptime_minutes = uptime_minutes;
+        entry.display_name = sanitized_name.clone();
         entry.touch();
     }
 
@@ -1149,6 +1160,20 @@ async fn handle_chain_segment(
         "◈ [Dispatch] ChainSegment from {} — integrated: {}, rejected: {}, sender_height: {}",
         &sender[..sender.len().min(12)], integrated, rejected, sender_height
     );
+
+    // NET-16: Emit sync progress to the frontend. Best-effort — we don't
+    // care whether anyone is listening on the channel.
+    let our_height = state.node.ledger.read().await.chain_height();
+    if let Some(handle) = state.app_handle.read().await.as_ref() {
+        use tauri::Emitter;
+        let _ = handle.emit("torus://chain-sync-progress", serde_json::json!({
+            "our_height": our_height,
+            "sender_height": sender_height,
+            "integrated": integrated,
+            "rejected": rejected,
+            "sender": sender,
+        }));
+    }
 
     // If sender has more blocks, request the next segment(s) in parallel.
     let our_height = state.node.ledger.read().await.chain_height();
