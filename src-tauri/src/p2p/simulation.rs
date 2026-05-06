@@ -326,7 +326,9 @@ mod multi_node_simulation {
 
         // ── Phase 4b: Re-seal orphaned txs ──
         // Le nœud perdant a mis les txs du bloc éjecté en pending.
-        // Il faut les re-sealer et propager pour que les balances convergent.
+        // Il faut re-sealer et propager BIDIRECTIONNELLEMENT pour que les
+        // balances convergent — les txs NETWORK→pk du bloc perdant doivent
+        // être visibles par le gagnant.
         println!("\n  ── Phase 4b: Re-seal des txs orphelines ──");
 
         let loser_is_a = fork_a.hash < fork_b.hash;
@@ -334,22 +336,25 @@ mod multi_node_simulation {
         let pending_b = node_b.pending_count();
         println!("  Pending A: {}, Pending B: {}", pending_a, pending_b);
 
-        // Le perdant a des txs en pending — on les re-seal et propage
-        if pending_a > 0 {
-            if let Some(recovery_block) = node_a.seal_if_pending(pk_a, 0.0) {
-                println!("  A re-sealed block #{} ({} txs récupérées)", recovery_block.index, recovery_block.transactions.len());
-                let json = serde_json::to_string(&recovery_block).expect("serialize");
+        // Bi-directional recovery: seal pending on both sides and exchange.
+        // Loop until both are stable (no more pending txs to propagate).
+        for round in 0..3 {
+            let mut progressed = false;
+            if let Some(block) = node_a.seal_if_pending(pk_a, 0.0) {
+                println!("  Round {}: A re-sealed block #{} ({} txs récupérées)", round, block.index, block.transactions.len());
+                let json = serde_json::to_string(&block).expect("serialize");
                 let remote: crate::p2p::ledger::Block = serde_json::from_str(&json).expect("deserialize");
                 let _ = node_b.integrate_remote_block(remote);
+                progressed = true;
             }
-        }
-        if pending_b > 0 {
-            if let Some(recovery_block) = node_b.seal_if_pending(pk_b, 0.0) {
-                println!("  B re-sealed block #{} ({} txs récupérées)", recovery_block.index, recovery_block.transactions.len());
-                let json = serde_json::to_string(&recovery_block).expect("serialize");
+            if let Some(block) = node_b.seal_if_pending(pk_b, 0.0) {
+                println!("  Round {}: B re-sealed block #{} ({} txs récupérées)", round, block.index, block.transactions.len());
+                let json = serde_json::to_string(&block).expect("serialize");
                 let remote: crate::p2p::ledger::Block = serde_json::from_str(&json).expect("deserialize");
                 let _ = node_a.integrate_remote_block(remote);
+                progressed = true;
             }
+            if !progressed { break; }
         }
 
         println!("  Perdant du fork: Nœud {}", if loser_is_a { "A" } else { "B" });
@@ -377,7 +382,7 @@ mod multi_node_simulation {
         println!("\n============================================================");
         println!("  📊 RÉSUMÉ MULTI-NŒUDS");
         println!("  Chain length:       {}", node_a.chain.len());
-        println!("  Blocks propagés:    {} (dont 1 recovery après fork)", node_a.chain.len() - 1);
+        println!("  Blocks propagés:    {} (dont recovery après fork)", node_a.chain.len() - 1);
         println!("  Doublons rejetés:   1");
         println!("  Forks résolus:      1");
         println!("  Convergence chaîne: ✅ OUI");

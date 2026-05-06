@@ -35,8 +35,8 @@ fn tick_start_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-/// How many ticks between forced block seals (5 min).
-const SEAL_EVERY_N_TICKS: u32 = 5;
+/// How many ticks between forced block seals (2 min = 2 ticks × 60s).
+const SEAL_EVERY_N_TICKS: u32 = 2;
 /// Threshold above which we log a slow-tick warning (lock contention indicator).
 const SLOW_TICK_MS: u128 = 100;
 
@@ -128,9 +128,11 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
 
     *tick = tick.wrapping_add(1);
 
-    // ── 7. Periodically seal blocks ────────────────────────────
+    // ── 7. PoS: Seal blocks only if we're the elected leader ────
+    // Mining TXs accumulate in pending for ALL nodes, but only the
+    // PoS-elected leader for this slot actually seals them into a block.
     if tick.is_multiple_of(SEAL_EVERY_N_TICKS) {
-        seal_and_broadcast(state, &pk).await;
+        pos_seal_if_leader(state, &pk).await;
     }
 
     let elapsed = tick_start.elapsed();
@@ -206,6 +208,87 @@ async fn seal_and_broadcast(state: &AppState, pk: &str) {
                 let _ = state.node.gossip_tx.send(env);
             }
         }
+    }
+}
+
+/// PoS leader election check — only seal if we're the elected proposer.
+///
+/// 1. Build the validator set from staked amounts + reputation scores
+/// 2. Compute the elected leader for the current slot (chain height)
+/// 3. Only seal if we're the primary leader (or valid fallback after timeout)
+///
+/// If no validators have sufficient stake, falls back to the original
+/// seal_and_broadcast (permissionless mode for bootstrap).
+async fn pos_seal_if_leader(state: &AppState, pk: &str) {
+    // Read current chain state
+    let (prev_hash, slot) = {
+        let ledger = state.node.ledger.read().await;
+        let tip = ledger.block_at(ledger.chain_height() - 1);
+        match tip {
+            Some(b) => (b.hash.clone(), ledger.chain_height()),
+            None => {
+                // No chain — just seal (bootstrap)
+                seal_and_broadcast(state, pk).await;
+                return;
+            }
+        }
+    };
+
+    // Build validator set from reputation engine (staked + trust)
+    let (stakes, reputations) = {
+        let rep = state.node.reputation.read().await;
+        let leaderboard = rep.get_leaderboard(100);
+        let mut stakes = std::collections::HashMap::new();
+        let mut reps = std::collections::HashMap::new();
+        for u in leaderboard {
+            stakes.insert(u.public_key.clone(), u.atn_staked);
+            reps.insert(u.public_key.clone(), u.trust_score as u64);
+        }
+        (stakes, reps)
+    };
+
+    let validators = p2p::pos_consensus::build_validator_set(&stakes, &reputations);
+
+    // If no eligible validators (nobody has staked enough), allow permissionless sealing
+    // This is the bootstrap phase — before anyone has staked, everyone can propose
+    let has_eligible = validators.iter().any(|v| v.stake >= p2p::pos_consensus::MIN_VALIDATOR_STAKE);
+    if !has_eligible {
+        log::debug!("◈ [PoS] No eligible validators — permissionless seal (bootstrap mode)");
+        seal_and_broadcast(state, pk).await;
+        return;
+    }
+
+    // Check if we're the elected leader
+    // elapsed_secs = how long since the last block was sealed
+    let tip_time = {
+        let ledger = state.node.ledger.read().await;
+        ledger.block_at(ledger.chain_height() - 1)
+            .and_then(|b| chrono::DateTime::parse_from_rfc3339(&b.timestamp).ok())
+            .map(|t| t.timestamp() as u64)
+            .unwrap_or(0)
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let elapsed = now.saturating_sub(tip_time);
+
+    let (is_valid, is_primary) = p2p::pos_consensus::is_valid_proposer(
+        pk, &prev_hash, slot, elapsed, &validators,
+    );
+
+    if is_valid {
+        if is_primary {
+            log::info!("◈ [PoS] We are the ELECTED LEADER for slot {} — sealing block", slot);
+        } else {
+            log::info!("◈ [PoS] We are a FALLBACK proposer for slot {} (elapsed {}s)", slot, elapsed);
+        }
+        seal_and_broadcast(state, pk).await;
+    } else {
+        log::debug!(
+            "◈ [PoS] Not our turn to propose at slot {} (elapsed {}s) — waiting for leader",
+            slot, elapsed
+        );
     }
 }
 

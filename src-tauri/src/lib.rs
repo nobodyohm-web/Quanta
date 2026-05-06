@@ -247,11 +247,20 @@ async fn get_node_ticket(state: tauri::State<'_, Arc<AppState>>) -> Result<Strin
 
 /// Phase 4 — connecte ce nœud à un peer via son EndpointId Iroh.
 /// Le peer doit aussi être abonné au topic QUANTA pour que le sync démarre.
+/// After successful connection, immediately broadcasts a Hello so chain sync begins.
 #[tauri::command]
 async fn connect_peer(state: tauri::State<'_, Arc<AppState>>, peer_id: String) -> Result<(), String> {
     let peer_id = peer_id.trim().to_string();
     if peer_id.is_empty() { return Err("EndpointId vide".into()); }
-    state.node.connect_peer(&peer_id).await
+    state.node.connect_peer(&peer_id).await?;
+    // Trigger immediate Hello so the peer sees us and sync starts now
+    let state_clone = state.inner().clone();
+    tokio::spawn(async move {
+        // Small delay to let gossip topology settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        p2p::gossip_tasks::trigger_hello_now(&state_clone).await;
+    });
+    Ok(())
 }
 
 // ─── Reputation & Social (REMOVED — V2 pure crypto) ─────────────

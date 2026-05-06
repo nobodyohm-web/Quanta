@@ -166,6 +166,8 @@ impl WillowNode {
 
     /// Phase 4 — connecte le nœud à un peer via son EndpointId (string).
     /// Le peer doit aussi être abonné au topic QUANTA pour que le sync démarre.
+    /// After successful connection, triggers an immediate Hello broadcast
+    /// so the peer detects us and chain sync can begin.
     pub async fn connect_peer(&self, peer_id_str: &str) -> Result<(), String> {
         let sender_guard = self.gossip_topic_sender.read().await;
         let sender = sender_guard.as_ref().ok_or("Gossip not initialized")?;
@@ -173,6 +175,7 @@ impl WillowNode {
             .map_err(|e| format!("EndpointId invalide: {}", e))?;
         sender.join_peers(vec![peer_id]).await
             .map_err(|e| format!("join_peers failed: {}", e))?;
+        log::info!("◈ [P2P] Connected to peer {}", &peer_id_str[..peer_id_str.len().min(16)]);
         Ok(())
     }
 
@@ -240,8 +243,10 @@ impl WillowNode {
     pub async fn get_status(&self) -> NodeStatus {
         let peer_count = self.peer_info.read().await.len() as u32;
         let is_online = *self.endpoint_active.read().await;
+        let peer_id = self.node_addr.read().await.clone().unwrap_or_default();
         NodeStatus {
             node_id: self.node_id.clone(),
+            peer_id,
             is_online,
             peer_count,
             active_subspaces: 0,

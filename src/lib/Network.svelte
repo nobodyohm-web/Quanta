@@ -3,12 +3,15 @@
 
   let peerCount = $state(0);
   let myPeerId = $state("");
+  let isOnline = $state(false);
+  let protocol = $state("");
   let totalMined = $state(0);
   let totalBurned = $state(0);
   let supply = $state(0);
   let copied = $state(false);
   let connectInput = $state("");
   let connectErr = $state("");
+  let connectSuccess = $state(false);
   let connecting = $state(false);
   let networkCanvas: HTMLCanvasElement;
   let animFrame = $state(0);
@@ -26,6 +29,8 @@
       const s = await invoke<any>("get_node_status");
       peerCount = s?.peer_count ?? 0;
       myPeerId = s?.peer_id ?? "";
+      isOnline = s?.is_online ?? false;
+      protocol = s?.protocol ?? "";
     } catch {}
     try {
       const l = await invoke<any>("get_ledger_stats");
@@ -37,7 +42,7 @@
 
   $effect(() => {
     refresh();
-    const t = setInterval(refresh, 8000);
+    const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   });
 
@@ -138,7 +143,7 @@
         ctx.textAlign = 'center';
         ctx.fillText('Aucun peer connecté', cx, cy + 50);
         ctx.font = '11px Inter, sans-serif';
-        ctx.fillText('Connectez un peer pour voir le réseau', cx, cy + 70);
+        ctx.fillText('Partagez votre Peer ID pour connecter un ami', cx, cy + 70);
       }
 
       animFrame = requestAnimationFrame(draw);
@@ -155,11 +160,14 @@
 
   async function connectPeer() {
     connectErr = "";
+    connectSuccess = false;
     if (!connectInput.trim()) { connectErr = "Peer ID requis"; return; }
     connecting = true;
     try {
       await invoke("connect_peer", { peerId: connectInput.trim() });
       connectInput = "";
+      connectSuccess = true;
+      setTimeout(() => connectSuccess = false, 4000);
       refresh();
     } catch (e) {
       connectErr = String(e);
@@ -178,10 +186,10 @@
   <div class="page-header">
     <div>
       <div class="page-title">Réseau</div>
-      <div class="page-sub">Visualisation live du réseau P2P QUANTA</div>
+      <div class="page-sub">Réseau P2P QUANTA — {protocol || 'Initialisation…'}</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
-      <div class="pulse-dot"></div>
+      <div class="status-dot" class:online={isOnline}></div>
       <span style="font-size:13px;color:var(--color-text-2);">{peerCount} peer{peerCount !== 1 ? 's' : ''} connecté{peerCount !== 1 ? 's' : ''}</span>
     </div>
   </div>
@@ -207,25 +215,130 @@
     </div>
   </div>
 
-  <!-- Peer ID + connect -->
-  <div class="card" style="margin-bottom:12px;">
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
-      <div style="flex:1;">
-        <div class="stat-label" style="margin-bottom:6px;">Mon Peer ID</div>
-        <button class="copy-btn" onclick={copyId}>
-          {#if copied}✓ Copié !{:else}{myPeerId ? myPeerId.slice(0, 24) + '…' : '—'}{/if}
-        </button>
+  <!-- Connection panel -->
+  <div class="card connect-panel" style="margin-bottom:12px;">
+    <h3 class="connect-title">Connexion P2P</h3>
+
+    <!-- Step 1: Your ID -->
+    <div class="connect-section">
+      <div class="connect-step">
+        <span class="step-num">1</span>
+        <span class="step-text">Envoyez votre Peer ID à votre ami</span>
+      </div>
+      <div class="id-display">
+        <code class="peer-id-code">{myPeerId || '⏳ Endpoint en cours…'}</code>
+        {#if myPeerId}
+          <button class="btn btn-sm" onclick={copyId}>
+            {copied ? '✓ Copié' : 'Copier'}
+          </button>
+        {/if}
       </div>
     </div>
-    <div style="display:flex;gap:10px;">
-      <input class="input mono" placeholder="Coller le Peer ID d'un autre nœud…" bind:value={connectInput}
-        onkeydown={(e) => e.key === 'Enter' && connectPeer()} style="flex:1;" />
-      <button class="btn btn-primary" onclick={connectPeer} disabled={connecting}>
-        {connecting ? '…' : 'Connecter'}
-      </button>
+
+    <!-- Step 2: Connect -->
+    <div class="connect-section">
+      <div class="connect-step">
+        <span class="step-num">2</span>
+        <span class="step-text">Collez le Peer ID de votre ami</span>
+      </div>
+      <div style="display:flex;gap:10px;">
+        <input class="input mono" placeholder="Coller le Peer ID reçu…" bind:value={connectInput}
+          onkeydown={(e) => e.key === 'Enter' && connectPeer()} style="flex:1;" />
+        <button class="btn btn-primary" onclick={connectPeer} disabled={connecting}>
+          {connecting ? '⏳' : 'Connecter'}
+        </button>
+      </div>
+      {#if connectErr}
+        <div class="connect-msg err">{connectErr}</div>
+      {/if}
+      {#if connectSuccess}
+        <div class="connect-msg ok">✓ Peer connecté ! Le Hello sera échangé dans quelques secondes.</div>
+      {/if}
     </div>
-    {#if connectErr}
-      <div style="font-size:12px;color:var(--color-red);margin-top:8px;">{connectErr}</div>
-    {/if}
   </div>
 </div>
+
+<style>
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--color-text-3);
+    transition: background 0.3s;
+  }
+  .status-dot.online {
+    background: #00E5CC;
+    box-shadow: 0 0 6px rgba(0,229,204,0.5);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 4px rgba(0,229,204,0.3); }
+    50% { box-shadow: 0 0 12px rgba(0,229,204,0.7); }
+  }
+
+  .connect-panel { padding: 24px; }
+  .connect-title {
+    font-size: 15px; font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 20px 0;
+  }
+  .connect-section {
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .connect-section:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+  .connect-step {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 12px;
+  }
+  .step-num {
+    width: 22px; height: 22px; min-width: 22px;
+    border-radius: 50%;
+    background: var(--color-accent, #00E5CC);
+    color: #000;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+  }
+  .step-text {
+    font-size: 13px; font-weight: 500;
+    color: var(--color-text-1);
+  }
+  .id-display {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px;
+    background: var(--color-bg-2);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+  .peer-id-code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-text-0);
+    word-break: break-all;
+    flex: 1;
+    line-height: 1.6;
+    user-select: all;
+  }
+  .btn-sm {
+    padding: 6px 14px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .connect-msg {
+    font-size: 12px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+  }
+  .connect-msg.err {
+    color: var(--color-red);
+    background: rgba(255, 68, 68, 0.06);
+  }
+  .connect-msg.ok {
+    color: #00E5CC;
+    background: rgba(0, 229, 204, 0.06);
+  }
+</style>

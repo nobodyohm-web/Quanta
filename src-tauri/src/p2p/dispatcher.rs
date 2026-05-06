@@ -289,10 +289,12 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         GossipMessage::Hello {
             heads, node_id, watts, country, version: _,
             tasks_completed, blocks_verified, uptime_minutes,
+            chain_height,
         } => {
             handle_hello(
                 state, &env.sender, &node_id, heads, watts, &country,
                 tasks_completed, blocks_verified, uptime_minutes,
+                chain_height,
             ).await;
         }
         GossipMessage::WantNodes { ids } => {
@@ -611,11 +613,12 @@ async fn handle_hello(
     tasks_completed: u64,
     blocks_verified: u64,
     uptime_minutes: u64,
+    peer_chain_height: u64,
 ) {
     log::info!(
-        "◈ [Dispatch] Hello from {} ({} heads, {:.1}W, {}, tasks={} blocks={} uptime={}m)",
+        "◈ [Dispatch] Hello from {} ({} heads, {:.1}W, {}, chain_h={}, tasks={} blocks={} uptime={}m)",
         &sender_pk[..sender_pk.len().min(12)], their_heads.len(), watts, country,
-        tasks_completed, blocks_verified, uptime_minutes,
+        peer_chain_height, tasks_completed, blocks_verified, uptime_minutes,
     );
 
     // STRUCT-4: Clamp peer-declared watts to a sane range.
@@ -655,13 +658,14 @@ async fn handle_hello(
         broadcast(state, msg).await;
     }
 
-    // Late-joiner chain sync: if our chain is shorter than genesis-only,
-    // request the full chain from the peer (they may have more blocks).
+    // Chain sync: request blocks whenever the peer's chain is taller than ours.
+    // This works for both late-joiners AND normal operation (peer mined while
+    // we were offline, or we just connected).
     let our_height = state.node.ledger.read().await.chain_height();
-    if our_height <= 1 && !their_heads.is_empty() {
+    if peer_chain_height > our_height {
         log::info!(
-            "◈ [Dispatch] Late-joiner detected (height={}) — requesting chain from {}",
-            our_height, &sender_pk[..sender_pk.len().min(12)]
+            "◈ [Dispatch] Chain sync needed: our height {} < peer height {} — requesting from {}",
+            our_height, peer_chain_height, &sender_pk[..sender_pk.len().min(12)]
         );
         broadcast(state, GossipMessage::RequestChain {
             from_height: our_height,

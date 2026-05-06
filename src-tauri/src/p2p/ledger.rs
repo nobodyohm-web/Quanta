@@ -7,7 +7,7 @@
 
 use crate::security::CryptoEngine;
 use chrono::Utc;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // Re-export all types from ledger_types so external code keeps working
 pub use super::ledger_types::*;
@@ -22,6 +22,13 @@ pub struct Ledger {
     seen_tx_hashes: HashSet<String>,
     /// B2: Per-account nonce tracking (account_pk → next expected nonce)
     account_nonces: HashMap<String, u64>,
+    /// PERF-1: Incremental balance cache (pk → signed balance in µQTA).
+    /// Updated on every tx insertion/removal. balance_of() reads this in O(1)
+    /// instead of scanning the entire chain O(n).
+    balance_cache: HashMap<String, i128>,
+    /// PERF-2: Bounded deque of the most recent transactions (insertion order).
+    /// recent_txs() reads from this in O(limit) instead of cloning + sorting O(n log n).
+    recent_deque: VecDeque<Transaction>,
 }
 
 impl Ledger {
@@ -42,6 +49,69 @@ impl Ledger {
             tx_counter: 0,
             seen_tx_hashes: HashSet::new(),
             account_nonces: HashMap::new(),
+            balance_cache: HashMap::new(),
+            recent_deque: VecDeque::new(),
+        }
+    }
+
+    /// PERF-1: Maximum entries kept in the recent_deque (bounded ring buffer).
+    const MAX_RECENT: usize = 500;
+
+    /// PERF-1: Apply a transaction's balance effects to the cache.
+    fn cache_apply_tx(&mut self, tx: &Transaction) {
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        if !synthetic(&tx.to) {
+            *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+        }
+        if !synthetic(&tx.from) {
+            *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+        }
+        // PERF-2: push to recent deque (bounded)
+        self.recent_deque.push_back(tx.clone());
+        if self.recent_deque.len() > Self::MAX_RECENT {
+            self.recent_deque.pop_front();
+        }
+    }
+
+    /// PERF-1: Reverse a transaction's balance effects (used during fork reorg).
+    fn cache_revert_tx(&mut self, tx: &Transaction) {
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        if !synthetic(&tx.to) {
+            *self.balance_cache.entry(tx.to.clone()).or_insert(0) -= tx.amount as i128;
+        }
+        if !synthetic(&tx.from) {
+            *self.balance_cache.entry(tx.from.clone()).or_insert(0) += tx.amount as i128;
+        }
+    }
+
+    /// PERF-1: Full rebuild of balance_cache from chain + pending (used by restore).
+    fn rebuild_cache(&mut self) {
+        self.balance_cache.clear();
+        self.recent_deque.clear();
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        for block in &self.chain {
+            for tx in &block.transactions {
+                if !synthetic(&tx.to) {
+                    *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+                }
+                if !synthetic(&tx.from) {
+                    *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+                }
+                self.recent_deque.push_back(tx.clone());
+            }
+        }
+        for tx in &self.pending {
+            if !synthetic(&tx.to) {
+                *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+            }
+            if !synthetic(&tx.from) {
+                *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+            }
+            self.recent_deque.push_back(tx.clone());
+        }
+        // Trim deque to MAX_RECENT
+        while self.recent_deque.len() > Self::MAX_RECENT {
+            self.recent_deque.pop_front();
         }
     }
 
@@ -82,6 +152,7 @@ impl Ledger {
     /// and credits the synthetic "ESCROW" address.
     pub fn build_escrow_lock_tx(&mut self, from_pk: &str, amount: u64) -> Transaction {
         let tx = self.build_unsigned_tx(from_pk, "ESCROW", amount, TxType::Transfer);
+        self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
         tx
     }
@@ -89,6 +160,7 @@ impl Ledger {
     /// Release funds from the ESCROW pool to a recipient (amount in µQTA).
     pub fn escrow_release_to(&mut self, to_pk: &str, amount: u64) -> Transaction {
         let tx = self.build_unsigned_tx("ESCROW", to_pk, amount, TxType::Transfer);
+        self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
         tx
     }
@@ -96,6 +168,7 @@ impl Ledger {
     /// Create a mining transaction (network-issued, no signature). Amount in µQTA.
     pub fn mine_tx(&mut self, miner_pk: &str, amount: u64, kwh: f64) -> Transaction {
         let tx = self.build_unsigned_tx("NETWORK", miner_pk, amount, TxType::Mining);
+        self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
         if self.pending.len() >= 10 {
             self.seal_block(miner_pk, kwh);
@@ -137,6 +210,7 @@ impl Ledger {
                 return Err("Timestamp hors fenêtre de validité (±5 min)".into());
             }
         }
+        self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
         Ok(tx)
     }
@@ -160,6 +234,7 @@ impl Ledger {
         let tx = self.transfer_tx(from, to, net_amount, crypto)?;
         if burn_amount > 0 {
             let burn_tx = self.build_unsigned_tx(from, "BURN", burn_amount, TxType::Burn);
+            self.cache_apply_tx(&burn_tx);
             self.pending.push(burn_tx);
         }
         Ok((tx, burn_amount))
@@ -186,6 +261,7 @@ impl Ledger {
         if !self.seen_tx_hashes.insert(tx.hash.clone()) {
             return Err("Transaction déjà traitée (replay détecté)".into());
         }
+        self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
         Ok(tx)
     }
@@ -197,6 +273,7 @@ impl Ledger {
         if !self.seen_tx_hashes.insert(tx.hash.clone()) {
             return false; // already seen
         }
+        self.cache_apply_tx(&tx);
         self.pending.push(tx);
         true
     }
@@ -427,10 +504,21 @@ impl Ledger {
                 self.seen_tx_hashes.insert(tx.hash.clone());
             }
 
-            // Remove any pending txs that are now in this block
+            // Remove any pending txs that are now in this block.
+            // Their cache effects are already applied, so no cache update needed.
             let block_tx_ids: HashSet<String> =
                 block.transactions.iter().map(|tx| tx.id.clone()).collect();
+            let pending_tx_ids: HashSet<String> =
+                self.pending.iter().map(|tx| tx.id.clone()).collect();
             self.pending.retain(|tx| !block_tx_ids.contains(&tx.id));
+
+            // PERF-1: Apply cache effects for remote txs that weren't in our pending.
+            // (Remote mining/transfer txs we've never seen locally.)
+            for tx in &block.transactions {
+                if !pending_tx_ids.contains(&tx.id) {
+                    self.cache_apply_tx(tx);
+                }
+            }
 
             log::info!(
                 "◈ [Ledger] Integrated remote block #{} ({} txs, miner={})",
@@ -455,9 +543,14 @@ impl Ledger {
                 );
                 // Pop our tip, replace with the remote block
                 let our_tip = self.chain.pop().ok_or("chain unexpectedly empty")?;
+                // PERF-1: Revert balance effects of the old tip's txs
+                for tx in &our_tip.transactions {
+                    self.cache_revert_tx(tx);
+                }
                 // Re-queue our tip's transactions as pending (they may differ)
                 for tx in our_tip.transactions {
                     if !self.seen_tx_hashes.contains(&tx.hash) {
+                        self.cache_apply_tx(&tx);
                         self.pending.push(tx);
                     }
                 }
@@ -471,6 +564,8 @@ impl Ledger {
                 self.validate_remote_block(&block)?;
                 for tx in &block.transactions {
                     self.seen_tx_hashes.insert(tx.hash.clone());
+                    // PERF-1: Apply new block's tx effects to cache
+                    self.cache_apply_tx(tx);
                 }
                 self.chain.push(block);
                 return Ok(true);
@@ -521,68 +616,34 @@ impl Ledger {
         self.pending.len()
     }
 
-    /// Compute balance from the full chain (in µQTA, saturating at 0).
+    /// Compute balance from the incremental cache (in µQTA, saturating at 0).
+    /// PERF-1: O(1) via balance_cache instead of O(n) full chain scan.
     pub fn balance_of(&self, pk: &str) -> u64 {
-        let mut credits: u128 = 0;
-        let mut debits: u128 = 0;
-        for block in &self.chain {
-            for tx in &block.transactions {
-                if tx.to == pk {
-                    credits += tx.amount as u128;
-                }
-                if tx.from == pk && tx.from != "NETWORK" {
-                    debits += tx.amount as u128;
-                }
-            }
-        }
-        for tx in &self.pending {
-            if tx.to == pk {
-                credits += tx.amount as u128;
-            }
-            if tx.from == pk && tx.from != "NETWORK" {
-                debits += tx.amount as u128;
-            }
-        }
-        credits.saturating_sub(debits).min(u64::MAX as u128) as u64
+        self.balance_cache
+            .get(pk)
+            .copied()
+            .unwrap_or(0)
+            .max(0) as u64
     }
 
     /// Get all balances in µQTA. Excludes synthetic addresses (NETWORK/BURN/ESCROW).
-    /// Uses i128 internally to handle pending negative deltas, then floors at 0.
+    /// PERF-1: O(accounts) direct read from cache instead of O(transactions) scan.
     pub fn all_balances(&self) -> HashMap<String, u64> {
-        let mut bals: HashMap<String, i128> = HashMap::new();
-        let synthetic = |addr: &str| -> bool { matches!(addr, "NETWORK" | "BURN" | "ESCROW") };
-        let credit = |bals: &mut HashMap<String, i128>, tx: &Transaction| {
-            if !synthetic(&tx.to) {
-                *bals.entry(tx.to.clone()).or_default() += tx.amount as i128;
-            }
-            if !synthetic(&tx.from) {
-                *bals.entry(tx.from.clone()).or_default() -= tx.amount as i128;
-            }
-        };
-        for block in &self.chain {
-            for tx in &block.transactions {
-                credit(&mut bals, tx);
-            }
-        }
-        for tx in &self.pending {
-            credit(&mut bals, tx);
-        }
-        bals.into_iter()
-            .map(|(k, v)| (k, v.max(0) as u64))
+        self.balance_cache
+            .iter()
+            .map(|(k, v)| (k.clone(), (*v).max(0) as u64))
             .collect()
     }
 
-    /// Get recent transactions
+    /// Get recent transactions.
+    /// PERF-2: O(limit) read from bounded deque instead of O(n log n) copy+sort.
     pub fn recent_txs(&self, limit: usize) -> Vec<Transaction> {
-        let mut txs: Vec<Transaction> = self
-            .chain
+        self.recent_deque
             .iter()
-            .flat_map(|b| b.transactions.iter().cloned())
-            .collect();
-        txs.extend(self.pending.iter().cloned());
-        txs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        txs.truncate(limit);
-        txs
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Get chain stats. `total_mined` is in µQTA.
@@ -709,13 +770,18 @@ impl Ledger {
         for tx in &snap.pending {
             seen.insert(tx.hash.clone());
         }
-        Self {
+        let mut ledger = Self {
             chain: snap.chain,
             pending: snap.pending,
             tx_counter: snap.tx_counter,
             seen_tx_hashes: seen,
             account_nonces: snap.account_nonces,
-        }
+            balance_cache: HashMap::new(),
+            recent_deque: VecDeque::new(),
+        };
+        // PERF-1: Rebuild cache from restored state
+        ledger.rebuild_cache();
+        ledger
     }
 }
 

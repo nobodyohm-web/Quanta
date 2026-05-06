@@ -70,55 +70,87 @@ pub fn spawn_incoming_dispatch(state: Arc<AppState>) {
     });
 }
 
-/// Spawn the initial Hello broadcast (delayed 5s after startup).
+/// Spawn the periodic Hello broadcast (every 60s).
 /// Announces this node's country, watts, and contribution data to the network.
+/// The first broadcast fires after a 5s delay to let the endpoint initialize.
 pub fn spawn_hello_broadcast(state: Arc<AppState>) {
+    let token = state.node.shutdown.clone();
     tokio::spawn(async move {
+        // Initial delay to let Iroh endpoint initialize
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        let pk = match state.crypto.lock().await.get_identity() {
-            Ok(id) => id.public_key_hex,
-            Err(_) => return,
-        };
 
-        let country = p2p::energy::EnergyOracle::detect_country().to_string();
-        let watts = p2p::energy::estimate_watts();
+        loop {
+            // Build and broadcast Hello
+            if let Err(e) = broadcast_hello_once(&state).await {
+                log::warn!("◈ [Gossip] Hello broadcast failed: {}", e);
+            }
 
-        // Update peer_info with liveness data
-        {
-            let mut info = state.node.peer_info.write().await;
-            let entry = info.entry(pk.to_string()).or_insert_with(|| {
-                p2p::PeerInfo::new(watts, country.to_string())
-            });
-            entry.watts = watts;
-            entry.country = country.to_string();
-            entry.touch();
+            // Wait 60s or shutdown
+            tokio::select! {
+                _ = token.cancelled() => {
+                    log::info!("◈ [Gossip] Hello broadcast shutdown");
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
+            }
         }
-
-        // Register country for energy oracle
-        *state.node.peer_country_reports.write().await
-            .entry(country.to_string()).or_insert(0) += 1;
-
-        let heads = state.node.dag.read().await.heads();
-        let tasks_completed = state.node.marketplace.read().await.completed_by(&pk);
-        let uptime_min = state.node.reputation.read().await
-            .get_user(&pk).map(|u| u.uptime_minutes).unwrap_or(0);
-
-        let msg = p2p::gossip::GossipRouter::build_hello(
-            heads, pk.clone(), watts, country.clone(),
-            tasks_completed, 0, uptime_min,
-        );
-
-        // Sign and broadcast
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        let nonce = state.node.gossip.read().await.next_outgoing_nonce();
-        let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&pk, nonce, &timestamp, &msg);
-        let sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
-        if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(pk, msg, nonce, timestamp, &sig) {
-            state.node.gossip.write().await.mark_seen(&env.id);
-            let _ = state.node.gossip_tx.send(env);
-        }
-        log::info!("◈ [Gossip] Hello broadcast (country={})", country);
     });
+}
+
+/// Immediately broadcast a Hello. Called after connect_peer so the new peer
+/// discovers us and can trigger chain sync without waiting for the 60s cycle.
+pub async fn trigger_hello_now(state: &AppState) {
+    if let Err(e) = broadcast_hello_once(state).await {
+        log::warn!("◈ [Gossip] immediate Hello failed: {}", e);
+    }
+}
+
+/// Build and send one Hello envelope. Extracted for reuse.
+async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
+    let pk = state.crypto.lock().await.get_identity()
+        .map(|i| i.public_key_hex)
+        .map_err(|e| e.to_string())?;
+
+    let country = p2p::energy::EnergyOracle::detect_country().to_string();
+    let watts = p2p::energy::estimate_watts();
+
+    // Update peer_info with liveness data
+    {
+        let mut info = state.node.peer_info.write().await;
+        let entry = info.entry(pk.to_string()).or_insert_with(|| {
+            p2p::PeerInfo::new(watts, country.to_string())
+        });
+        entry.watts = watts;
+        entry.country = country.to_string();
+        entry.touch();
+    }
+
+    // Register country for energy oracle
+    *state.node.peer_country_reports.write().await
+        .entry(country.to_string()).or_insert(0) += 1;
+
+    let heads = state.node.dag.read().await.heads();
+    let tasks_completed = state.node.marketplace.read().await.completed_by(&pk);
+    let uptime_min = state.node.reputation.read().await
+        .get_user(&pk).map(|u| u.uptime_minutes).unwrap_or(0);
+    let chain_height = state.node.ledger.read().await.chain_height();
+
+    let msg = p2p::gossip::GossipRouter::build_hello(
+        heads, pk.clone(), watts, country.clone(),
+        tasks_completed, 0, uptime_min, chain_height,
+    );
+
+    // Sign and broadcast
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = state.node.gossip.read().await.next_outgoing_nonce();
+    let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&pk, nonce, &timestamp, &msg);
+    let sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
+    if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(pk, msg, nonce, timestamp, &sig) {
+        state.node.gossip.write().await.mark_seen(&env.id);
+        let _ = state.node.gossip_tx.send(env);
+    }
+    log::info!("◈ [Gossip] Hello broadcast (country={}, watts={:.0}W)", country, watts);
+    Ok(())
 }
 
 /// Spawn the dead-peer cleanup task (every 30s).

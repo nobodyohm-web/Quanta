@@ -53,6 +53,9 @@ pub enum GossipMessage {
         blocks_verified: u64,
         #[serde(default)]
         uptime_minutes: u64,
+        /// Chain height — so peers can detect if they need to sync.
+        #[serde(default)]
+        chain_height: u64,
     },
     /// "Donne-moi les nœuds avec ces IDs".
     WantNodes {
@@ -269,6 +272,7 @@ impl GossipRouter {
         tasks_completed: u64,
         blocks_verified: u64,
         uptime_minutes: u64,
+        chain_height: u64,
     ) -> GossipMessage {
         GossipMessage::Hello {
             heads,
@@ -279,6 +283,7 @@ impl GossipRouter {
             tasks_completed,
             blocks_verified,
             uptime_minutes,
+            chain_height,
         }
     }
 

@@ -1,10 +1,21 @@
 #![allow(dead_code)] // Module Phase 3 — pas encore intégré
-//! Module Shapley Value — Distribution équitable des récompenses QUANTA
+//! Module Contribution Scoring — Distribution équitable des récompenses QUANTA
 //!
-//! Implémente une approximation linéaire O(n) de la Shapley Value
-//! pour distribuer les 100 QUANTA/h entre les nœuds du réseau.
+//! ## Algorithme
 //!
-//! **Shapley v2 (V3 social web)** — facteurs de contribution :
+//! Ce module implémente un **scoring linéaire pondéré** O(n) inspiré de la
+//! Shapley Value, mais ce n'est **PAS** un calcul Shapley exact.
+//!
+//! La Shapley Value réelle (Shapley 1953) requiert l'évaluation de toutes les
+//! coalitions possibles (2^n), ce qui est NP-hard. Les approximations Monte
+//! Carlo standard (permutation sampling) convergent en O(n·m) avec m samples.
+//!
+//! Notre approche est un **weighted linear contribution score** qui respecte
+//! les axiomes d'efficience (Σ = 1) et de symétrie (agents identiques → parts
+//! égales), mais ne garantit pas l'axiome de marginalité (un agent ne peut
+//! recevoir plus que sa contribution marginale à toute coalition).
+//!
+//! **Facteurs de contribution v2 (V3 social web)** :
 //!   - Énergie (25%)        : watts mesurés / total réseau
 //!   - Travail compute (25%): tâches exécutées / total tâches
 //!   - Validation (20%)     : blocs vérifiés / total blocs
@@ -16,6 +27,8 @@
 //! (vote quadratique → résistance aux fermes de bots).
 //!
 //! Référence : Lloyd S. Shapley, "A Value for n-Person Games", 1953
+//! Note : notre implémentation est une *approximation linéaire*, pas le
+//! calcul combinatoire original.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,10 +113,11 @@ impl NetworkTotals {
     }
 }
 
-/// Calcule le score Shapley d'un nœud (approximation linéaire).
+/// Calcule le score de contribution d'un nœud (weighted linear, inspiré Shapley).
 ///
 /// Retourne un score entre 0.0 et 1.0 représentant la part du nœud
-/// dans l'émission réseau.
+/// dans l'émission réseau. Ce n'est PAS un calcul Shapley exact (NP-hard)
+/// mais un scoring linéaire pondéré qui satisfait l'axiome d'efficience.
 ///
 /// # Invariants
 /// - Si un seul nœud → score = 1.0 (reçoit tout)

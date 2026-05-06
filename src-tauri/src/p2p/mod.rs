@@ -33,6 +33,8 @@ pub mod social;
 pub mod moderation;
 pub mod forums;
 pub mod trust_graph;
+// Phase 5 : Proof-of-Stake consensus with VRF leader election
+pub mod pos_consensus;
 // Simulation réseau
 #[cfg(test)]
 mod simulation;
@@ -41,6 +43,8 @@ mod simulation;
 mod security_tests;
 #[cfg(test)]
 mod integration_test;
+#[cfg(test)]
+mod integration_tests;
 
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -49,6 +53,8 @@ use std::time::Instant;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub node_id: String,
+    /// Shareable Iroh EndpointId — the other user pastes this to connect.
+    pub peer_id: String,
     pub is_online: bool,
     pub peer_count: u32,
     pub active_subspaces: usize,
