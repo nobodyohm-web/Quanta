@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   let peerCount = $state(0);
   let myPeerId = $state("");
@@ -15,6 +16,39 @@
   let connecting = $state(false);
   let networkCanvas: HTMLCanvasElement;
   let animFrame = $state(0);
+
+  // NET-9/NET-10/NET-15: Per-peer metrics + display name (NET-15)
+  type PeerMetric = {
+    public_key: string;
+    display_name: string | null;
+    country: string;
+    watts: number;
+    last_rtt_ms: number | null;
+    smoothed_rtt_ms: number | null;
+    bytes_in: number;
+    messages_in: number;
+    pings_sent: number;
+    pongs_received: number;
+    loss_ratio: number;
+    uptime_secs: number;
+    quality_score: number | null;
+    last_seen_secs_ago: number;
+  };
+  let peerMetrics = $state<PeerMetric[]>([]);
+  let myDisplayName = $state<string | null>(null);
+  let displayNameDraft = $state("");
+  let displayNameSaving = $state(false);
+
+  // NET-16: Chain-sync progress event payload + freshness gate
+  type SyncProgress = {
+    our_height: number;
+    sender_height: number;
+    integrated: number;
+    rejected: number;
+    sender: string;
+  };
+  let syncProgress = $state<SyncProgress | null>(null);
+  let syncProgressAt = $state(0); // ms epoch — used to fade banner
 
   interface CanvasNode {
     x: number; y: number; vx: number; vy: number;
@@ -38,12 +72,60 @@
       totalBurned = l?.total_burned ?? 0;
       supply = totalMined - totalBurned;
     } catch {}
+    // NET-9/10: pull per-peer metrics every refresh tick
+    try {
+      peerMetrics = await invoke<PeerMetric[]>("get_peer_metrics");
+    } catch {}
+  }
+
+  async function loadDisplayName() {
+    try {
+      myDisplayName = await invoke<string | null>("get_display_name");
+      displayNameDraft = myDisplayName ?? "";
+    } catch {}
+  }
+
+  async function saveDisplayName() {
+    displayNameSaving = true;
+    try {
+      const trimmed = displayNameDraft.trim();
+      const arg = trimmed.length === 0 ? null : trimmed;
+      myDisplayName = await invoke<string | null>("set_display_name", { name: arg });
+      displayNameDraft = myDisplayName ?? "";
+    } catch (e) {
+      console.warn("set_display_name failed", e);
+    }
+    displayNameSaving = false;
   }
 
   $effect(() => {
     refresh();
+    loadDisplayName();
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
+  });
+
+  // NET-16: subscribe to chain-sync progress events from the backend.
+  $effect(() => {
+    let unlisten: UnlistenFn | null = null;
+    listen<SyncProgress>("torus://chain-sync-progress", (e) => {
+      syncProgress = e.payload;
+      syncProgressAt = Date.now();
+    }).then((fn) => { unlisten = fn; }).catch(() => {});
+    return () => { if (unlisten) unlisten(); };
+  });
+
+  // Hide the banner once sync caught up AND the last event is older than 8s.
+  let showSyncBanner = $derived.by(() => {
+    if (!syncProgress) return false;
+    const stale = Date.now() - syncProgressAt > 8000;
+    const caught = syncProgress.our_height >= syncProgress.sender_height;
+    return !(stale && caught);
+  });
+  let syncPercent = $derived.by(() => {
+    if (!syncProgress || syncProgress.sender_height === 0) return 0;
+    const pct = (syncProgress.our_height / syncProgress.sender_height) * 100;
+    return Math.max(0, Math.min(100, pct));
   });
 
   // Canvas animation — uses REAL peer count, no fake data
@@ -215,6 +297,83 @@
     </div>
   </div>
 
+  <!-- NET-16: chain-sync progress banner -->
+  {#if showSyncBanner && syncProgress}
+    <div class="card sync-banner" style="margin-bottom:12px;">
+      <div class="sync-row">
+        <span class="sync-label">Synchronisation chaîne</span>
+        <span class="sync-counts mono">
+          {syncProgress.our_height} / {syncProgress.sender_height} blocs
+          {#if syncProgress.integrated > 0}
+            <span class="sync-delta">+{syncProgress.integrated}</span>
+          {/if}
+        </span>
+      </div>
+      <div class="sync-bar"><div class="sync-bar-fill" style="width:{syncPercent}%;"></div></div>
+    </div>
+  {/if}
+
+  <!-- NET-15: Display name editor -->
+  <div class="card name-panel" style="margin-bottom:12px;">
+    <div class="name-row">
+      <div class="name-label">
+        <span class="name-title">Surnom public</span>
+        <span class="name-sub">Affiché aux autres peers (signé). Vide = anonyme.</span>
+      </div>
+      <div style="display:flex;gap:8px;flex:1;max-width:420px;">
+        <input
+          class="input"
+          maxlength="32"
+          placeholder="Ex: alex@quanta"
+          bind:value={displayNameDraft}
+          onkeydown={(e) => e.key === 'Enter' && saveDisplayName()}
+          style="flex:1;"
+        />
+        <button class="btn btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
+          {displayNameSaving ? '⏳' : 'Enregistrer'}
+        </button>
+      </div>
+    </div>
+    {#if myDisplayName !== null && myDisplayName !== ''}
+      <div class="name-current">Actuel : <strong>{myDisplayName}</strong></div>
+    {/if}
+  </div>
+
+  <!-- NET-9/10: Peer metrics table -->
+  {#if peerMetrics.length > 0}
+    <div class="card peers-panel" style="margin-bottom:12px;">
+      <h3 class="connect-title" style="margin-bottom:12px;">Pairs ({peerMetrics.length})</h3>
+      <div class="peers-table">
+        <div class="peers-head">
+          <span>Nom / Clé</span>
+          <span>Pays</span>
+          <span>RTT</span>
+          <span>Pertes</span>
+          <span>Qualité</span>
+          <span>Vu</span>
+        </div>
+        {#each peerMetrics as p (p.public_key)}
+          <div class="peers-row">
+            <span class="peer-name mono" title={p.public_key}>
+              {p.display_name || (p.public_key.slice(0, 16) + '…')}
+            </span>
+            <span>{p.country || '—'}</span>
+            <span class="mono">{p.smoothed_rtt_ms != null ? p.smoothed_rtt_ms + ' ms' : '—'}</span>
+            <span class="mono">{(p.loss_ratio * 100).toFixed(0)}%</span>
+            <span>
+              {#if p.quality_score != null}
+                <span class="quality-pill" style="--q:{p.quality_score};">{p.quality_score}</span>
+              {:else}
+                <span style="color:var(--color-text-3);">—</span>
+              {/if}
+            </span>
+            <span class="mono">{p.last_seen_secs_ago}s</span>
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   <!-- Connection panel -->
   <div class="card connect-panel" style="margin-bottom:12px;">
     <h3 class="connect-title">Connexion P2P</h3>
@@ -340,5 +499,98 @@
   .connect-msg.ok {
     color: #00E5CC;
     background: rgba(0, 229, 204, 0.06);
+  }
+
+  /* NET-16: chain-sync banner */
+  .sync-banner { padding: 16px 20px; }
+  .sync-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .sync-label { font-size: 13px; color: var(--color-text-2); font-weight: 500; }
+  .sync-counts { font-size: 12px; color: var(--color-text-1); }
+  .sync-delta {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(0, 220, 130, 0.12);
+    color: #00DC82;
+    font-size: 11px;
+  }
+  .sync-bar {
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .sync-bar-fill {
+    height: 100%;
+    background: #00DC82;
+    transition: width 0.4s ease-out;
+  }
+
+  /* NET-15: display name editor */
+  .name-panel { padding: 16px 20px; }
+  .name-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .name-label { display: flex; flex-direction: column; gap: 2px; min-width: 200px; }
+  .name-title { font-size: 13px; font-weight: 600; color: var(--color-text-1); }
+  .name-sub { font-size: 11px; color: var(--color-text-3); }
+  .name-current {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--color-border);
+    font-size: 12px;
+    color: var(--color-text-2);
+  }
+
+  /* NET-9/10: peer table */
+  .peers-panel { padding: 20px; }
+  .peers-table {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--color-border);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .peers-head, .peers-row {
+    display: grid;
+    grid-template-columns: 2fr 0.7fr 0.9fr 0.9fr 0.9fr 0.7fr;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--color-bg-1);
+    font-size: 12px;
+  }
+  .peers-head {
+    background: var(--color-bg-2);
+    color: var(--color-text-3);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .peers-row:hover { background: var(--color-bg-2); }
+  .peer-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-1);
+  }
+  .quality-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    /*
+     * NET-10: green for >=80, amber for 50-79, red below 50.
+     * Pure color cue, no glow (rule 11).
+     */
+    background: hsl(calc(var(--q) * 1.2), 70%, 18%);
+    color: hsl(calc(var(--q) * 1.2), 70%, 70%);
   }
 </style>
