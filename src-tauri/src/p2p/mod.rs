@@ -8,6 +8,8 @@ pub mod ledger;
 pub mod merkle_dag;
 pub mod consensus;
 pub mod gossip;
+// NET-3 : Priority-aware outgoing gossip channel
+pub mod gossip_priority;
 // Phase 2C : Oracle énergie réelle
 pub mod energy;
 // Phase 2D : Anti-sybil PoC

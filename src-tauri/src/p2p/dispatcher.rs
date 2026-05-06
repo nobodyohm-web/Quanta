@@ -287,10 +287,26 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
 
     match env.payload {
         GossipMessage::Hello {
-            heads, node_id, watts, country, version: _,
+            heads, node_id, watts, country, version,
             tasks_completed, blocks_verified, uptime_minutes,
             chain_height, known_peer_ids,
         } => {
+            // NET-5: Protocol version compatibility check. We never reject —
+            // unknown fields already default thanks to #[serde(default)] — but
+            // a mismatch is worth surfacing in logs so operators notice.
+            use crate::p2p::gossip::TORUS_PROTOCOL_VERSION;
+            if version > TORUS_PROTOCOL_VERSION {
+                log::warn!(
+                    "◈ [NET-5] peer {} runs newer protocol v{} (we are v{}) — \
+                     processing what we can; consider upgrading",
+                    &env.sender[..env.sender.len().min(12)], version, TORUS_PROTOCOL_VERSION
+                );
+            } else if version < TORUS_PROTOCOL_VERSION {
+                log::debug!(
+                    "◈ [NET-5] peer {} runs legacy protocol v{} (we are v{})",
+                    &env.sender[..env.sender.len().min(12)], version, TORUS_PROTOCOL_VERSION
+                );
+            }
             handle_hello(
                 state, &env.sender, &node_id, heads, watts, &country,
                 tasks_completed, blocks_verified, uptime_minutes,
@@ -310,6 +326,13 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             handle_ping(state, &env.sender, nonce).await;
         }
         GossipMessage::Pong { nonce } => {
+            // NET-4: Pong is also a liveness signal — touch the peer if known.
+            {
+                let mut info = state.node.peer_info.write().await;
+                if let Some(entry) = info.get_mut(&env.sender) {
+                    entry.touch();
+                }
+            }
             log::debug!("◈ [Dispatch] Pong from {} nonce={}", &env.sender[..env.sender.len().min(12)], nonce);
         }
         GossipMessage::ReportPeer { peer_id, reason } => {
@@ -816,8 +839,20 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
     log::debug!("◈ [Dispatch] tx {} ({:?}) appliquée au CRDT", &tx.id, tx.tx_type);
 }
 
-/// Ping → répondre Pong.
-async fn handle_ping(state: &Arc<AppState>, _sender_pk: &str, nonce: u64) {
+/// Ping → répondre Pong + rafraîchir la liveness du pair.
+///
+/// NET-4: Ping est un battement de cœur léger (15s) qui complète Hello (120s).
+/// Recevoir un Ping signé valide nous dit que le pair est encore vivant : on
+/// touche son entrée `peer_info` pour repousser l'éviction TTL. On ne crée PAS
+/// d'entrée pour un pair inconnu — la première découverte passe toujours par
+/// Hello (qui apporte watts + country + contribs).
+async fn handle_ping(state: &Arc<AppState>, sender_pk: &str, nonce: u64) {
+    {
+        let mut info = state.node.peer_info.write().await;
+        if let Some(entry) = info.get_mut(sender_pk) {
+            entry.touch();
+        }
+    }
     broadcast(state, GossipMessage::Pong { nonce }).await;
 }
 

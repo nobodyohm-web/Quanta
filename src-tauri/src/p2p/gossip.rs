@@ -13,6 +13,22 @@ use crate::p2p::merkle_dag::DagNode;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// ─── Protocol versioning (NET-5) ─────────────────────────────────────────────
+
+/// NET-5: Current Torus wire protocol version. Embedded in every Hello.
+/// Bump on any breaking change to message types or signing semantics.
+///
+/// Versioning policy:
+/// - Receiving a Hello with `version > TORUS_PROTOCOL_VERSION` → log a warning
+///   (peer is newer than us) but keep processing what we understand.
+/// - Receiving a Hello with `version < TORUS_PROTOCOL_VERSION` → log a debug
+///   line; we still accept legacy peers because all new fields are
+///   `#[serde(default)]`.
+/// - Unknown payload variants always deserialize as a parse error and are
+///   silently dropped at the JSON layer, satisfying the "skip unknown
+///   messages gracefully" requirement.
+pub const TORUS_PROTOCOL_VERSION: u8 = 2;
+
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
 /// Identifiant unique d'un message (BLAKE3 hex du contenu).
@@ -40,9 +56,12 @@ pub struct GossipEnvelope {
 #[serde(tag = "type", content = "data")]
 pub enum GossipMessage {
     /// Annonce initiale : "voici mes heads + ma consommation énergie + contributions".
+    /// NET-5: `version` carries `TORUS_PROTOCOL_VERSION`. Peers on different versions
+    /// keep talking — unknown fields fall back to defaults.
     Hello {
         heads: Vec<String>,
         node_id: String,
+        #[serde(default = "default_protocol_version")]
         version: u8,
         watts: f64,      // watts CPU mesurés (V2 proportional mining)
         country: String, // code pays ISO (oracle énergie réseau)
@@ -151,6 +170,12 @@ pub enum GossipMessage {
     PublishSiteManifest {
         manifest_json: String,
     },
+}
+
+/// NET-5: Default the embedded `Hello.version` field for legacy envelopes
+/// that predate the protocol-version constant.
+fn default_protocol_version() -> u8 {
+    1
 }
 
 /// Raison d'un signalement de pair.
@@ -283,7 +308,7 @@ impl GossipRouter {
         GossipMessage::Hello {
             heads,
             node_id,
-            version: 1,
+            version: TORUS_PROTOCOL_VERSION,
             watts,
             country,
             tasks_completed,
@@ -473,5 +498,54 @@ mod tests {
         assert_eq!(want.len(), 2);
         assert!(want.contains(&"def".to_string()));
         assert!(want.contains(&"ghi".to_string()));
+    }
+
+    #[test]
+    fn build_hello_carries_current_protocol_version() {
+        // NET-5: every freshly built Hello must announce TORUS_PROTOCOL_VERSION
+        // so peers can reason about compat.
+        let hello = GossipRouter::build_hello(
+            vec![], "n".into(), 10.0, "FR".into(), 0, 0, 0, 0, vec![]
+        );
+        match hello {
+            GossipMessage::Hello { version, .. } => {
+                assert_eq!(version, TORUS_PROTOCOL_VERSION);
+            }
+            _ => panic!("expected Hello variant"),
+        }
+    }
+
+    #[test]
+    fn legacy_hello_without_version_field_defaults_to_v1() {
+        // NET-5: A legacy peer that sent Hello without a `version` field
+        // (pre-NET-5 wire format) must deserialize cleanly with version=1.
+        let legacy_json = serde_json::json!({
+            "type": "Hello",
+            "data": {
+                "heads": [],
+                "node_id": "legacy-node",
+                "watts": 5.0,
+                "country": "FR"
+                // no `version`, no other newer fields
+            }
+        });
+        let parsed: GossipMessage = serde_json::from_value(legacy_json)
+            .expect("legacy Hello must deserialize via #[serde(default)]");
+        match parsed {
+            GossipMessage::Hello { version, .. } => assert_eq!(version, 1),
+            _ => panic!("expected Hello"),
+        }
+    }
+
+    #[test]
+    fn unknown_message_variant_fails_to_deserialize_gracefully() {
+        // NET-5: An unknown payload variant must fail at JSON layer (no panic),
+        // letting the dispatcher silently drop it.
+        let unknown = serde_json::json!({
+            "type": "FromTheFuture",
+            "data": { "foo": 42 }
+        });
+        let res: Result<GossipMessage, _> = serde_json::from_value(unknown);
+        assert!(res.is_err(), "unknown variants must fail safely, not crash");
     }
 }

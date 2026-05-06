@@ -9,7 +9,8 @@ use super::reputation::ReputationEngine;
 use super::ledger::Ledger;
 use super::consensus::ConsensusEngine;
 use super::merkle_dag::MerkleDAG;
-use super::gossip::{GossipEnvelope, GossipRouter};
+use super::gossip::GossipRouter;
+use super::gossip_priority::{priority_channel, PrioritySender, PriorityReceiver};
 use super::energy::EnergyOracle;
 use super::marketplace::Marketplace;
 use super::page_store::PageStore;
@@ -31,7 +32,7 @@ use std::sync::atomic::AtomicU64;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// B3: Maximum time without a Hello before a peer is considered dead.
@@ -138,10 +139,12 @@ pub struct WillowNode {
     pub forums: Arc<RwLock<ForumsEngine>>,
     /// V3 — Graphe de Follow (pour PageRank personnalisé Web of Trust)
     pub follow_graph: Arc<RwLock<FollowGraph>>,
-    /// Phase 3 — channel sortant pour les enveloppes gossip. Le drain est branché à
-    /// Iroh dès qu'un endpoint est actif ; sinon il accumule en local pour rejouer.
-    pub gossip_tx: mpsc::UnboundedSender<GossipEnvelope>,
-    gossip_rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<GossipEnvelope>>>>,
+    /// Phase 3 + NET-3 — channel sortant priorisé pour les enveloppes gossip.
+    /// Quatre lanes (Critical/High/Medium/Low) drainées par ordre de priorité.
+    /// Le drain est branché à Iroh dès qu'un endpoint est actif ; sinon il
+    /// accumule en local pour rejouer.
+    pub gossip_tx: PrioritySender,
+    gossip_rx: Arc<RwLock<Option<PriorityReceiver>>>,
     /// Phase 4 — broadcaster sur le topic iroh-gossip ; rempli après init_endpoint().
     pub gossip_topic_sender: Arc<RwLock<Option<GossipSender>>>,
     /// Phase 4 — events entrants depuis le topic ; consommé par le dispatcher de lib.rs.
@@ -167,7 +170,7 @@ impl WillowNode {
     pub fn new() -> Self {
         let raw_id = blake3::hash(uuid::Uuid::new_v4().as_bytes());
         let node_id = hex::encode(raw_id.as_bytes());
-        let (gossip_tx, gossip_rx) = mpsc::unbounded_channel();
+        let (gossip_tx, gossip_rx) = priority_channel();
         Self {
             reputation: Arc::new(RwLock::new(ReputationEngine::new())),
             ledger: Arc::new(RwLock::new(Ledger::new())),
@@ -334,9 +337,9 @@ impl WillowNode {
             .collect()
     }
 
-    /// Phase 3 — prend (et consomme) le receiver gossip. À appeler une seule fois
-    /// par la boucle de drain (Iroh ou stub local).
-    pub async fn take_gossip_receiver(&self) -> Option<mpsc::UnboundedReceiver<GossipEnvelope>> {
+    /// Phase 3 + NET-3 — prend (et consomme) le receiver gossip priorisé.
+    /// À appeler une seule fois par la boucle de drain (Iroh ou stub local).
+    pub async fn take_gossip_receiver(&self) -> Option<PriorityReceiver> {
         self.gossip_rx.write().await.take()
     }
 

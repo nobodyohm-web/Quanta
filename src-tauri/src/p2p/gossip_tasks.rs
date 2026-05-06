@@ -1,11 +1,20 @@
 //! Gossip background tasks — extracted from lib.rs for clarity.
 //!
-//! Five async tasks:
-//!   1. Outgoing gossip drain (mpsc → iroh-gossip broadcast)
+//! Six async tasks:
+//!   1. Outgoing gossip drain (priority queue → iroh-gossip broadcast)
 //!   2. Incoming gossip dispatch (iroh-gossip events → dispatcher)
-//!   3. Initial Hello broadcast (country + watts announcement)
-//!   4. Dead-peer cleanup (every 30s)
-//!   5. NET-1: Auto-reconnect loop (exponential backoff for lost peers)
+//!   3. NET-4: Heavy Hello broadcast (every 120s — full sync metadata)
+//!   4. NET-4: Lightweight Ping broadcast (every 15s — liveness only)
+//!   5. Dead-peer cleanup (every 30s)
+//!   6. NET-1: Auto-reconnect loop (exponential backoff for lost peers)
+//!
+//! NET-4 — heartbeat split:
+//! Hello carries the full state advertisement (heads, watts, country, contribs,
+//! chain_height, known_peer_ids) and is expensive to sign + broadcast. Ping is
+//! a 1-field payload sufficient to tell peers "I'm alive". Splitting them lets
+//! us refresh liveness 8× more often without paying the heavy Hello cost each
+//! time. Stale chain detection still happens via NewBlock broadcasts on seal —
+//! Hello at 120s is just a lazy backstop for nodes that missed a NewBlock.
 
 use crate::p2p;
 use crate::AppState;
@@ -79,7 +88,15 @@ pub fn spawn_incoming_dispatch(state: Arc<AppState>) {
     });
 }
 
-/// Spawn the periodic Hello broadcast (every 60s).
+/// NET-4: Hello cadence — heavy metadata advertisement.
+/// Every 120s instead of 60s — coupled with the lighter Ping at 15s,
+/// total liveness signal is 8× more frequent for half the per-Hello cost.
+pub const HELLO_INTERVAL_SECS: u64 = 120;
+
+/// NET-4: Ping cadence — lightweight heartbeat (just nonce + envelope wrap).
+pub const PING_INTERVAL_SECS: u64 = 15;
+
+/// Spawn the periodic Hello broadcast (every 120s — see NET-4).
 /// Announces this node's country, watts, and contribution data to the network.
 /// The first broadcast fires after a 5s delay to let the endpoint initialize.
 pub fn spawn_hello_broadcast(state: Arc<AppState>) {
@@ -94,16 +111,72 @@ pub fn spawn_hello_broadcast(state: Arc<AppState>) {
                 log::warn!("◈ [Gossip] Hello broadcast failed: {}", e);
             }
 
-            // Wait 60s or shutdown
+            // Wait HELLO_INTERVAL_SECS or shutdown
             tokio::select! {
                 _ = token.cancelled() => {
                     log::info!("◈ [Gossip] Hello broadcast shutdown");
                     break;
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(HELLO_INTERVAL_SECS)) => {}
             }
         }
     });
+}
+
+/// NET-4: Spawn the lightweight Ping heartbeat task.
+/// Every 15s, broadcast a `Ping { nonce }` envelope. Receiving peers
+/// touch our `peer_info.last_seen` so dead-peer cleanup stays accurate
+/// without forcing a full Hello round-trip.
+pub fn spawn_ping_broadcast(state: Arc<AppState>) {
+    let token = state.node.shutdown.clone();
+    tokio::spawn(async move {
+        // Stagger initial Ping by 7s (between Hello's 5s init and the first
+        // 60-something-second tick) so the first heartbeat fires fast and
+        // doesn't collide with the initial Hello.
+        tokio::time::sleep(tokio::time::Duration::from_secs(7)).await;
+
+        let mut nonce: u64 = 1;
+        loop {
+            if let Err(e) = broadcast_ping_once(&state, nonce).await {
+                log::warn!("◈ [Gossip] Ping broadcast failed: {}", e);
+            }
+            // Wrap nonce safely — only used as a request/response correlator,
+            // not anti-replay (gossip envelope nonce handles that).
+            nonce = nonce.wrapping_add(1);
+
+            tokio::select! {
+                _ = token.cancelled() => {
+                    log::info!("◈ [Gossip] Ping broadcast shutdown");
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(PING_INTERVAL_SECS)) => {}
+            }
+        }
+    });
+}
+
+/// Build + sign + broadcast a single Ping envelope. Cheap relative to Hello
+/// (1 u64 payload vs Hello's heads/peers/watts/country/contribs).
+async fn broadcast_ping_once(state: &AppState, nonce: u64) -> Result<(), String> {
+    let pk = state.crypto.lock().await.get_identity()
+        .map(|i| i.public_key_hex)
+        .map_err(|e| e.to_string())?;
+
+    let msg = crate::p2p::gossip::GossipMessage::Ping { nonce };
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let env_nonce = state.node.gossip.read().await.next_outgoing_nonce();
+    let signable = crate::p2p::gossip::GossipRouter::signable_envelope_bytes(
+        &pk, env_nonce, &timestamp, &msg
+    );
+    let sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
+    if let Ok(env) = crate::p2p::gossip::GossipRouter::build_signed_envelope(
+        pk, msg, env_nonce, timestamp, &sig
+    ) {
+        state.node.gossip.write().await.mark_seen(&env.id);
+        let _ = state.node.gossip_tx.send(env);
+    }
+    Ok(())
 }
 
 /// Immediately broadcast a Hello. Called after connect_peer so the new peer
