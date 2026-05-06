@@ -271,6 +271,7 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
 }
 
 /// Spawn the dead-peer cleanup task (every 30s).
+/// NET-12: Also runs the eclipse-attack heuristic on every cleanup tick.
 pub fn spawn_peer_cleanup(state: Arc<AppState>) {
     let token = state.node.shutdown.clone();
     tokio::spawn(async move {
@@ -282,6 +283,16 @@ pub fn spawn_peer_cleanup(state: Arc<AppState>) {
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
                     state.node.cleanup_dead_peers().await;
+                    // NET-14: Prune expired or excess pending transactions.
+                    state.node.ledger.write().await.prune_mempool();
+                    if let Some(prefix) = state.node.check_eclipse_risk().await {
+                        log::warn!(
+                            "◈ [NET-12] ECLIPSE WARNING: >{}% of peers share pubkey prefix '{}…' \
+                             — possible Sybil/eclipse attempt; consider reseeding peers manually",
+                            (crate::p2p::willow_node::ECLIPSE_THRESHOLD * 100.0) as u32,
+                            prefix
+                        );
+                    }
                 }
             }
         }

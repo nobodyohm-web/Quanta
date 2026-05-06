@@ -57,6 +57,70 @@ impl Ledger {
     /// PERF-1: Maximum entries kept in the recent_deque (bounded ring buffer).
     const MAX_RECENT: usize = 500;
 
+    /// NET-14: Mempool eviction policy.
+    ///
+    /// `MEMPOOL_TTL_SECS` is the maximum age a pending transaction is
+    /// allowed to sit in the mempool before it's auto-evicted. 10 min is a
+    /// fair window — mining seals every 2 min, so any tx that hasn't been
+    /// included after five seal cycles is presumed stuck (signature stale,
+    /// nonce gap, etc.) and not worth keeping around.
+    pub const MEMPOOL_TTL_SECS: i64 = 600;
+
+    /// NET-14: Hard cap on pending transactions. When the pool grows past
+    /// this, we drop the oldest entries first (FIFO) regardless of TTL.
+    /// 1000 is plenty for a 720 blocks/day pace at 10 tx/block (= 7200/day).
+    pub const MEMPOOL_MAX: usize = 1000;
+
+    /// NET-14: Evict expired or excess pending transactions.
+    ///
+    /// Two-pass eviction:
+    /// 1. Drop any pending tx whose RFC3339 `timestamp` is more than
+    ///    `MEMPOOL_TTL_SECS` old (relative to wall clock now).
+    /// 2. If the pool is still over `MEMPOOL_MAX`, trim the oldest by
+    ///    insertion order until at the cap.
+    ///
+    /// Eviction calls `cache_revert_tx` so the balance cache stays
+    /// consistent — pending debits/credits revert when the tx is dropped.
+    /// Returns the count of evicted transactions for observability.
+    pub fn prune_mempool(&mut self) -> usize {
+        let now = chrono::Utc::now().timestamp();
+        let mut evicted: Vec<Transaction> = Vec::new();
+
+        // Pass 1: TTL-based eviction.
+        self.pending.retain(|tx| {
+            let keep = match chrono::DateTime::parse_from_rfc3339(&tx.timestamp) {
+                Ok(ts) => (now - ts.timestamp()) <= Self::MEMPOOL_TTL_SECS,
+                // If timestamp is unparseable, treat as fresh — avoids
+                // dropping txs whose clock representation is non-standard.
+                Err(_) => true,
+            };
+            if !keep {
+                evicted.push(tx.clone());
+            }
+            keep
+        });
+
+        // Pass 2: hard-cap eviction (oldest first by insertion order).
+        while self.pending.len() > Self::MEMPOOL_MAX {
+            let dropped = self.pending.remove(0);
+            evicted.push(dropped);
+        }
+
+        // Revert cache effects of every evicted tx so balance_of stays correct.
+        for tx in &evicted {
+            self.cache_revert_tx(tx);
+            self.seen_tx_hashes.remove(&tx.id);
+        }
+
+        if !evicted.is_empty() {
+            log::info!(
+                "◈ [NET-14] Mempool pruned: {} txs evicted (pending now {}/{})",
+                evicted.len(), self.pending.len(), Self::MEMPOOL_MAX
+            );
+        }
+        evicted.len()
+    }
+
     /// PERF-1: Apply a transaction's balance effects to the cache.
     fn cache_apply_tx(&mut self, tx: &Transaction) {
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
@@ -788,6 +852,63 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── NET-14: Mempool eviction tests ─────────────────────────────────
+
+    fn old_timestamp(secs_ago: i64) -> String {
+        let t = chrono::Utc::now() - chrono::Duration::seconds(secs_ago);
+        t.to_rfc3339()
+    }
+
+    #[test]
+    fn prune_mempool_evicts_expired_txs() {
+        // Insert two mining txs (mine_tx pushes to pending), then backdate
+        // one to before TTL. prune_mempool must evict the stale one only.
+        let mut ledger = Ledger::new();
+        let pk_a = "a".repeat(64);
+        let pk_b = "b".repeat(64);
+        let _fresh = ledger.mine_tx(&pk_a, 1, 0.0);
+        let stale = ledger.mine_tx(&pk_b, 1, 0.0);
+
+        // Backdate the second pending entry to 11 minutes ago (> TTL).
+        let stale_id = stale.id.clone();
+        if let Some(p) = ledger.pending.iter_mut().find(|t| t.id == stale_id) {
+            p.timestamp = old_timestamp(660);
+        }
+        let before = ledger.pending_count();
+        let evicted = ledger.prune_mempool();
+        assert_eq!(evicted, 1, "exactly the stale tx must be pruned");
+        assert_eq!(ledger.pending_count(), before - 1);
+    }
+
+    #[test]
+    fn prune_mempool_caps_at_max() {
+        let mut ledger = Ledger::new();
+        // Push synthetic NETWORK -> X transactions through the mining path so
+        // we don't have to sign anything. These all get FRESH timestamps so
+        // pass the TTL filter — the cap is the only thing that should evict.
+        let target_pk = "f".repeat(64);
+        // Insert MEMPOOL_MAX + 5 entries.
+        for _ in 0..(Ledger::MEMPOOL_MAX as u32 + 5) {
+            ledger.mine_tx(&target_pk, 1, 0.0);
+        }
+        let _ = ledger.prune_mempool();
+        assert!(ledger.pending_count() <= Ledger::MEMPOOL_MAX,
+            "pending must be capped at MEMPOOL_MAX, got {}", ledger.pending_count());
+    }
+
+    #[test]
+    fn prune_mempool_no_op_on_fresh_pool() {
+        let mut ledger = Ledger::new();
+        let target_pk = "0".repeat(64);
+        for _ in 0..5 {
+            ledger.mine_tx(&target_pk, 1, 0.0);
+        }
+        let before = ledger.pending_count();
+        let evicted = ledger.prune_mempool();
+        assert_eq!(evicted, 0, "no eviction expected on a fresh pool under cap");
+        assert_eq!(ledger.pending_count(), before);
+    }
 
     #[test]
     fn signed_tx_uses_hybrid_path() {

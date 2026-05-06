@@ -198,6 +198,20 @@ pub struct WillowNode {
 /// bounded while still letting peers respond minutes later.
 pub const MAX_PENDING_PINGS: usize = 256;
 
+/// NET-12: Minimum peer count before eclipse detection kicks in.
+/// Below this we don't have enough samples to call anything suspicious.
+pub const ECLIPSE_MIN_PEERS: usize = 5;
+
+/// NET-12: Number of leading hex chars used to bucket public keys for
+/// eclipse detection. 8 chars = 32 bits — picking that many leading bits
+/// at random is a 1-in-4-billion event, so a high-density bucket is a
+/// strong signal of correlated keygen.
+pub const ECLIPSE_PREFIX_LEN: usize = 8;
+
+/// NET-12: Share of peers in the largest prefix bucket above which we
+/// raise the eclipse warning. 0.8 = 80%.
+pub const ECLIPSE_THRESHOLD: f64 = 0.8;
+
 impl WillowNode {
     pub fn new() -> Self {
         let raw_id = blake3::hash(uuid::Uuid::new_v4().as_bytes());
@@ -249,6 +263,41 @@ impl WillowNode {
             log::info!("♻ [B3] Removed {} dead peers ({} → {} alive)", removed, before, peers.len());
         }
         removed
+    }
+
+    /// NET-12: Eclipse-attack heuristic.
+    ///
+    /// Returns Some(prefix) when more than `ECLIPSE_THRESHOLD` (default 80%)
+    /// of currently-known peers share a common public-key prefix of length
+    /// `ECLIPSE_PREFIX_LEN` (8 hex chars = 32 bits). A real Sybil cluster can
+    /// still pick keys that don't share a prefix, so this catches naive
+    /// attackers (e.g. a single attacker spinning up 50 nodes from one
+    /// keygen seed) without producing false positives on diverse meshes.
+    ///
+    /// Returns None when:
+    /// - We have fewer than `ECLIPSE_MIN_PEERS` peers (statistically irrelevant)
+    /// - The largest prefix bucket holds <= ECLIPSE_THRESHOLD share
+    ///
+    /// Heuristic — *no* automated action: caller logs a warning and the
+    /// operator decides whether to manually disconnect or reseed peers.
+    pub async fn check_eclipse_risk(&self) -> Option<String> {
+        let info = self.peer_info.read().await;
+        if info.len() < ECLIPSE_MIN_PEERS {
+            return None;
+        }
+        let mut buckets: HashMap<String, usize> = HashMap::new();
+        for pk in info.keys() {
+            if pk.len() < ECLIPSE_PREFIX_LEN {
+                continue;
+            }
+            let prefix = pk[..ECLIPSE_PREFIX_LEN].to_string();
+            *buckets.entry(prefix).or_insert(0) += 1;
+        }
+        let total = info.len() as f64;
+        buckets.into_iter()
+            .max_by_key(|(_, n)| *n)
+            .filter(|(_, n)| (*n as f64) / total > ECLIPSE_THRESHOLD)
+            .map(|(prefix, _)| prefix)
     }
 
     /// B3: Compute total network watts from LIVE peers only.

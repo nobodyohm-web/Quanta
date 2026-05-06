@@ -18,8 +18,19 @@ use std::sync::Arc;
 
 // ─── B1: Nonce tracker + rate limiter per peer ──────────────────────────────
 
-/// Maximum messages per peer per rate-limiting window.
-const MAX_MSG_PER_WINDOW: u32 = 30;
+/// Baseline messages per peer per rate-limiting window.
+/// NET-13: Adaptive limit raises this when peer count is high (mesh growth)
+/// and lowers it when only a handful of peers are around (likely attacker).
+const BASE_MSG_PER_WINDOW: u32 = 30;
+
+/// NET-13: Hard floor on adaptive rate — even a one-peer mesh keeps this many
+/// messages allowed per window so legitimate sync traffic isn't choked.
+const MIN_MSG_PER_WINDOW: u32 = 15;
+
+/// NET-13: Hard ceiling on adaptive rate — no matter how big the mesh grows,
+/// a single peer shouldn't be allowed to flood beyond this rate.
+const MAX_MSG_PER_WINDOW: u32 = 120;
+
 /// Rate-limiting window duration (seconds).
 const RATE_WINDOW_SECS: u64 = 60;
 
@@ -81,11 +92,29 @@ impl NonceTracker {
         }
     }
 
+    /// NET-13: Compute the adaptive per-peer rate limit for the current mesh.
+    ///
+    /// Formula: `BASE × max(1, sqrt(peer_count / 4))`, then clamped.
+    /// - 1 peer  → BASE × 1 = 30 msgs/min  (minimum useful)
+    /// - 4 peers → BASE × 1 = 30 msgs/min
+    /// - 16 peers → BASE × 2 = 60 msgs/min
+    /// - 64 peers → BASE × 4 = 120 msgs/min (hits MAX cap)
+    /// - 256 peers → still 120 (MAX cap protects against runaway)
+    ///
+    /// Sub-linear scaling avoids exposing us to total-traffic blowup
+    /// (peers × per-peer-rate) while still letting larger meshes route more.
+    pub fn adaptive_limit_for(peer_count: usize) -> u32 {
+        let scale = (peer_count as f64 / 4.0).sqrt().max(1.0);
+        let raw = (BASE_MSG_PER_WINDOW as f64 * scale).round() as u32;
+        raw.clamp(MIN_MSG_PER_WINDOW, MAX_MSG_PER_WINDOW)
+    }
+
     /// Returns `true` if this peer is within their rate limit.
     /// Call this BEFORE processing a message. Returns `false` if the peer
-    /// has exceeded MAX_MSG_PER_WINDOW messages in the current window.
-    pub fn check_rate_limit(&mut self, sender_pk: &str) -> bool {
+    /// has exceeded the adaptive per-peer message budget for the current window.
+    pub fn check_rate_limit(&mut self, sender_pk: &str, peer_count: usize) -> bool {
         let now = now_epoch_secs();
+        let limit = Self::adaptive_limit_for(peer_count);
 
         let entry = self.rate_counters
             .entry(sender_pk.to_string())
@@ -97,7 +126,7 @@ impl NonceTracker {
         }
 
         entry.1 += 1;
-        entry.1 <= MAX_MSG_PER_WINDOW
+        entry.1 <= limit
     }
 
     /// Record a report against `peer_id`. When the count reaches
@@ -251,13 +280,18 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         return;
     }
 
-    // ── RATE LIMITING: drop messages from peers exceeding 30 msg/min ──
+    // ── NET-13: ADAPTIVE RATE LIMITING ──
+    // Per-peer budget grows sub-linearly with connected-peer count so a
+    // mesh with many participants doesn't choke legitimate sync traffic.
+    let peer_count = state.node.peer_info.read().await.len();
     {
         let mut tracker = state.node.nonce_tracker.write().await;
-        if !tracker.check_rate_limit(&env.sender) {
+        if !tracker.check_rate_limit(&env.sender, peer_count) {
             log::warn!(
-                "◈ [Dispatch] ⚠ RATE LIMIT exceeded by {} → drop",
-                &env.sender[..env.sender.len().min(12)]
+                "◈ [Dispatch] ⚠ RATE LIMIT exceeded by {} (cap={} for {} peers) → drop",
+                &env.sender[..env.sender.len().min(12)],
+                NonceTracker::adaptive_limit_for(peer_count),
+                peer_count
             );
             state.node.gossip.write().await.stats.dropped_rate_limit += 1;
             return;
@@ -1299,12 +1333,12 @@ mod tests {
     #[test]
     fn rate_limiter_allows_normal_traffic() {
         let mut tracker = NonceTracker::new();
-        // 30 messages should all pass
+        // 30 messages at base peer_count should all pass (limit = BASE = 30)
         for _ in 0..30 {
-            assert!(tracker.check_rate_limit("peer_x"), "should allow within limit");
+            assert!(tracker.check_rate_limit("peer_x", 1), "should allow within limit");
         }
         // 31st should be rejected
-        assert!(!tracker.check_rate_limit("peer_x"), "should reject after limit");
+        assert!(!tracker.check_rate_limit("peer_x", 1), "should reject after limit");
     }
 
     #[test]
@@ -1312,10 +1346,22 @@ mod tests {
         let mut tracker = NonceTracker::new();
         // Fill up peer_a
         for _ in 0..30 {
-            tracker.check_rate_limit("peer_a");
+            tracker.check_rate_limit("peer_a", 1);
         }
         // peer_b should still be allowed
-        assert!(tracker.check_rate_limit("peer_b"), "different peer should have own limit");
+        assert!(tracker.check_rate_limit("peer_b", 1), "different peer should have own limit");
+    }
+
+    #[test]
+    fn adaptive_limit_scales_with_peer_count() {
+        // NET-13: sub-linear sqrt scaling, clamped to [MIN, MAX]
+        assert_eq!(NonceTracker::adaptive_limit_for(1), 30);   // base
+        assert_eq!(NonceTracker::adaptive_limit_for(4), 30);   // base
+        assert_eq!(NonceTracker::adaptive_limit_for(16), 60);  // base × 2
+        assert_eq!(NonceTracker::adaptive_limit_for(64), 120); // base × 4 → MAX cap
+        assert_eq!(NonceTracker::adaptive_limit_for(1024), 120); // still MAX
+        // Sanity: floor protects very small peer counts from underflow
+        assert!(NonceTracker::adaptive_limit_for(0) >= 15);
     }
 
     #[test]
