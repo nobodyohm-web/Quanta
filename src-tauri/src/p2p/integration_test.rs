@@ -37,6 +37,7 @@ mod tests {
             updated_at: 1000,
             signature: hex::encode(&sig),
             version,
+            tags: Vec::new(),
         };
         page_store.publish(page).expect("page publish must work");
         assert_eq!(page_store.page_count(), 1);

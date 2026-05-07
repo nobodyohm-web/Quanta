@@ -16,6 +16,15 @@ pub const MAX_TOKEN_REPEATS_PER_DOC: u32 = 5;
 /// Demi-vie de fraîcheur (30 jours). Décroissance exponentielle.
 pub const FRESHNESS_HALF_LIFE_SECS: f64 = 30.0 * 86_400.0;
 
+/// Nombre maximum de tags par document.
+pub const MAX_TAGS_PER_DOC: usize = 10;
+
+/// Longueur maximale d'un tag (caractères).
+pub const MAX_TAG_LENGTH: usize = 30;
+
+/// Multiplicateur de score quand un tag du doc matche un token de la query.
+pub const TAG_BOOST: f64 = 2.0;
+
 /// Type de contenu indexé.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DocKind {
@@ -69,6 +78,10 @@ pub struct IndexedDoc {
     pub term_freq: HashMap<String, u32>,
     /// Domaine torus associé (optionnel). Améliore l'affichage.
     pub torus_domain: Option<String>,
+    /// Tags du document (max 10, normalisés via `sanitize_tags`).
+    /// Boost ×2 sur le score si un tag matche exactement un token de la query.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Une entrée dans la liste de postings d'un terme.
@@ -100,6 +113,9 @@ pub struct SearchFilters {
     pub kind: Option<DocKind>,
     pub creator_pk: Option<String>,
     pub min_likes: Option<f64>,
+    /// Filtre exact par tag (tag normalisé : lowercase, alphanum + tiret).
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 // ─── Tokenizer ──────────────────────────────────────────────────────────────
@@ -138,6 +154,133 @@ pub fn term_freq(tokens: &[String]) -> HashMap<String, u32> {
         }
     }
     tf
+}
+
+// ─── Tags ───────────────────────────────────────────────────────────────────
+
+/// Normalise un tag : lowercase, trim, garde alphanum + tiret, drop le reste.
+/// Renvoie `None` si le tag normalisé est vide ou trop long.
+pub fn sanitize_tag(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_lowercase();
+    let cleaned: String = lower
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    let collapsed: String = cleaned
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if collapsed.is_empty() || collapsed.len() > MAX_TAG_LENGTH {
+        return None;
+    }
+    Some(collapsed)
+}
+
+/// Normalise une liste de tags : sanitize chaque tag, dédup, cap à MAX_TAGS_PER_DOC.
+pub fn sanitize_tags(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(raw.len().min(MAX_TAGS_PER_DOC));
+    for r in raw {
+        if let Some(t) = sanitize_tag(r) {
+            if !out.contains(&t) {
+                out.push(t);
+                if out.len() >= MAX_TAGS_PER_DOC {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Strip basique des balises HTML (`<...>`) sans regex externe — préserve le
+/// texte brut entre les tags. Retire aussi les blocs `<script>...</script>` et
+/// `<style>...</style>` pour ne pas polluer l'extraction.
+pub fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'<' {
+            // Détection blocs <script>/<style> (case-insensitive)
+            let rest = &html[i..];
+            let lower_head: String = rest
+                .chars()
+                .take(8)
+                .collect::<String>()
+                .to_lowercase();
+            if lower_head.starts_with("<script") || lower_head.starts_with("<style") {
+                let close_tag = if lower_head.starts_with("<script") {
+                    "</script>"
+                } else {
+                    "</style>"
+                };
+                let lower_rest = rest.to_lowercase();
+                if let Some(end) = lower_rest.find(close_tag) {
+                    i += end + close_tag.len();
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            // Sinon, simple tag : skip jusqu'au '>'
+            if let Some(off) = html[i..].find('>') {
+                i += off + 1;
+                continue;
+            } else {
+                break;
+            }
+        }
+        out.push(b as char);
+        i += 1;
+    }
+    // Décode les entités HTML les plus courantes.
+    out.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+/// Auto-extraction de tags depuis un HTML brut + un titre.
+///
+/// 1. Strip HTML pour obtenir le texte brut.
+/// 2. Tokenize (même fonction que l'index — stopwords FR/EN/ES exclus).
+/// 3. Compte TF, avec bonus ×3 sur les tokens présents dans le titre.
+/// 4. Garde les top-5 tokens les plus fréquents (sanitize_tag pour la forme).
+pub fn auto_extract_tags(html: &str, title: &str) -> Vec<String> {
+    let body = strip_html(html);
+    let body_tokens = tokenize(&body);
+    let title_tokens: HashSet<String> = tokenize(title).into_iter().collect();
+
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for tok in &body_tokens {
+        let bonus = if title_tokens.contains(tok) { 3 } else { 1 };
+        *counts.entry(tok.clone()).or_insert(0) += bonus;
+    }
+    // Inclure les tokens du titre même s'ils ne sont pas dans le body.
+    for tok in &title_tokens {
+        counts.entry(tok.clone()).or_insert(3);
+    }
+
+    let mut ranked: Vec<(String, u32)> = counts.into_iter().collect();
+    // Tri stable : score desc, puis token alpha asc pour determinisme.
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut out: Vec<String> = Vec::with_capacity(5);
+    for (tok, _) in ranked {
+        if let Some(clean) = sanitize_tag(&tok) {
+            if !out.contains(&clean) {
+                out.push(clean);
+                if out.len() >= 5 {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 // ─── Index inversé ──────────────────────────────────────────────────────────
@@ -334,6 +477,11 @@ impl SearchIndex {
                         return false;
                     }
                 }
+                if let Some(tag) = &filters.tag {
+                    if !d.tags.iter().any(|t| t == tag) {
+                        return false;
+                    }
+                }
                 true
             })
             .filter_map(|d| {
@@ -355,12 +503,22 @@ impl SearchIndex {
                 if mod_factor <= 0.0 {
                     return None; // banni → exclu de l'index
                 }
+                // Tag boost ×TAG_BOOST par tag de doc qui matche un token de la query.
+                let mut tag_factor = 1.0;
+                if !d.tags.is_empty() {
+                    for t in &d.tags {
+                        if q_tokens.iter().any(|q| q == t) {
+                            tag_factor *= TAG_BOOST;
+                        }
+                    }
+                }
                 let score = textual
                     * likes_factor
                     * followers_factor
                     * rep_factor
                     * fresh
-                    * mod_factor;
+                    * mod_factor
+                    * tag_factor;
                 Some(SearchHit {
                     cid: d.cid.clone(),
                     title: d.title.clone(),
@@ -438,7 +596,22 @@ mod tests {
             updated_at: ts,
             term_freq: term_freq(&toks),
             torus_domain: None,
+            tags: Vec::new(),
         }
+    }
+
+    fn doc_with_tags(
+        cid: &str,
+        author: &str,
+        title: &str,
+        body: &str,
+        ts: u64,
+        lang: &str,
+        tags: &[&str],
+    ) -> IndexedDoc {
+        let mut d = doc(cid, author, title, body, ts, lang);
+        d.tags = tags.iter().map(|t| (*t).to_string()).collect();
+        d
     }
 
     #[test]
@@ -661,5 +834,182 @@ mod tests {
             old_hits.is_empty(),
             "old token postings must be cleared on upsert"
         );
+    }
+
+    // ── Phase 1 — Smart Tags ────────────────────────────────────────────────
+
+    /// `auto_extract_tags` doit retrouver le terme central d'un site de
+    /// chaussures, même quand il est noyé dans le HTML.
+    #[test]
+    fn auto_extract_tags_finds_main_keyword() {
+        let html = r#"
+            <html>
+              <head><title>Chaussures de course</title></head>
+              <body>
+                <h1>Boutique de chaussures</h1>
+                <p>Nos chaussures running offrent confort et performance.</p>
+                <p>Découvrez nos modèles de chaussures pour la course en ville.</p>
+              </body>
+            </html>
+        "#;
+        let tags = auto_extract_tags(html, "Chaussures de course");
+        assert!(
+            tags.iter().any(|t| t == "chaussures"),
+            "expected 'chaussures' in tags, got {:?}",
+            tags
+        );
+        assert!(tags.len() <= 5, "max 5 tags, got {}", tags.len());
+    }
+
+    /// Les tokens présents dans le titre doivent recevoir un bonus ×3 et
+    /// remonter dans le ranking final.
+    #[test]
+    fn auto_extract_tags_prioritises_title_words() {
+        let html = r#"
+            <p>banane banane banane orange orange orange poire poire pomme</p>
+            <p>kiwi kiwi citron melon</p>
+        "#;
+        // Le mot "specialite" n'apparaît qu'une fois dans le body mais est
+        // dans le titre → bonus ×3, doit donc figurer dans les top tags.
+        let tags = auto_extract_tags(html, "Notre specialite");
+        assert!(
+            tags.iter().any(|t| t == "specialite"),
+            "title bonus must promote 'specialite', got {:?}",
+            tags
+        );
+    }
+
+    /// Tag boost : un doc qui a le tag "chaussures" doit scorer plus haut
+    /// qu'un doc équivalent sans tag.
+    #[test]
+    fn tag_boost_outranks_untagged_doc() {
+        let mut idx = SearchIndex::new();
+        idx.upsert(doc_with_tags(
+            "with_tag",
+            "alice",
+            "Chaussures",
+            "chaussures running",
+            100,
+            "fr",
+            &["chaussures"],
+        ));
+        idx.upsert(doc(
+            "without_tag",
+            "bob",
+            "Chaussures",
+            "chaussures running",
+            100,
+            "fr",
+        ));
+        let hits = idx.search(
+            "chaussures",
+            &SearchFilters::default(),
+            200,
+            10,
+            |_| SocialSignals { creator_reputation: 1.0, ..Default::default() },
+        );
+        assert_eq!(hits.len(), 2, "both docs match query");
+        assert_eq!(
+            hits[0].cid, "with_tag",
+            "tagged doc must rank first via TAG_BOOST"
+        );
+        assert!(
+            hits[0].score > hits[1].score,
+            "tagged doc score should be strictly higher"
+        );
+    }
+
+    /// Tag filter : `SearchFilters { tag: Some("chaussures") }` ne renvoie que
+    /// les docs taggés `chaussures`, les autres sont filtrés même s'ils
+    /// matchent le query texte.
+    #[test]
+    fn tag_filter_returns_only_tagged_docs() {
+        let mut idx = SearchIndex::new();
+        idx.upsert(doc_with_tags(
+            "shoe1", "alice", "Chaussures", "running", 100, "fr",
+            &["chaussures"],
+        ));
+        idx.upsert(doc_with_tags(
+            "shoe2", "bob", "Chaussures", "running", 100, "fr",
+            &["mode"],
+        ));
+        idx.upsert(doc(
+            "shoe3", "carol", "Chaussures", "running", 100, "fr",
+        ));
+        let hits = idx.search(
+            "chaussures",
+            &SearchFilters {
+                tag: Some("chaussures".into()),
+                ..Default::default()
+            },
+            200,
+            10,
+            |_| SocialSignals { creator_reputation: 1.0, ..Default::default() },
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].cid, "shoe1");
+    }
+
+    /// Sanitize : enlève accents/espaces/casse et cap à 30 chars.
+    #[test]
+    fn sanitize_tag_normalises_input() {
+        assert_eq!(sanitize_tag("  Chaussures !!! "), Some("chaussures".into()));
+        assert_eq!(sanitize_tag("MOD-E"), Some("mod-e".into()));
+        // Vide après cleanup → None
+        assert_eq!(sanitize_tag("   "), None);
+        assert_eq!(sanitize_tag("?!@"), None);
+        // Trop long → None
+        let long: String = "a".repeat(MAX_TAG_LENGTH + 1);
+        assert_eq!(sanitize_tag(&long), None);
+        // Cap à MAX_TAG_LENGTH exact = OK
+        let exact: String = "a".repeat(MAX_TAG_LENGTH);
+        assert!(sanitize_tag(&exact).is_some());
+    }
+
+    /// `sanitize_tags` cap à MAX_TAGS_PER_DOC, dédup, drop les invalides.
+    #[test]
+    fn sanitize_tags_caps_and_dedups() {
+        let raw: Vec<String> = (0..15).map(|i| format!("tag-{i}")).collect();
+        let out = sanitize_tags(&raw);
+        assert_eq!(out.len(), MAX_TAGS_PER_DOC);
+        // Dédup
+        let dup = vec![
+            "Foo".into(),
+            "FOO".into(),
+            "foo".into(),
+            "bar".into(),
+        ];
+        let out2 = sanitize_tags(&dup);
+        assert_eq!(out2, vec!["foo".to_string(), "bar".to_string()]);
+    }
+
+    /// strip_html doit enlever les blocs script/style et préserver le texte.
+    #[test]
+    fn strip_html_removes_scripts_and_styles() {
+        let html = r#"<style>body{color:red}</style><h1>Hello</h1><script>alert(1)</script><p>World</p>"#;
+        let plain = strip_html(html);
+        assert!(plain.contains("Hello"));
+        assert!(plain.contains("World"));
+        assert!(!plain.contains("color:red"));
+        assert!(!plain.contains("alert"));
+    }
+
+    /// IndexedDoc serde : un doc sans champ `tags` (ancien snapshot) se
+    /// désérialise correctement avec un Vec vide via `#[serde(default)]`.
+    #[test]
+    fn indexed_doc_deserialises_without_tags_field() {
+        let legacy = r#"{
+            "cid": "abc",
+            "title": "T",
+            "snippet": "s",
+            "author_pk": "pk",
+            "kind": "Site",
+            "lang": "fr",
+            "updated_at": 1,
+            "term_freq": {},
+            "torus_domain": null
+        }"#;
+        let d: IndexedDoc = serde_json::from_str(legacy).expect("must parse legacy doc");
+        assert!(d.tags.is_empty());
     }
 }

@@ -389,6 +389,7 @@ mod integration_tests {
             updated_at: 1000,
             term_freq: term_freq(&toks),
             torus_domain: Some("chef.torus".into()),
+            tags: Vec::new(),
         });
 
         // 2. Like the document via SocialState

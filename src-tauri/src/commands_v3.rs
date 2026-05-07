@@ -426,6 +426,7 @@ pub async fn index_my_page(
     lang: String,
     kind: String,
     torus_domain: Option<String>,
+    tags: Option<Vec<String>>,
 ) -> Result<u32, String> {
     let pk = my_pk(&state).await?;
     let kind_enum = match kind.as_str() {
@@ -439,6 +440,11 @@ pub async fn index_my_page(
     let tokens = p2p::search::tokenize(&format!("{title} {snippet} {body}"));
     let tf = p2p::search::term_freq(&tokens);
     let tf_count = tf.len() as u32;
+    // Tags : provided → sanitize ; sinon auto-extract depuis body+title.
+    let tags_clean = match tags {
+        Some(raw) => p2p::search::sanitize_tags(&raw),
+        None => p2p::search::auto_extract_tags(&body, &title),
+    };
     let doc = p2p::search::IndexedDoc {
         cid: cid.clone(),
         title,
@@ -449,6 +455,7 @@ pub async fn index_my_page(
         updated_at: now_secs(),
         term_freq: tf,
         torus_domain,
+        tags: tags_clean,
     };
     state.node.search.write().await.upsert(doc.clone());
     let doc_json = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
@@ -457,6 +464,7 @@ pub async fn index_my_page(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn search_pages(
     state: tauri::State<'_, Arc<AppState>>,
     query: String,
@@ -464,6 +472,7 @@ pub async fn search_pages(
     kind: Option<String>,
     since_ts: Option<u64>,
     creator_pk: Option<String>,
+    tag: Option<String>,
     limit: Option<usize>,
 ) -> Result<serde_json::Value, String> {
     let kind_enum = kind.as_deref().and_then(|k| match k {
@@ -474,12 +483,14 @@ pub async fn search_pages(
         "shop" => Some(p2p::search::DocKind::Shop),
         _ => None,
     });
+    let tag_clean = tag.as_deref().and_then(p2p::search::sanitize_tag);
     let filters = p2p::search::SearchFilters {
         lang,
         since_ts,
         kind: kind_enum,
         creator_pk,
         min_likes: None,
+        tag: tag_clean,
     };
     let now = now_secs();
     let limit = limit.unwrap_or(20).min(100);
@@ -1144,6 +1155,7 @@ pub async fn publish_site(
     root_path: Option<String>,
     pages: Vec<SitePageInput>,
     assets: Vec<SiteAssetInput>,
+    tags: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     use crate::p2p::page_store::{SiteAsset, SiteManifest, SitePage};
 
@@ -1180,6 +1192,9 @@ pub async fn publish_site(
         updated_at: now,
         version: next_version,
         signature: String::new(),
+        tags: tags
+            .map(|raw| p2p::search::sanitize_tags(&raw))
+            .unwrap_or_default(),
     };
     let signable = p2p::page_store::signable_manifest_bytes(&manifest);
     manifest.signature = sign_hex(&state, &signable).await?;

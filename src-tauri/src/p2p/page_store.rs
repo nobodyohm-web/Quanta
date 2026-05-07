@@ -49,6 +49,10 @@ pub struct PublishedPage {
     pub updated_at: u64,
     pub signature: String,
     pub version: u64,
+    /// Tags du site, normalisés via `search::sanitize_tags` (max 10).
+    /// Diffusés tels-quels par gossip et utilisés à l'auto-indexation.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 // ─── Multi-page site (V3.3) ─────────────────────────────────────────────────
@@ -93,6 +97,10 @@ pub struct SiteManifest {
     pub version: u64,
     /// Signature Ed25519 du `signable_manifest_bytes(self)`.
     pub signature: String,
+    /// Tags optionnels du manifest (max 10, normalisés). Sérialisés en
+    /// rétro-compat ascendante via `#[serde(default)]`.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Erreurs publiques du store.
@@ -437,6 +445,7 @@ mod tests {
             updated_at: 1000,
             signature: "unsigned".into(),
             version: 1,
+            tags: Vec::new(),
         };
         assert!(store.publish_local_unsigned(page).is_ok());
         assert_eq!(store.get_page(&"a".repeat(64)).unwrap().title, "Ma page");
@@ -453,6 +462,7 @@ mod tests {
             updated_at: 1,
             signature: "unsigned".into(),
             version: 1,
+            tags: Vec::new(),
         };
         assert!(store.publish(page).is_err());
     }
@@ -467,6 +477,7 @@ mod tests {
             updated_at: v,
             signature: "unsigned".into(),
             version: v,
+            tags: Vec::new(),
         };
         store.publish_local_unsigned(mk(2)).unwrap();
         assert!(store.publish_local_unsigned(mk(1)).is_err());
@@ -483,6 +494,7 @@ mod tests {
             updated_at: 1,
             signature: "unsigned".into(),
             version: 1,
+            tags: Vec::new(),
         };
         store.publish_local_unsigned(page).unwrap();
         let snap = store.snapshot();
@@ -507,6 +519,7 @@ mod tests {
             updated_at: 100,
             signature: sig_hex,
             version,
+            tags: Vec::new(),
         };
         let mut store = PageStore::new();
         assert!(store.publish(page).is_ok());
@@ -521,6 +534,7 @@ mod tests {
             updated_at: 1,
             signature: "b".repeat(128), // fake 64-byte sig
             version: 1,
+            tags: Vec::new(),
         };
         let mut store = PageStore::new();
         assert!(store.publish(page).is_err());
@@ -539,6 +553,7 @@ mod tests {
             updated_at: 1,
             signature: "unsigned".into(),
             version: 1,
+            tags: Vec::new(),
         };
         let mut store = PageStore::new();
         assert!(
@@ -552,6 +567,7 @@ mod tests {
             updated_at: 1,
             signature: String::new(),
             version: 1,
+            tags: Vec::new(),
         };
         assert!(
             store.publish(empty_sig).is_err(),
@@ -576,6 +592,7 @@ mod tests {
             updated_at: 1,
             signature: hex::encode(sig.to_bytes()),
             version,
+            tags: Vec::new(),
         };
         let mut store_a = PageStore::new();
         store_a.publish(page.clone()).expect("must publish");
@@ -619,6 +636,7 @@ mod tests {
             updated_at: 1_000,
             version: 1,
             signature: String::new(),
+        tags: Vec::new(),
         };
         sign_manifest(&s, &mut m);
         (s, m)
@@ -661,6 +679,7 @@ mod tests {
             updated_at: 1,
             version: 1,
             signature: String::new(),
+        tags: Vec::new(),
         };
         sign_manifest(&s, &mut m);
         let mut store = PageStore::new();
@@ -685,6 +704,7 @@ mod tests {
             updated_at: 1,
             version: 1,
             signature: String::new(),
+        tags: Vec::new(),
         };
         sign_manifest(&s, &mut m);
         let mut store = PageStore::new();
@@ -708,6 +728,7 @@ mod tests {
             updated_at: 1,
             version: 1,
             signature: String::new(),
+        tags: Vec::new(),
         };
         sign_manifest(&s, &mut m);
         let mut store = PageStore::new();
@@ -730,6 +751,7 @@ mod tests {
             updated_at: 2,
             version: 1, // même version
             signature: String::new(),
+        tags: Vec::new(),
         };
         sign_manifest(&s, &mut m2);
         assert_eq!(store.publish_site(m2), Err(PageStoreError::StaleVersion));
@@ -762,6 +784,7 @@ mod tests {
             updated_at: 1,
             version: 1,
             signature: String::new(),
+        tags: Vec::new(),
         };
         sign_manifest(&s, &mut m);
         let pk = m.author_pk.clone();

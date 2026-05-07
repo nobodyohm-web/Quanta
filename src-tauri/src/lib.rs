@@ -41,7 +41,12 @@ pub struct AppState {
 // ─── P2P Web Publishing ─────────────────────────────────────────
 
 #[tauri::command]
-async fn publish_page(state: tauri::State<'_, Arc<AppState>>, title: String, content: String) -> Result<(), String> {
+async fn publish_page(
+    state: tauri::State<'_, Arc<AppState>>,
+    title: String,
+    content: String,
+    tags: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
     // Get our public key
     let pk = {
         let crypto = state.crypto.lock().await;
@@ -67,13 +72,20 @@ async fn publish_page(state: tauri::State<'_, Arc<AppState>>, title: String, con
     };
     let signature = hex::encode(&sig_bytes);
 
+    // Tags : input nettoyé OU auto-extrait depuis le HTML+titre.
+    let final_tags: Vec<String> = match tags.as_ref() {
+        Some(raw) if !raw.is_empty() => p2p::search::sanitize_tags(raw),
+        _ => p2p::search::auto_extract_tags(&content, &title),
+    };
+
     let page = p2p::page_store::PublishedPage {
         author_pk: pk.clone(),
-        content,
-        title,
+        content: content.clone(),
+        title: title.clone(),
         updated_at: timestamp,
         signature,
         version,
+        tags: final_tags.clone(),
     };
 
     // Store locally
@@ -89,13 +101,57 @@ async fn publish_page(state: tauri::State<'_, Arc<AppState>>, title: String, con
     let nonce = state.node.gossip.read().await.next_outgoing_nonce();
     let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
     let env_sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
-    let env = p2p::gossip::GossipRouter::build_signed_envelope(pk, msg, nonce, ts, &env_sig)
-        .map_err(|e| e.to_string())?;
+    let env = p2p::gossip::GossipRouter::build_signed_envelope(
+        pk.clone(), msg, nonce, ts, &env_sig,
+    )
+    .map_err(|e| e.to_string())?;
     state.node.gossip.write().await.mark_seen(&env.id);
     let _ = state.node.gossip_tx.send(env);
     state.node.gossip.write().await.stats.pages_published += 1;
 
-    Ok(())
+    // Auto-index dans le SearchIndex local + broadcast PublishSite pour que les
+    // pairs indexent eux aussi (sinon les sites publiés ne sont pas trouvables
+    // par la recherche du réseau). Phase 1 — fix critical UX bug.
+    let plain_text = p2p::search::strip_html(&content);
+    let cid = hex::encode(blake3::hash(content.as_bytes()).as_bytes());
+    let snippet: String = plain_text.chars().take(200).collect();
+    let tokens = p2p::search::tokenize(&format!("{title} {plain_text}"));
+    let tf = p2p::search::term_freq(&tokens);
+
+    let doc = p2p::search::IndexedDoc {
+        cid: cid.clone(),
+        title: title.clone(),
+        snippet,
+        author_pk: pk.clone(),
+        kind: p2p::search::DocKind::Site,
+        lang: "fr".into(),
+        updated_at: timestamp,
+        term_freq: tf,
+        torus_domain: None,
+        tags: final_tags.clone(),
+    };
+    state.node.search.write().await.upsert(doc.clone());
+
+    // Broadcast PublishSite pour disséminer l'index sur le réseau.
+    let doc_json = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
+    let msg2 = p2p::gossip::GossipMessage::PublishSite { doc_json };
+    let ts2 = chrono::Utc::now().to_rfc3339();
+    let nonce2 = state.node.gossip.read().await.next_outgoing_nonce();
+    let signable2 = p2p::gossip::GossipRouter::signable_envelope_bytes(&pk, nonce2, &ts2, &msg2);
+    let env_sig2 = state.crypto.lock().await.sign(&signable2).unwrap_or_default();
+    let env2 = p2p::gossip::GossipRouter::build_signed_envelope(
+        pk.clone(), msg2, nonce2, ts2, &env_sig2,
+    )
+    .map_err(|e| e.to_string())?;
+    state.node.gossip.write().await.mark_seen(&env2.id);
+    let _ = state.node.gossip_tx.send(env2);
+
+    Ok(serde_json::json!({
+        "cid": cid,
+        "author_pk": pk,
+        "tags": final_tags,
+        "version": version,
+    }))
 }
 
 #[tauri::command]
