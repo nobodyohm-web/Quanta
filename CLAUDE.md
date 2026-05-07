@@ -277,14 +277,85 @@ npx tauri build
 ## Tests
 
 ```
-196 tests, 0 failures
+243 tests, 0 failures
 ├── pos_consensus (9 tests) — leader election, fairness, fallback
 ├── security_tests (80+ tests) — signatures, replay, nonce, rate limit
-├── ledger (20+ tests) — balance, fork, merkle, burn
+├── ledger (20+ tests) — balance, fork, merkle, burn, AUDIT-TX/BLK
 ├── consensus CRDT (3 tests) — merge idempotent
-├── integration (10+ tests) — full pipeline
+├── integration_tests — paginated chain sync, AUDIT-SYNC compression
+├── page_store (16 tests) — single-page + multi-page, AUDIT-PAGE
+├── domains — claim, overbid, harberger, AUDIT-DOM round-trip
+├── social — quadratic likes, follow tiers, boost cap, AUDIT-SOC
+├── forums — forum/thread/comment hierarchy, AUDIT-FORUM round-trip
+├── moderation (12 tests) — report/commit/reveal, AUDIT-MOD restart
+├── search — TF-IDF + social signals, AUDIT-SEARCH author binding
+├── trust_graph (8 tests) — personalised PageRank, AUDIT-TRUST
 └── autres modules
 ```
+
+---
+
+## Audit P2P V3.3 — corrections appliquées (2026-05-07)
+
+### CRITICAL bugs corrigés
+- **AUDIT-TX-1** : `verify_tx` exemptait les txs avec `to == "BURN"` de la
+  vérification de signature. N'importe quel pair pouvait forger
+  `from=victim, to=BURN` et drainer une victime via gossip. Maintenant
+  seules les adresses synthétiques `NETWORK` et `ESCROW` sont exemptes.
+- **AUDIT-TX-2** : `transfer_with_burn` produisait un 2ᵉ tx (le burn 1%) que
+  `ledger_transfer` ne diffusait jamais — chaque pair distant ratait 1% du
+  débit, divergence du solde sur tout le réseau. La fonction renvoie
+  désormais `Option<burn_tx>` (signé) et `ledger_transfer` diffuse les deux
+  branches. Le contrôle de nonce strict du dispatcher est aussi relâché en
+  monotonic-non-regression pour ne pas perdre les arrivées hors-ordre.
+- **AUDIT-PAGE-1** : `page_store::publish()` acceptait `signature == "unsigned"`
+  ou vide. Atteignable via gossip — n'importe quel pair pouvait imposer
+  du contenu pour le wallet d'une victime. Corrigé : exigence d'une
+  signature Ed25519 valide ; helper `publish_local_unsigned` relégué à
+  `#[cfg(test)]`.
+- **AUDIT-SOC-1** : toutes les commandes V3 (`social_vote`, `social_tip`,
+  `social_boost`, `claim_domain`, `pay_domain_rent`, `overbid_domain`,
+  `submit_moderation_report`) mutaient le ledger sans diffuser le tx
+  sous-jacent — divergence systématique des soldes. Helper
+  `broadcast_ledger_txs()` capture les txs fraîchement créés et envoie
+  chacune comme `BroadcastTx`.
+- **AUDIT-SEARCH-1** : `handle_publish_site` ne liait pas `IndexedDoc.author_pk`
+  au `sender` de l'enveloppe. Un pair pouvait polluer l'index avec des docs
+  spoofés. Maintenant on rejette tout doc dont l'`author_pk` ne correspond
+  pas à l'expéditeur signé.
+
+### HIGH bugs corrigés
+- **AUDIT-BLK-1** : la résolution de fork perdait silencieusement les txs
+  exclusives à la branche perdante. Le garde `!seen_tx_hashes.contains`
+  était toujours false. Désormais on calcule l'ensemble des hashes du
+  bloc gagnant et on remet en pending uniquement les txs absentes de
+  celui-ci.
+- **AUDIT-BLK-2** : la résolution de fork popait le tip AVANT validation —
+  un bloc malformé tronquait la chaîne d'un cran à jamais. Validation
+  extraite en `validate_block_against_prev` et exécutée pre-mutation.
+- **AUDIT-MOD-1** : `pending_reports` (queue de reports sous le seuil de 5)
+  n'était pas snapshotée. Un redémarrage effaçait tous les reports en
+  cours d'accumulation. `ModerationSnapshot` les persiste désormais avec
+  `#[serde(default)]`.
+
+### MEDIUM bugs corrigés
+- **AUDIT-TX-3** : `transfer_with_burn` ne pré-vérifiait que le NET. Si
+  `balance == net`, le burn poussait silencieusement le cache en négatif
+  (saturé par `balance_of`). Pre-check du gross désormais explicite.
+- **AUDIT-SYNC-1** : `handle_chain_segment` ne s'arrêtait pas au premier
+  bloc rejeté. Sur un trou dans le segment, tous les blocs suivants
+  échouaient inutilement. `break` sur première erreur.
+
+### Tests de régression ajoutés
+- ledger : audit_tx1/3/blk1/2/cross_ledger_convergence/out_of_order
+- page_store : audit_page1_*
+- domains : audit_dom_*
+- social : audit_soc_*
+- forums : audit_forum_*
+- moderation : audit_mod1_pending_reports_persist
+- search : audit_search_*
+- trust_graph : audit_trust_*
+- integration_tests : audit_sync_*
 
 ---
 
@@ -299,3 +370,4 @@ npx tauri build
 | 2026-05-06 | **🎉 Premier test P2P réussi entre 2 machines physiques** |
 | 2026-05-06 | v1.0 publiée sur GitHub + Release DMG |
 | 2026-05-06 | **🔧 V2 Network Hardening — protocole Torus P2P parfait** |
+| 2026-05-07 | **🛡️ Audit P2P complet — 5 critiques + 3 high + 2 medium corrigés (243 tests)** |
