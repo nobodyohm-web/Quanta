@@ -513,7 +513,7 @@ impl Ledger {
 
     // ─── D1: Remote Block Validation & Integration ──────────────────────
 
-    /// D1.2: Validate a block received from a remote peer.
+    /// D1.2: Validate a block received from a remote peer (against current tip).
     ///
     /// Checks:
     /// 1. Block index is sequential (matches our chain tip + 1)
@@ -524,8 +524,6 @@ impl Ledger {
     /// Returns Ok(()) if valid, Err(reason) if not.
     pub fn validate_remote_block(&self, block: &Block) -> Result<(), String> {
         let tip = self.chain.last().ok_or("empty chain")?;
-
-        // Check index continuity
         if block.index != tip.index + 1 {
             return Err(format!(
                 "block index {} does not follow tip {} (expected {})",
@@ -534,8 +532,6 @@ impl Ledger {
                 tip.index + 1
             ));
         }
-
-        // Check prev_hash linkage
         if block.prev_hash != tip.hash {
             return Err(format!(
                 "prev_hash mismatch: block says {} but tip is {}",
@@ -543,8 +539,22 @@ impl Ledger {
                 &tip.hash[..tip.hash.len().min(16)]
             ));
         }
+        Self::validate_block_against_prev(block, tip)
+    }
 
-        // Verify all transaction signatures
+    /// AUDIT-BLK-2: Stateless block validation against an explicit `prev`.
+    /// Used by `integrate_remote_block` during fork reorg, where the relevant
+    /// `prev` is the block at `tip.index - 1` rather than the current tip.
+    /// Doesn't enforce index continuity (caller checks) but recomputes the
+    /// block hash and verifies every transaction signature.
+    fn validate_block_against_prev(block: &Block, prev: &Block) -> Result<(), String> {
+        if block.prev_hash != prev.hash {
+            return Err(format!(
+                "prev_hash mismatch: block says {} but prev is {}",
+                &block.prev_hash[..block.prev_hash.len().min(16)],
+                &prev.hash[..prev.hash.len().min(16)]
+            ));
+        }
         for tx in &block.transactions {
             if !Self::verify_tx(tx)? {
                 return Err(format!(
@@ -553,8 +563,6 @@ impl Ledger {
                 ));
             }
         }
-
-        // Verify block hash integrity (recompute and compare)
         let tx_root = Self::compute_merkle_root(&block.transactions);
         let expected_payload = format!(
             "{}:{}:{}:{}:{}",
@@ -572,7 +580,6 @@ impl Ledger {
                 &expected_hash[..expected_hash.len().min(16)]
             ));
         }
-
         Ok(())
     }
 
@@ -640,30 +647,57 @@ impl Ledger {
                     &block.hash[..12],
                     &tip.hash[..12]
                 );
-                // Pop our tip, replace with the remote block
+                // AUDIT-BLK-2: Validate FIRST, pop SECOND. The previous order
+                // popped our tip before validate, so a malformed remote block
+                // would leave the chain truncated by one. We now compute the
+                // post-pop prev (= chain[tip.index - 1]) and validate against
+                // that without mutating state.
+                let prev_idx = tip.index.checked_sub(1)
+                    .ok_or("cannot reorg below genesis")?;
+                let prev_for_remote = self
+                    .chain
+                    .get(prev_idx as usize)
+                    .ok_or("chain too short for fork reorg")?
+                    .clone();
+                if block.prev_hash != prev_for_remote.hash {
+                    return Err(
+                        "fork block prev_hash doesn't match the would-be new tip".into(),
+                    );
+                }
+                // Standalone validation (sigs + merkle root + recomputed hash).
+                Self::validate_block_against_prev(&block, &prev_for_remote)?;
+
+                // Now it's safe to mutate state.
                 let our_tip = self.chain.pop().ok_or("chain unexpectedly empty")?;
-                // PERF-1: Revert balance effects of the old tip's txs
+
+                // PERF-1: Revert balance effects of the old tip's txs.
                 for tx in &our_tip.transactions {
                     self.cache_revert_tx(tx);
                 }
-                // Re-queue our tip's transactions as pending (they may differ)
+
+                // AUDIT-BLK-1: Re-queue txs from our popped tip that are NOT in
+                // the winning remote block, so they aren't lost in the reorg.
+                // The previous `!seen_tx_hashes.contains` guard always returned
+                // false (popped txs are still in `seen_tx_hashes`) and silently
+                // discarded them — a real data-loss bug for any tx exclusive
+                // to the loser fork.
+                let remote_tx_hashes: HashSet<String> = block
+                    .transactions
+                    .iter()
+                    .map(|tx| tx.hash.clone())
+                    .collect();
                 for tx in our_tip.transactions {
-                    if !self.seen_tx_hashes.contains(&tx.hash) {
+                    if !remote_tx_hashes.contains(&tx.hash) {
                         self.cache_apply_tx(&tx);
                         self.pending.push(tx);
                     }
+                    // Else: tx is in the winning block — no need to re-queue,
+                    // and its cache effects are re-applied below.
                 }
-                // Validate + push the remote block
-                // Re-validate against the new tip (which is now tip-1)
-                let new_tip = self.chain.last().ok_or("chain empty after pop")?;
-                if block.prev_hash != new_tip.hash {
-                    return Err("fork block prev_hash doesn't match after reorg".into());
-                }
-                // CRIT-C: Full validation (hash integrity + tx signatures) before integration
-                self.validate_remote_block(&block)?;
+
+                // Apply the winning block's tx effects to cache + seen set.
                 for tx in &block.transactions {
                     self.seen_tx_hashes.insert(tx.hash.clone());
-                    // PERF-1: Apply new block's tx effects to cache
                     self.cache_apply_tx(tx);
                 }
                 self.chain.push(block);
@@ -1213,6 +1247,107 @@ mod tests {
         // Concrete values: A had 100 QTA, sent 10 (gross), 9.9 to B, 0.1 burned.
         assert_eq!(node_a.balance_of(&pk_a), 90 * MICRO);
         assert_eq!(node_a.balance_of(&pk_b), 9_900_000);
+    }
+
+    // ─── AUDIT-BLK regression tests ────────────────────────────────────
+
+    /// AUDIT-BLK-1: a fork reorg must NOT silently drop the loser's
+    /// exclusive transactions. They should re-enter `pending` so the next
+    /// leader can include them. Previously a `seen_tx_hashes.contains`
+    /// guard always returned true and dropped them on the floor.
+    #[test]
+    fn audit_blk1_fork_reorg_preserves_exclusive_txs() {
+        let pk_a = "a".repeat(64);
+        let pk_b = "b".repeat(64);
+        let pk_c = "c".repeat(64);
+
+        // Build the loser ledger: contains a tx that the winning fork doesn't.
+        let mut loser = Ledger::new();
+        loser.mine_tx(&pk_a, 100 * MICRO, 0.0);
+        loser.mine_tx(&pk_b, 50 * MICRO, 0.0);
+        let loser_tip = loser.seal_block(&pk_a, 0.0);
+
+        // Build the winning fork: same height, but with a different tx and
+        // a hash that lex-compares HIGHER than the loser tip.
+        let mut winner = Ledger::new();
+        winner.mine_tx(&pk_c, 75 * MICRO, 0.0);
+        // We need to force the winner's hash to be > loser's. Adjust the
+        // winner's miner field iteratively until block hash > loser_tip.hash.
+        // Simpler approach: just attempt and skip if not the right relationship.
+        let winner_tip = winner.seal_block(&pk_a, 0.0);
+
+        let (high, low) = if winner_tip.hash > loser_tip.hash {
+            (winner_tip.clone(), loser_tip.clone())
+        } else {
+            (loser_tip.clone(), winner_tip.clone())
+        };
+
+        // Simulate the loser node receiving the winner: integrate_remote_block
+        // is called with the higher-hash block. It must do the reorg.
+        let mut node = Ledger::new();
+        // Replay the loser's mining txs so node has the same block.
+        node.mine_tx(&pk_a, 100 * MICRO, 0.0);
+        node.mine_tx(&pk_b, 50 * MICRO, 0.0);
+        // Force-seal so node's tip equals `low` content-wise (different
+        // timestamp may differ, so we'll integrate `low` directly).
+        node.pending.clear();
+        node.chain.push(low.clone());
+
+        // Apply the higher-hash block via integrate_remote_block.
+        let res = node.integrate_remote_block(high.clone());
+        assert!(res.is_ok(), "fork integration must succeed: {:?}", res);
+
+        // The chain tip should now be the winning block.
+        assert_eq!(node.chain.last().unwrap().hash, high.hash);
+
+        // AUDIT-BLK-1: every loser-only tx must be back in pending.
+        let winner_tx_hashes: std::collections::HashSet<&String> =
+            high.transactions.iter().map(|t| &t.hash).collect();
+        let loser_only_txs: Vec<&Transaction> = low
+            .transactions
+            .iter()
+            .filter(|t| !winner_tx_hashes.contains(&t.hash))
+            .collect();
+        for tx in &loser_only_txs {
+            assert!(
+                node.pending.iter().any(|p| p.hash == tx.hash),
+                "loser-only tx {} must be re-queued in pending after reorg",
+                &tx.id
+            );
+        }
+    }
+
+    /// AUDIT-BLK-2: if the remote fork block is malformed, the local chain
+    /// must NOT be truncated. Previously we popped our tip BEFORE
+    /// validating, so a corrupt block left a permanent gap.
+    #[test]
+    fn audit_blk2_failed_fork_validation_preserves_chain() {
+        let pk_a = "a".repeat(64);
+
+        let mut node = Ledger::new();
+        node.mine_tx(&pk_a, 100 * MICRO, 0.0);
+        let our_tip = node.seal_block(&pk_a, 0.0);
+        let height_before = node.chain.len();
+
+        // Construct a fork block at the same height with a HIGHER hash
+        // (so the tie-break would prefer it) but a CORRUPT hash field
+        // (mismatched payload → validate_block_against_prev rejects).
+        let bogus = Block {
+            index: our_tip.index,
+            timestamp: our_tip.timestamp.clone(),
+            transactions: vec![],
+            prev_hash: our_tip.prev_hash.clone(),
+            // Force a hash that's > our_tip.hash by setting the high byte to 'f'.
+            hash: "f".repeat(64),
+            miner: "attacker".into(),
+            energy_kwh: 0.0,
+        };
+
+        let res = node.integrate_remote_block(bogus);
+        assert!(res.is_err(), "corrupt fork block must be rejected");
+        // Chain unchanged: our tip is still there.
+        assert_eq!(node.chain.len(), height_before);
+        assert_eq!(node.chain.last().unwrap().hash, our_tip.hash);
     }
 
     /// AUDIT-TX out-of-order delivery: B receives the burn (tx_type=Burn)

@@ -210,6 +210,106 @@ mod integration_tests {
         );
     }
 
+    // ─── AUDIT-SYNC: paginated chain reconstruction ─────────────────────
+
+    /// AUDIT-SYNC: a fresh ledger must be able to rebuild a 100-block chain
+    /// from a peer by integrating blocks in batches of 50 (the wire-format
+    /// pagination limit). Mirrors the real ChainSegment flow without the
+    /// gossip transport layer.
+    #[test]
+    fn audit_sync_reconstructs_100_blocks_paginated() {
+        let pk = "a".repeat(64);
+
+        // Source ledger: build a 100-block chain locally.
+        let mut source = Ledger::new();
+        for _ in 0..100 {
+            // Mining tx ensures pending is non-empty so seal_block works.
+            source.mine_tx(&pk, MICRO, 0.01);
+            source.seal_block(&pk, 0.01);
+        }
+        // Source chain has 101 blocks total (genesis + 100).
+        assert_eq!(source.chain.len(), 101);
+        let final_hash = source.chain.last().unwrap().hash.clone();
+
+        // Receiver: starts with only genesis. Sync in two pages of 50.
+        let mut receiver = Ledger::new();
+        assert_eq!(receiver.chain.len(), 1);
+
+        // Page 1: blocks 1..=50
+        for i in 1..=50 {
+            let blk = source.chain[i].clone();
+            assert!(
+                receiver.integrate_remote_block(blk).is_ok(),
+                "page-1 block {} must integrate",
+                i
+            );
+        }
+        assert_eq!(receiver.chain.len(), 51);
+
+        // Page 2: blocks 51..=100
+        for i in 51..=100 {
+            let blk = source.chain[i].clone();
+            assert!(
+                receiver.integrate_remote_block(blk).is_ok(),
+                "page-2 block {} must integrate",
+                i
+            );
+        }
+        assert_eq!(receiver.chain.len(), 101);
+        assert_eq!(
+            receiver.chain.last().unwrap().hash,
+            final_hash,
+            "receiver must converge on source's tip hash"
+        );
+    }
+
+    /// AUDIT-SYNC: integrating a contiguous segment must reject the whole
+    /// rest of the segment as soon as one block fails (gap detection).
+    #[test]
+    fn audit_sync_segment_breaks_at_first_invalid() {
+        let pk = "a".repeat(64);
+        let mut source = Ledger::new();
+        for _ in 0..5 {
+            source.mine_tx(&pk, MICRO, 0.0);
+            source.seal_block(&pk, 0.0);
+        }
+        let mut receiver = Ledger::new();
+        // Skip block 1 to introduce a gap in the segment.
+        let segment: Vec<_> = (2..=5).map(|i| source.chain[i].clone()).collect();
+
+        let mut accepted = 0;
+        for blk in segment {
+            match receiver.integrate_remote_block(blk) {
+                Ok(true) => accepted += 1,
+                _ => break, // mirrors dispatcher behaviour
+            }
+        }
+        // None of the 4 blocks should integrate — block 2 needs block 1's
+        // hash, which receiver doesn't have.
+        assert_eq!(accepted, 0, "no block in a gapped segment may integrate");
+    }
+
+    /// AUDIT-SYNC: gzip compression round-trip preserves the exact block JSON.
+    #[test]
+    fn audit_sync_compression_round_trip() {
+        use crate::p2p::gossip::{compress_blocks, decompress_blocks};
+        let pk = "a".repeat(64);
+        let mut source = Ledger::new();
+        for _ in 0..10 {
+            source.mine_tx(&pk, MICRO, 0.0);
+            source.seal_block(&pk, 0.0);
+        }
+        let blocks_json: Vec<String> = source
+            .chain
+            .iter()
+            .skip(1) // skip genesis
+            .map(|b| serde_json::to_string(b).unwrap())
+            .collect();
+        let compressed = compress_blocks(&blocks_json).expect("must compress");
+        let decompressed = decompress_blocks(&compressed).expect("must decompress");
+        assert_eq!(decompressed, blocks_json);
+    }
+
     // ─── INT-3: Gossip envelope full round-trip ─────────────────────────
 
     /// Sign → serialize → deserialize → verify: the entire gossip pipeline

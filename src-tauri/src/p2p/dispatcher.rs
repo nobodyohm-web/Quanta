@@ -1163,7 +1163,10 @@ async fn handle_chain_segment(
             Err(e) => {
                 log::warn!("◈ [Dispatch] bad block in ChainSegment from {}: {}", &sender[..sender.len().min(12)], e);
                 rejected += 1;
-                continue;
+                // AUDIT-SYNC-1: stop on parse failure — subsequent blocks
+                // can't extend a tip that's missing the previous one, so
+                // continuing wastes lock acquisitions.
+                break;
             }
         };
 
@@ -1177,6 +1180,11 @@ async fn handle_chain_segment(
             Err(e) => {
                 log::warn!("◈ [Dispatch] ChainSegment block rejected: {}", e);
                 rejected += 1;
+                // AUDIT-SYNC-1: same rationale — once a block in the segment
+                // doesn't fit, every later one in the same segment will also
+                // fail. Bailing out lets the caller re-issue a fresh
+                // RequestChain instead of churning the lock pointlessly.
+                break;
             }
         }
     }
