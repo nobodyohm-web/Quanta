@@ -577,4 +577,50 @@ mod tests {
         let s2 = SocialState::restore(snap);
         assert!(s2.page_stats("cidA").is_some());
     }
+
+    /// AUDIT-SOC-1 (regression): verify is invoked BEFORE apply and a tampered
+    /// timestamp invalidates the signature — the action must be rejected and
+    /// no derived state should be mutated.
+    #[test]
+    fn audit_soc_verify_runs_before_apply() {
+        let mut s = SocialState::new();
+        let v = sk(7);
+        let mut a = vote(&v, "cidZ", &pk_of(&sk(8)), LIKE_BASE_COST_MICRO_QTA, 1, 1, 1);
+        // Tamper the timestamp after signing — sig no longer matches payload.
+        a.timestamp = 99_999;
+        let res = s.apply(&a, 1);
+        assert_eq!(res, Err(SocialError::InvalidSignature));
+        // No page stat should have been created.
+        assert!(s.page_stats("cidZ").is_none());
+    }
+
+    /// AUDIT-SOC-1 (regression): a tip's underlying QUANTA movement is
+    /// captured in CreatorStats.tip_total_received_micro_qta — provides a
+    /// direct check that the social-state mirror tracks the ledger movement.
+    #[test]
+    fn audit_soc_tip_credits_creator_stats() {
+        let mut s = SocialState::new();
+        let v = sk(3);
+        let author = pk_of(&sk(4));
+
+        let mut a = SignedAction {
+            action: SocialAction::Tip {
+                target_cid: "cidT".into(),
+                target_author_pk: author.clone(),
+                amount_micro_qta: 5_000_000, // 5 QTA
+                memo: "thanks".into(),
+            },
+            author_pk: String::new(),
+            timestamp: 1,
+            nonce: 1,
+            signature: String::new(),
+        };
+        sign_action(&v, &mut a);
+        s.apply(&a, 1).unwrap();
+
+        let creator = s.creator_stats(&author).expect("creator must be tracked");
+        assert_eq!(creator.tip_total_received_micro_qta, 5_000_000);
+        let page = s.page_stats("cidT").expect("page must be tracked");
+        assert_eq!(page.tip_total_micro_qta, 5_000_000);
+    }
 }

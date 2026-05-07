@@ -753,4 +753,120 @@ mod tests {
         let res = reg.reclaim_expired("alex.torus", &sk2, pk2, 1_000_000, INITIAL_CLAIM_MICRO_QTA, 100);
         assert!(res.is_err());
     }
+
+    // ─── AUDIT-DOM regression tests ────────────────────────────────────
+
+    /// AUDIT-DOM-1: full claim → overbid (via gossip-facing apply_overbid_record)
+    /// → subdomain round-trip across two registries (mirrors the dispatcher path).
+    #[test]
+    fn audit_dom_full_round_trip_via_apply_overbid() {
+        let sk_a = mk_sk(10);
+        let sk_b = mk_sk(11);
+        let pk_b = hex::encode(sk_b.verifying_key().as_bytes());
+
+        // Source registry: A claims, then B overbids.
+        let mut source = DomainRegistry::new();
+        let claim = fresh_record(&sk_a, "alex.torus", 5_000_000, 0);
+        source.claim(claim.clone(), INITIAL_CLAIM_MICRO_QTA).unwrap();
+        let overbid_rec = source
+            .overbid("alex.torus", &sk_b, pk_b.clone(), 10_000_000, 5_000_000, 1_000)
+            .unwrap();
+
+        // B grants a subdomain shop.alex.torus → some target.
+        let target_pk = "c".repeat(64);
+        let mut grant = SubdomainGrant {
+            name: "shop.alex.torus".into(),
+            parent: "alex.torus".into(),
+            target_pk: target_pk.clone(),
+            created_at: 1_100,
+            version: 1,
+            signature: String::new(),
+        };
+        sign_subdomain(&sk_b, &mut grant);
+        source.grant_subdomain(grant.clone()).unwrap();
+
+        // Receiver registry mirrors what the dispatcher does:
+        // 1. PublishDomain (claim)  → reg.claim
+        // 2. PublishDomain (overbid) → reg.apply_overbid_record
+        // 3. PublishSubdomain        → reg.grant_subdomain
+        let mut receiver = DomainRegistry::new();
+        receiver.claim(claim, INITIAL_CLAIM_MICRO_QTA).unwrap();
+        receiver
+            .apply_overbid_record(overbid_rec)
+            .expect("overbid record must apply on receiver");
+        receiver.grant_subdomain(grant).expect("subdomain must apply");
+
+        // Resolution must agree on both sides.
+        assert_eq!(source.resolve("alex.torus", 1_200), Some(pk_b.clone()));
+        assert_eq!(receiver.resolve("alex.torus", 1_200), Some(pk_b));
+        assert_eq!(source.resolve("shop.alex.torus", 1_200), Some(target_pk.clone()));
+        assert_eq!(receiver.resolve("shop.alex.torus", 1_200), Some(target_pk));
+    }
+
+    /// AUDIT-DOM-2: apply_overbid_record (gossip path) rejects records that
+    /// regress the version or are unsigned by the new owner.
+    #[test]
+    fn audit_dom_apply_overbid_rejects_forged_owner() {
+        let sk_a = mk_sk(20);
+        let sk_b = mk_sk(21);
+        let attacker = mk_sk(22);
+        let pk_b = hex::encode(sk_b.verifying_key().as_bytes());
+
+        let mut reg = DomainRegistry::new();
+        reg.claim(
+            fresh_record(&sk_a, "carol.torus", 5_000_000, 0),
+            INITIAL_CLAIM_MICRO_QTA,
+        )
+        .unwrap();
+
+        // Build a record claiming B is the new owner, but signed by `attacker`
+        // (who has a different keypair). Signature won't verify against pk_b.
+        let mut forged = DomainRecord {
+            name: "carol.torus".into(),
+            owner_pk: pk_b,
+            target_pk: "f".repeat(64),
+            value_micro_qta: 10_000_000,
+            last_paid_ts: 1_000,
+            updated_at: 1_000,
+            version: 2,
+            signature: String::new(),
+        };
+        let bad_sig = attacker.sign(&signable_bytes(&forged));
+        forged.signature = hex::encode(bad_sig.to_bytes());
+
+        assert_eq!(
+            reg.apply_overbid_record(forged),
+            Err(DomainError::InvalidSignature)
+        );
+    }
+
+    /// AUDIT-DOM-2 (continued): apply_overbid_record blocks regression of
+    /// version. Important: an attacker replaying an old record must not
+    /// overwrite the current state.
+    #[test]
+    fn audit_dom_apply_overbid_blocks_stale_version() {
+        let sk_a = mk_sk(30);
+        let sk_b = mk_sk(31);
+        let pk_b = hex::encode(sk_b.verifying_key().as_bytes());
+
+        let mut reg = DomainRegistry::new();
+        reg.claim(
+            fresh_record(&sk_a, "dave.torus", 5_000_000, 0),
+            INITIAL_CLAIM_MICRO_QTA,
+        )
+        .unwrap();
+
+        // Apply a legit overbid → version 2.
+        let r2 = reg
+            .overbid("dave.torus", &sk_b, pk_b.clone(), 10_000_000, 5_000_000, 1_000)
+            .unwrap();
+        assert_eq!(r2.version, 2);
+
+        // Attempt to replay version-1 record → must be rejected.
+        let stale = fresh_record(&sk_a, "dave.torus", 5_000_000, 0);
+        assert_eq!(
+            reg.apply_overbid_record(stale),
+            Err(DomainError::StaleVersion)
+        );
+    }
 }

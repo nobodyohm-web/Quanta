@@ -272,6 +272,13 @@ impl PageStore {
     }
 
     /// Publish or update a wallet's single page (legacy V2).
+    ///
+    /// AUDIT-PAGE-1: this method is reachable from gossip (`PublishPage`
+    /// handler), so it MUST require a real Ed25519 signature. The previous
+    /// "skip verification when signature is empty or `unsigned`" path was a
+    /// migration helper that leaked into the gossip path — any peer could
+    /// craft `{ author_pk: <victim>, signature: "unsigned" }` and impose
+    /// arbitrary content for that wallet on every other node.
     pub fn publish(&mut self, page: PublishedPage) -> Result<(), String> {
         if page.content.len() > MAX_PAGE_SIZE {
             return Err(format!(
@@ -282,9 +289,25 @@ impl PageStore {
         if page.title.len() > 100 {
             return Err("Titre trop long (max 100)".into());
         }
-        // Verify signature (skip for unsigned migration pages)
-        if page.signature != "unsigned" && !page.signature.is_empty() {
-            verify_page_signature(&page)?;
+        if page.signature.is_empty() || page.signature == "unsigned" {
+            return Err("Page non signée".into());
+        }
+        verify_page_signature(&page)?;
+        if let Some(existing) = self.pages.get(&page.author_pk) {
+            if page.version <= existing.version {
+                return Err("Version obsolète".into());
+            }
+        }
+        self.pages.insert(page.author_pk.clone(), page);
+        Ok(())
+    }
+
+    /// AUDIT-PAGE-1: dedicated path for tests and one-off local migration of
+    /// legacy pages that pre-date Ed25519 signing. Never call from gossip.
+    #[cfg(test)]
+    pub fn publish_local_unsigned(&mut self, page: PublishedPage) -> Result<(), String> {
+        if page.content.len() > MAX_PAGE_SIZE {
+            return Err("page too big".into());
         }
         if let Some(existing) = self.pages.get(&page.author_pk) {
             if page.version <= existing.version {
@@ -415,7 +438,7 @@ mod tests {
             signature: "unsigned".into(),
             version: 1,
         };
-        assert!(store.publish(page).is_ok());
+        assert!(store.publish_local_unsigned(page).is_ok());
         assert_eq!(store.get_page(&"a".repeat(64)).unwrap().title, "Ma page");
     }
 
@@ -445,9 +468,9 @@ mod tests {
             signature: "unsigned".into(),
             version: v,
         };
-        store.publish(mk(2)).unwrap();
-        assert!(store.publish(mk(1)).is_err());
-        assert!(store.publish(mk(3)).is_ok());
+        store.publish_local_unsigned(mk(2)).unwrap();
+        assert!(store.publish_local_unsigned(mk(1)).is_err());
+        assert!(store.publish_local_unsigned(mk(3)).is_ok());
     }
 
     #[test]
@@ -461,7 +484,7 @@ mod tests {
             signature: "unsigned".into(),
             version: 1,
         };
-        store.publish(page).unwrap();
+        store.publish_local_unsigned(page).unwrap();
         let snap = store.snapshot();
         let restored = PageStore::restore(snap);
         assert_eq!(restored.page_count(), 1);
@@ -501,6 +524,69 @@ mod tests {
         };
         let mut store = PageStore::new();
         assert!(store.publish(page).is_err());
+    }
+
+    /// AUDIT-PAGE-1 (regression): a page with `signature == "unsigned"` or
+    /// empty must be rejected by the gossip-facing `publish()`. Previously
+    /// any peer could mint a "page" for a victim's pk by setting
+    /// `signature: "unsigned"`.
+    #[test]
+    fn audit_page1_rejects_unsigned_marker_from_gossip() {
+        let unsigned = PublishedPage {
+            author_pk: "a".repeat(64),
+            content: "<h1>forge</h1>".into(),
+            title: "Forged".into(),
+            updated_at: 1,
+            signature: "unsigned".into(),
+            version: 1,
+        };
+        let mut store = PageStore::new();
+        assert!(
+            store.publish(unsigned).is_err(),
+            "publish() must reject 'unsigned' marker (AUDIT-PAGE-1)"
+        );
+        let empty_sig = PublishedPage {
+            author_pk: "a".repeat(64),
+            content: "<h1>forge</h1>".into(),
+            title: "Forged".into(),
+            updated_at: 1,
+            signature: String::new(),
+            version: 1,
+        };
+        assert!(
+            store.publish(empty_sig).is_err(),
+            "publish() must reject empty signature (AUDIT-PAGE-1)"
+        );
+    }
+
+    /// AUDIT-PAGE-1 (positive): a properly-signed page round-trips through
+    /// publish() and ends up retrievable.
+    #[test]
+    fn audit_page1_signed_page_publishes_and_round_trips() {
+        let sk_ = sk(99);
+        let pk_hex = pk_of(&sk_);
+        let content = "<h1>Auth</h1>";
+        let version = 1u64;
+        let signable = format!("{}:{}:{}", pk_hex, version, content);
+        let sig = sk_.sign(signable.as_bytes());
+        let page = PublishedPage {
+            author_pk: pk_hex.clone(),
+            content: content.into(),
+            title: "Auth page".into(),
+            updated_at: 1,
+            signature: hex::encode(sig.to_bytes()),
+            version,
+        };
+        let mut store_a = PageStore::new();
+        store_a.publish(page.clone()).expect("must publish");
+
+        // Second store receives the same page over "gossip" — must accept
+        // and surface identical content.
+        let mut store_b = PageStore::new();
+        store_b.publish(page.clone()).expect("peer must accept");
+        let received = store_b.get_page(&pk_hex).unwrap();
+        assert_eq!(received.content, content);
+        assert_eq!(received.title, "Auth page");
     }
 
     // ── V3.3 — Multi-page site tests ────────────────────────────────────────

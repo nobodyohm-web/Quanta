@@ -66,6 +66,30 @@ async fn wrap_broadcast(state: &Arc<AppState>, msg: GossipMessage) -> Result<(),
     Ok(())
 }
 
+/// AUDIT-SOC-1: broadcast a slice of ledger txs over gossip as one
+/// `BroadcastTx` envelope each. Used by social/domain/moderation commands
+/// that previously mutated only the local ledger without telling peers,
+/// causing every other node's view of those wallets to diverge from ours.
+/// Errors on individual envelopes are logged and skipped — best-effort.
+async fn broadcast_ledger_txs(state: &Arc<AppState>, txs: &[p2p::ledger::Transaction]) {
+    if txs.is_empty() {
+        return;
+    }
+    for tx in txs {
+        let tx_json = match serde_json::to_string(tx) {
+            Ok(j) => j,
+            Err(e) => {
+                log::warn!("◈ [V3] broadcast_ledger_txs serialize failed: {}", e);
+                continue;
+            }
+        };
+        let msg = GossipMessage::BroadcastTx { tx_json };
+        if let Err(e) = wrap_broadcast(state, msg).await {
+            log::warn!("◈ [V3] broadcast_ledger_txs envelope failed: {}", e);
+        }
+    }
+}
+
 // ─── DOMAINES ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -109,17 +133,20 @@ pub async fn claim_domain(
     rec.signature = sign_hex(&state, &signable).await?;
 
     // Débit sur le ledger : INITIAL_CLAIM brûlé (paiement au "réseau", pas à un bénéficiaire).
-    {
+    let burn_tx = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
-        let _ = ledger.burn_tx(&pk, p2p::domains::INITIAL_CLAIM_MICRO_QTA, &crypto);
-    }
+        ledger.burn_tx(&pk, p2p::domains::INITIAL_CLAIM_MICRO_QTA, &crypto)?
+    };
 
     {
         let mut reg = state.node.domains.write().await;
         reg.claim(rec.clone(), p2p::domains::INITIAL_CLAIM_MICRO_QTA)
             .map_err(|e| format!("{e:?}"))?;
     }
+
+    // AUDIT-SOC-1: broadcast the burn tx so peers see the wallet debit too.
+    broadcast_ledger_txs(&state, std::slice::from_ref(&burn_tx)).await;
 
     let record_json = serde_json::to_string(&rec).map_err(|e| e.to_string())?;
     wrap_broadcast(&state, GossipMessage::PublishDomain { record_json }).await?;
@@ -171,17 +198,19 @@ pub async fn pay_domain_rent(
     new_rec.signature = sign_hex(&state, &signable).await?;
 
     // Débit ledger (loyer brûlé : pas de bénéficiaire — soutient la rareté).
-    {
+    let burn_tx = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
-        ledger.burn_tx(&pk, due, &crypto)?;
-    }
+        ledger.burn_tx(&pk, due, &crypto)?
+    };
 
     // Update local + gossip.
     {
         let mut reg = state.node.domains.write().await;
         reg.update(new_rec.clone()).map_err(|e| format!("{e:?}"))?;
     }
+    // AUDIT-SOC-1: peers must see the rent burn debit too.
+    broadcast_ledger_txs(&state, std::slice::from_ref(&burn_tx)).await;
     let record_json = serde_json::to_string(&new_rec).map_err(|e| e.to_string())?;
     wrap_broadcast(&state, GossipMessage::PublishDomain { record_json }).await?;
 
@@ -234,11 +263,11 @@ pub async fn overbid_domain(
     new_rec.signature = sign_hex(&state, &signable).await?;
 
     // Paiement : challenger → propriétaire actuel (transfer 1% burn auto via ledger).
-    {
+    let (transfer_tx, burn_tx_opt, _burn_uqta) = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
-        ledger.transfer_with_burn(&pk, &current_owner, payment, &crypto)?;
-    }
+        ledger.transfer_with_burn(&pk, &current_owner, payment, &crypto)?
+    };
 
     // V3.3 — Insertion via la méthode dédiée `apply_overbid_record` qui accepte
     // un changement de owner_pk si la signature du challenger est valide.
@@ -247,6 +276,11 @@ pub async fn overbid_domain(
         reg.apply_overbid_record(new_rec.clone())
             .map_err(|e| format!("{e:?}"))?;
     }
+
+    // AUDIT-SOC-1: peers must see both legs (transfer + burn).
+    let mut txs = vec![transfer_tx];
+    if let Some(b) = burn_tx_opt { txs.push(b); }
+    broadcast_ledger_txs(&state, &txs).await;
 
     let record_json = serde_json::to_string(&new_rec).map_err(|e| e.to_string())?;
     wrap_broadcast(&state, GossipMessage::PublishDomain { record_json }).await?;
@@ -541,11 +575,14 @@ pub async fn social_vote(
     let signable = p2p::social::signable_bytes(&signed);
     signed.signature = sign_hex(&state, &signable).await?;
     // Débit ledger : tip à l'auteur (1% burn auto), influence quadratique côté state.
-    {
+    // AUDIT-SOC-1: capture both legs and broadcast them so peers see the
+    // ledger movement, not just the influence-only SocialAction.
+    let (transfer_tx, burn_tx_opt, _burn_uqta) = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
-        let _ = ledger.transfer_with_burn(&pk, &target_author_pk, amount, &crypto);
-    }
+        ledger.transfer_with_burn(&pk, &target_author_pk, amount, &crypto)
+            .map_err(|e| format!("transfer rejected: {}", e))?
+    };
     state
         .node
         .social
@@ -553,6 +590,9 @@ pub async fn social_vote(
         .await
         .apply(&signed, now_secs())
         .map_err(|e| format!("{e:?}"))?;
+    let mut txs = vec![transfer_tx];
+    if let Some(b) = burn_tx_opt { txs.push(b); }
+    broadcast_ledger_txs(&state, &txs).await;
     let action_json = serde_json::to_string(&signed).map_err(|e| e.to_string())?;
     wrap_broadcast(&state, GossipMessage::BroadcastSocialAction { action_json }).await?;
     Ok(())
@@ -624,11 +664,15 @@ pub async fn social_tip(
         return Err("Montant requis".into());
     }
     let pk = my_pk(&state).await?;
-    let (_tx, _burn_tx, burn) = {
+    let (transfer_tx, burn_tx_opt, burn) = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
         ledger.transfer_with_burn(&pk, &target_author_pk, amount, &crypto)?
     };
+    // AUDIT-SOC-1: broadcast the underlying ledger movements.
+    let mut tip_txs = vec![transfer_tx];
+    if let Some(b) = burn_tx_opt { tip_txs.push(b); }
+    broadcast_ledger_txs(&state, &tip_txs).await;
     let action = p2p::social::SocialAction::Tip {
         target_cid,
         target_author_pk,
@@ -661,12 +705,19 @@ pub async fn social_boost(
     let burn = p2p::social::boost_burn_share(amount);
     let pk = my_pk(&state).await?;
     // Brûle 5% + transfère le reste à l'auteur.
-    {
+    // AUDIT-SOC-1: capture all three legs (5% boost-burn, transfer net,
+    // 1% transfer-burn) and broadcast them so peers see the full debit.
+    let (boost_burn_tx, transfer_tx, transfer_burn_opt) = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
-        let _ = ledger.burn_tx(&pk, burn, &crypto);
-        ledger.transfer_with_burn(&pk, &target_author_pk, amount - burn, &crypto)?;
-    }
+        let bb = ledger.burn_tx(&pk, burn, &crypto)?;
+        let (tx, tb_opt, _) = ledger
+            .transfer_with_burn(&pk, &target_author_pk, amount - burn, &crypto)?;
+        (bb, tx, tb_opt)
+    };
+    let mut boost_txs = vec![boost_burn_tx, transfer_tx];
+    if let Some(t) = transfer_burn_opt { boost_txs.push(t); }
+    broadcast_ledger_txs(&state, &boost_txs).await;
     let action = p2p::social::SocialAction::Boost {
         target_cid,
         target_author_pk,
@@ -745,11 +796,13 @@ pub async fn submit_moderation_report(
     report.signature = sign_hex(&state, &signable).await?;
 
     // Débit anti-spam (0.1 QTA brûlé).
-    {
+    let report_burn_tx = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
-        let _ = ledger.burn_tx(&pk, p2p::moderation::REPORT_COST_MICRO_QTA, &crypto);
-    }
+        ledger.burn_tx(&pk, p2p::moderation::REPORT_COST_MICRO_QTA, &crypto)?
+    };
+    // AUDIT-SOC-1: peers must observe the report-burn debit.
+    broadcast_ledger_txs(&state, std::slice::from_ref(&report_burn_tx)).await;
 
     let pool: Vec<String> = state
         .node
