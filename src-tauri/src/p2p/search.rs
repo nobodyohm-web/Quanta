@@ -609,4 +609,57 @@ mod tests {
         let idx2 = SearchIndex::restore(snap);
         assert_eq!(idx2.doc_count(), 1);
     }
+
+    /// AUDIT-SEARCH-1 (regression): three docs indexed, search must return
+    /// hits ranked by TF + IDF + social signals — concrete deterministic
+    /// ordering that the audit checklist asks for.
+    #[test]
+    fn audit_search_three_docs_ranked_correctly() {
+        let mut idx = SearchIndex::new();
+        // doc1: "vegan vegan vegan recipes" — 3× the keyword
+        idx.upsert(doc("doc1", "alice", "Vegan recipes", "vegan vegan vegan recipes", 100, "fr"));
+        // doc2: "vegan recipes" — single mention
+        idx.upsert(doc("doc2", "bob", "Vegan", "vegan recipes lite", 100, "fr"));
+        // doc3: irrelevant
+        idx.upsert(doc("doc3", "carol", "Football", "soccer match", 100, "fr"));
+
+        let hits = idx.search(
+            "vegan",
+            &SearchFilters::default(),
+            200,
+            10,
+            |_| SocialSignals { creator_reputation: 1.0, ..Default::default() },
+        );
+        // Only docs containing "vegan" should appear → 2 hits.
+        assert_eq!(hits.len(), 2);
+        // doc1 has higher TF for "vegan" → higher score (TF-driven).
+        assert_eq!(hits[0].cid, "doc1");
+        assert_eq!(hits[1].cid, "doc2");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    /// AUDIT-SEARCH-1: re-indexing the same CID replaces the prior version
+    /// — no duplicate posting entries should remain.
+    #[test]
+    fn audit_search_upsert_replaces_previous_version() {
+        let mut idx = SearchIndex::new();
+        idx.upsert(doc("cidX", "alice", "Old title", "old content", 100, "fr"));
+        idx.upsert(doc("cidX", "alice", "New title", "new content", 200, "fr"));
+        assert_eq!(idx.doc_count(), 1, "upsert must dedupe by cid");
+        let stored = idx.doc_by_cid("cidX").unwrap();
+        assert_eq!(stored.title, "New title");
+        // Searching for the OLD content must NOT find cidX (its postings
+        // for "old"/"content" should be gone after upsert).
+        let old_hits = idx.search(
+            "old",
+            &SearchFilters::default(),
+            300,
+            10,
+            |_| SocialSignals { creator_reputation: 1.0, ..Default::default() },
+        );
+        assert!(
+            old_hits.is_empty(),
+            "old token postings must be cleared on upsert"
+        );
+    }
 }

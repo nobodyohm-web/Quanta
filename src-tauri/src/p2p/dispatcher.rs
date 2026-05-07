@@ -455,7 +455,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             handle_publish_subdomain(state, &grant_json).await;
         }
         GossipMessage::PublishSite { doc_json } => {
-            handle_publish_site(state, &doc_json).await;
+            handle_publish_site(state, &env.sender, &doc_json).await;
         }
         GossipMessage::BroadcastSocialAction { action_json } => {
             handle_broadcast_social_action(state, &action_json).await;
@@ -543,12 +543,25 @@ async fn handle_publish_subdomain(state: &Arc<crate::AppState>, grant_json: &str
     }
 }
 
-async fn handle_publish_site(state: &Arc<crate::AppState>, doc_json: &str) {
+async fn handle_publish_site(state: &Arc<crate::AppState>, sender_pk: &str, doc_json: &str) {
     use crate::p2p::search::IndexedDoc;
     let Ok(doc) = serde_json::from_str::<IndexedDoc>(doc_json) else {
         log::warn!("◈ [V3] PublishSite JSON invalide");
         return;
     };
+    // AUDIT-SEARCH-1: the envelope is already Ed25519-signed at the gossip
+    // layer; we know `sender_pk` is the wallet that broadcast this. Reject
+    // any doc whose `author_pk` doesn't match — otherwise a peer could
+    // pollute the search index with docs spoofing arbitrary authors,
+    // hijacking visibility or framing victims for spam content.
+    if doc.author_pk != sender_pk {
+        log::warn!(
+            "◈ [V3] PublishSite author_pk={} ≠ envelope sender={} — drop",
+            &doc.author_pk[..doc.author_pk.len().min(12)],
+            &sender_pk[..sender_pk.len().min(12)]
+        );
+        return;
+    }
     state.node.search.write().await.upsert(doc);
     state.node.gossip.write().await.stats.sites_indexed += 1;
 }

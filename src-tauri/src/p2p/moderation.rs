@@ -229,6 +229,13 @@ pub struct ModerationSnapshot {
     pub seen_report_ids: Vec<String>,
     /// Compteur reports validés (verdict ≠ Innocent) sur 30j par auteur — pour anti-troll.
     pub validated_reports_30d: HashMap<String, Vec<u64>>,
+    /// AUDIT-MOD-1: reports queued under the open-case threshold. Without
+    /// persisting these, a node restart erased every accumulating report
+    /// below 5 — users had to re-report from scratch and could miss the
+    /// threshold purely because of an untimely restart. `#[serde(default)]`
+    /// keeps backward compat with snapshots taken before this field existed.
+    #[serde(default)]
+    pub pending_reports: HashMap<String, Vec<Report>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -251,6 +258,8 @@ impl ModerationEngine {
             cases: self.cases.values().cloned().collect(),
             seen_report_ids: self.seen_report_ids.iter().cloned().collect(),
             validated_reports_30d: self.validated_reports_30d.clone(),
+            // AUDIT-MOD-1: persist pending reports across restart.
+            pending_reports: self.pending_reports.clone(),
         }
     }
 
@@ -261,6 +270,7 @@ impl ModerationEngine {
         }
         s.seen_report_ids = snap.seen_report_ids.into_iter().collect();
         s.validated_reports_30d = snap.validated_reports_30d;
+        s.pending_reports = snap.pending_reports;
         s
     }
 
@@ -686,5 +696,43 @@ mod tests {
         assert_eq!(slash_bps_for_verdict(Verdict::Ban), 1_000);
         assert_eq!(slash_bps_for_verdict(Verdict::Hide), 0);
         assert_eq!(slash_bps_for_verdict(Verdict::Innocent), 0);
+    }
+
+    /// AUDIT-MOD-1: pending (below-threshold) reports must survive a
+    /// snapshot/restore cycle. Previously a restart wiped every
+    /// accumulating report under the open-case threshold of 5.
+    #[test]
+    fn audit_mod1_pending_reports_persist_across_restart() {
+        let mut eng = ModerationEngine::new();
+        let pool: Vec<String> = (0..10).map(|i| pk_of(&sk(50 + i))).collect();
+        // Submit 3 reports — below the threshold of 5, so no case opens.
+        for i in 0..3 {
+            eng.submit_report(
+                mk_report(&sk(i + 1), "cid_X", "author_X", 0, i as u64),
+                || pool.clone(),
+                "blockA",
+                1,
+            )
+            .unwrap();
+        }
+        // No case opened yet (below threshold).
+        assert_eq!(eng.cases.len(), 0);
+        // Pending should hold 3 reports under cid_X.
+        assert_eq!(eng.pending_reports.get("cid_X").map(|v| v.len()), Some(3));
+
+        // Snapshot + restore.
+        let snap = eng.snapshot();
+        let restored = ModerationEngine::restore(snap);
+        assert_eq!(
+            restored.pending_reports.get("cid_X").map(|v| v.len()),
+            Some(3),
+            "pending reports must survive restart (AUDIT-MOD-1)"
+        );
+        // seen_report_ids must also survive so duplicate-report dedup keeps working.
+        assert_eq!(
+            restored.seen_report_ids.len(),
+            3,
+            "seen_report_ids must survive restart"
+        );
     }
 }

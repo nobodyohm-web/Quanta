@@ -453,4 +453,55 @@ mod tests {
         assert_eq!(e2.threads_in(&fid).len(), 1);
         assert_eq!(e2.comments_of(&tid).len(), 1);
     }
+
+    /// AUDIT-FORUM-1: full forum + thread + comment round-trip across two
+    /// engines (mirrors gossip propagation). Each node MUST verify and accept
+    /// on the receiver in the SAME order they were authored.
+    #[test]
+    fn audit_forum_round_trip_across_engines() {
+        let mut source = ForumsEngine::new();
+        let f = build_forum(&sk(1), "general", "all things", 100).unwrap();
+        let fid = f.id.clone();
+        source.add_forum(f.clone()).unwrap();
+        let t = build_thread(&sk(2), &fid, "Hello", "world", false, None, 101).unwrap();
+        let tid = t.id.clone();
+        source.add_thread(t.clone()).unwrap();
+        let c1 = build_comment(&sk(3), &tid, None, "first", 102).unwrap();
+        let cid1 = c1.id.clone();
+        source.add_comment(c1.clone()).unwrap();
+        let c2 = build_comment(&sk(4), &tid, Some(cid1.clone()), "reply", 103).unwrap();
+        source.add_comment(c2.clone()).unwrap();
+
+        // Receiver receives the same nodes via gossip — must accept all.
+        let mut receiver = ForumsEngine::new();
+        assert!(receiver.add_forum(f.clone()).is_ok());
+        assert!(receiver.add_thread(t.clone()).is_ok());
+        assert!(receiver.add_comment(c1.clone()).is_ok());
+        assert!(receiver.add_comment(c2.clone()).is_ok());
+
+        // Replays must dedup gracefully.
+        assert_eq!(receiver.add_forum(f), Err(ForumError::DuplicateId));
+        assert_eq!(receiver.add_thread(t), Err(ForumError::DuplicateId));
+        assert_eq!(receiver.add_comment(c1), Err(ForumError::DuplicateId));
+        assert_eq!(receiver.add_comment(c2), Err(ForumError::DuplicateId));
+
+        // Snapshot + restore preserves the entire hierarchy.
+        let snap = receiver.snapshot();
+        let restored = ForumsEngine::restore(snap);
+        assert_eq!(restored.forums().count(), 1);
+        assert_eq!(restored.threads_in(&fid).len(), 1);
+        assert_eq!(restored.comments_of(&tid).len(), 2);
+    }
+
+    /// AUDIT-FORUM-2: out-of-order arrivals (comment before thread, or
+    /// thread before forum) must be rejected gracefully so the user can
+    /// retry — never silently swallowed.
+    #[test]
+    fn audit_forum_orphan_rejection_is_graceful() {
+        let mut e = ForumsEngine::new();
+        let t = build_thread(&sk(2), "ghost_forum", "Hello", "world", false, None, 1).unwrap();
+        assert_eq!(e.add_thread(t), Err(ForumError::UnknownForum));
+        let c = build_comment(&sk(3), "ghost_thread", None, "first", 1).unwrap();
+        assert_eq!(e.add_comment(c), Err(ForumError::UnknownThread));
+    }
 }

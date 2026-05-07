@@ -164,4 +164,49 @@ mod tests {
         let total: f64 = r.values().sum();
         assert!((total - 1.0).abs() < 1e-6);
     }
+
+    /// AUDIT-TRUST-1: a popular node (followed by many people in alice's
+    /// neighbourhood) MUST score higher than an isolated node. This is the
+    /// core invariant of personalised PageRank as a Web-of-Trust signal.
+    #[test]
+    fn audit_trust_popular_beats_isolated() {
+        // alice → bob, alice → carol; bob and carol both follow `popular`.
+        // `isolated` is followed by nobody alice can reach.
+        let g = graph_of(&[
+            ("alice", &["bob", "carol"]),
+            ("bob", &["popular"]),
+            ("carol", &["popular"]),
+        ]);
+        let s_popular = trust_score(&g, "alice", "popular");
+        let s_isolated = trust_score(&g, "alice", "isolated");
+        assert!(
+            s_popular > s_isolated,
+            "popular ({}) must score higher than isolated ({})",
+            s_popular, s_isolated
+        );
+        assert!(s_isolated < 1e-6, "unreachable node must score ~0");
+    }
+
+    /// AUDIT-TRUST-1: a stronger "fan-in" signal yields a strictly higher
+    /// score — `mega_popular` has 4 follows from alice's neighbourhood vs.
+    /// `mid` with 1.
+    #[test]
+    fn audit_trust_more_fans_higher_score() {
+        // graph_of uses HashMap insert so duplicate keys clobber each other.
+        // Build the graph explicitly to ensure alice has 5 outgoing edges.
+        let mut g = FollowGraph::new();
+        g.insert("alice".into(), vec!["b1".into(), "b2".into(), "b3".into(), "b4".into(), "c1".into()]);
+        g.insert("b1".into(), vec!["mega_popular".into()]);
+        g.insert("b2".into(), vec!["mega_popular".into()]);
+        g.insert("b3".into(), vec!["mega_popular".into()]);
+        g.insert("b4".into(), vec!["mega_popular".into()]);
+        g.insert("c1".into(), vec!["mid".into()]);
+        let s_mega = trust_score(&g, "alice", "mega_popular");
+        let s_mid = trust_score(&g, "alice", "mid");
+        assert!(
+            s_mega > s_mid,
+            "mega_popular ({}) > mid ({}) under multi-fan PageRank",
+            s_mega, s_mid
+        );
+    }
 }
