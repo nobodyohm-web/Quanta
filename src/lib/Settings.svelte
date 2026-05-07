@@ -98,6 +98,54 @@
   async function doRelaunch() {
     await relaunch();
   }
+
+  // ── Dev API (Phase 3) ──
+  let devApi = $state<{ enabled: boolean; endpoint: string; token: string } | null>(null);
+  let devTokenVisible = $state(false);
+  let devTokenCopied = $state(false);
+  let devApiBusy = $state(false);
+
+  async function loadDevApi() {
+    try {
+      devApi = await invoke("dev_api_status");
+    } catch {
+      devApi = null;
+    }
+  }
+
+  $effect(() => { loadDevApi(); });
+
+  async function toggleDevApi() {
+    if (!devApi) return;
+    devApiBusy = true;
+    try {
+      const next = !devApi.enabled;
+      const enabled = await invoke<boolean>("dev_api_set_enabled", { enabled: next });
+      devApi = { ...devApi, enabled };
+    } catch (e) {
+      console.warn("dev_api toggle failed", e);
+    } finally {
+      devApiBusy = false;
+    }
+  }
+
+  async function copyDevToken() {
+    if (!devApi?.token) return;
+    await navigator.clipboard.writeText(devApi.token);
+    devTokenCopied = true;
+    setTimeout(() => (devTokenCopied = false), 1600);
+  }
+
+  async function rotateDevToken() {
+    if (!confirm("Régénérer le token ? L'ancien sera invalidé immédiatement.")) return;
+    devApiBusy = true;
+    try {
+      const t = await invoke<string>("dev_api_rotate_token");
+      if (devApi) devApi = { ...devApi, token: t };
+    } finally {
+      devApiBusy = false;
+    }
+  }
 </script>
 
 <div class="page settings-page">
@@ -249,6 +297,45 @@
     </div>
   </section>
 
+  <!-- API Développeur -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">API Développeur</h2>
+      <p class="set-sub">Permet de publier des sites depuis VSCode, un terminal, ou tout outil externe.</p>
+    </header>
+    {#if devApi}
+      <div class="set-row">
+        <span class="set-label">Activer l'API HTTP locale</span>
+        <button
+          class="seg-btn"
+          class:active={devApi.enabled}
+          onclick={toggleDevApi}
+          disabled={devApiBusy}
+        >{devApi.enabled ? "Activée" : "Désactivée"}</button>
+      </div>
+      {#if devApi.enabled}
+        <div class="set-row">
+          <span class="set-label">Endpoint</span>
+          <code class="dev-endpoint">http://{devApi.endpoint}</code>
+        </div>
+        <div class="set-row">
+          <span class="set-label">Token</span>
+          <code class="dev-token">{devTokenVisible ? devApi.token : "•".repeat(64)}</code>
+          <button class="seg-btn" onclick={() => (devTokenVisible = !devTokenVisible)}>
+            {devTokenVisible ? "Masquer" : "Afficher"}
+          </button>
+          <button class="seg-btn" onclick={copyDevToken}>{devTokenCopied ? "✓ Copié" : "Copier"}</button>
+          <button class="seg-btn" onclick={rotateDevToken} disabled={devApiBusy}>Régénérer</button>
+        </div>
+        <div class="dev-hint">
+          Test rapide : <code>curl -H "Authorization: Bearer &lt;token&gt;" http://{devApi.endpoint}/api/status</code>
+        </div>
+      {/if}
+    {:else}
+      <div class="dev-hint muted">Chargement…</div>
+    {/if}
+  </section>
+
   <!-- À propos -->
   <section class="set-card">
     <header class="set-head">
@@ -376,4 +463,35 @@
   @media (max-width: 640px) {
     .econ-grid { grid-template-columns: 1fr 1fr; }
   }
+
+  .dev-endpoint, .dev-token {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--color-bg-2);
+    border: 1px solid var(--color-border);
+    padding: 6px 10px;
+    border-radius: 6px;
+    color: var(--color-text-1);
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .dev-token { letter-spacing: 1px; }
+  .dev-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--color-text-2);
+    background: var(--color-bg-2);
+    border-left: 3px solid var(--color-accent);
+    padding: 8px 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .dev-hint code {
+    font-family: var(--font-mono);
+    background: transparent;
+    color: var(--color-text-1);
+  }
+  .dev-hint.muted { color: var(--color-text-3); border-color: var(--color-border); }
 </style>

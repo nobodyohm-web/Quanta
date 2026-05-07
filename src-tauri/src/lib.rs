@@ -16,6 +16,7 @@ mod security;
 mod p2p;
 mod storage;
 mod commands_v3;
+mod dev_api;
 
 use security::{CryptoEngine, pq_vault::PQVault};
 use p2p::willow_node::WillowNode;
@@ -771,6 +772,29 @@ async fn get_marketplace_stats(
     Ok(serde_json::json!(mp.stats))
 }
 
+// ─── Dev API ─────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn dev_api_status() -> Result<serde_json::Value, String> {
+    let token = dev_api::ensure_token().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "enabled": dev_api::is_enabled(),
+        "endpoint": dev_api::DEV_API_ADDR,
+        "token": token,
+    }))
+}
+
+#[tauri::command]
+async fn dev_api_set_enabled(enabled: bool) -> Result<bool, String> {
+    dev_api::set_enabled(enabled).map_err(|e| e.to_string())?;
+    Ok(dev_api::is_enabled())
+}
+
+#[tauri::command]
+async fn dev_api_rotate_token() -> Result<String, String> {
+    dev_api::rotate_token().map_err(|e| e.to_string())
+}
+
 // ─── App Entry ──────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -832,6 +856,10 @@ pub fn run() {
                 p2p::gossip_tasks::spawn_auto_reconnect(state.clone());
                 p2p::mining_loop::spawn(state.clone());
                 p2p::state_persistence::spawn_persistence(state.clone());
+
+                // Dev API HTTP server (loopback only). Toujours démarré ; les
+                // requêtes renvoient 503 si le toggle utilisateur est off.
+                dev_api::spawn(state.clone());
             });
             Ok(())
         })
@@ -891,6 +919,10 @@ pub fn run() {
             // V3.3 — Subscriptions feed
             commands_v3::list_my_subscriptions,
             commands_v3::subscriptions_feed,
+            // Phase 3 — Dev API
+            dev_api_status,
+            dev_api_set_enabled,
+            dev_api_rotate_token,
         ])
         .build(tauri::generate_context!())
         .expect("QUANTA Protocol v1.0 failed to build")

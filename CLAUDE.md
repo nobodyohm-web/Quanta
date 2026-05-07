@@ -371,3 +371,67 @@ npx tauri build
 | 2026-05-06 | v1.0 publiée sur GitHub + Release DMG |
 | 2026-05-06 | **🔧 V2 Network Hardening — protocole Torus P2P parfait** |
 | 2026-05-07 | **🛡️ Audit P2P complet — 5 critiques + 3 high + 2 medium corrigés (243 tests)** |
+| 2026-05-07 | **🧱 Site Engine v3.3 — smart tags, no-code builder, dev HTTP API (256 tests)** |
+
+---
+
+## Site Engine v3.3 — Smart Tags · No-Code Builder · Dev API
+
+### Phase 1 — Smart Tags + auto-indexation (`p2p/search.rs`, `lib.rs`)
+- Champ `tags: Vec<String>` (`#[serde(default)]`) sur `IndexedDoc`,
+  `PublishedPage`, `SiteManifest`. Rétro-compat des snapshots existants.
+- `auto_extract_tags(html, title)` : strip HTML → tokenize → top-5 tokens
+  (bonus ×3 sur les mots du titre). `sanitize_tag/sanitize_tags`
+  normalisent (lowercase, alphanum + tirets, max 30 chars, max 10 tags,
+  dédup).
+- `SearchIndex::search` : multiplicateur `TAG_BOOST=2.0` quand un tag du
+  doc matche un token de la query, et nouveau filtre exact
+  `SearchFilters.tag`.
+- **Bug critique corrigé** : `publish_page` (lib.rs) auto-indexe désormais
+  le site dans le `SearchIndex` local et broadcast `PublishSite` vers les
+  pairs. Avant ce fix, les sites publiés via PageBuilder n'étaient
+  **jamais** trouvables via la recherche réseau.
+- `index_my_page` et `publish_site` (commands_v3) acceptent un paramètre
+  `tags: Option<Vec<String>>` ; auto-extraction si absent.
+- `search_pages` accepte un filtre `tag: Option<String>`.
+- 8 nouveaux tests unitaires (`auto_extract`, `sanitize`, `tag_boost`,
+  `tag_filter`, `strip_html`, sérialisation legacy).
+
+### Phase 2 — No-Code Block Builder (`src/lib/PageBuilder.svelte`)
+- Réécriture complète en builder visuel à blocs (style Notion/Wix).
+  Svelte 5 runes (`$state`/`$derived`/`$effect`), vanilla CSS,
+  **zéro dépendance externe**, drag-drop HTML5 natif.
+- 20 types de blocs : heading (H1-H3), paragraph, quote, list, code,
+  image (file picker → base64), gallery, video, columns (2/3),
+  spacer (S/M/L), divider, hero, cards (2-6), feature, faq, callout,
+  navbar, footer, button, embed (HTML brut sanitisé).
+- 5 thèmes (Minimal, Dark Pro, Ocean, Warm, Glass) — variables CSS
+  injectées dans l'iframe sandboxée.
+- 5 templates pré-remplis (Landing, Blog, Portfolio, Boutique, Page perso),
+  contenu placeholder en français.
+- Top bar : titre, domaine `.torus`, pill-tags (Entrée/×, max 10),
+  suggestions auto-générées via TF du contenu, sélecteur de thème,
+  popup Méta (langue/cat/desc), toggle Code, Publier.
+- Édition inline (contenteditable), toolbar de bloc au hover, handle
+  drag `⋮⋮`, bouton `+` entre chaque bloc avec modal catégorisé.
+- Bouton Publier appelle `invoke("publish_page", { title, content, tags })`
+  avec tags manuels ou suggérés (intégration Phase 1).
+
+### Phase 3 — Dev HTTP API (`src-tauri/src/dev_api.rs`)
+- Serveur HTTP local `127.0.0.1:7654` (loopback only, double-check),
+  parser HTTP minimal sur `tokio::net::TcpListener` — **0 nouvelle dep**.
+- Auth Bearer obligatoire ; token 32 bytes hex persisté dans
+  `~/.torus/dev-api-token` (régénérable depuis Settings).
+- Désactivé par défaut. Toggle dans **Réglages → API Développeur**
+  (fichier sentinel `~/.torus/dev-api-enabled`). Quand off, toutes les
+  routes (sauf `/api/health`) renvoient `503`.
+- Endpoints :
+  - `GET /api/health` (sans auth) — ping disponibilité.
+  - `GET /api/status` — `{ pk, balance_qta, sites_count, search_docs }`.
+  - `POST /api/publish` — signe + store + broadcast + auto-index.
+    Champs : `title`, `html`, `tags?`, `lang?`, `kind?`, `domain?`.
+  - `GET /api/search?q=&lang=&tag=&limit=` — recherche P2P.
+  - `DELETE /api/site` — dépublie le site courant.
+- Doc complète + workflow VSCode dans [`DEV_API.md`](DEV_API.md).
+- 5 nouveaux tests (token roundtrip, parse_query, url_decode,
+  http_response format, find_header_end).
