@@ -624,7 +624,7 @@ pub async fn social_tip(
         return Err("Montant requis".into());
     }
     let pk = my_pk(&state).await?;
-    let (_tx, burn) = {
+    let (_tx, _burn_tx, burn) = {
         let mut ledger = state.node.ledger.write().await;
         let crypto = state.crypto.lock().await;
         ledger.transfer_with_burn(&pk, &target_author_pk, amount, &crypto)?

@@ -669,7 +669,7 @@ mod property_tests {
         let burned_before = ledger.total_burned();
 
         let to = "y".repeat(64);
-        let (_tx, burn_amount) = ledger.transfer_with_burn(&pk, &to, 100 * MICRO, &crypto).unwrap();
+        let (_tx, _burn_tx, burn_amount) = ledger.transfer_with_burn(&pk, &to, 100 * MICRO, &crypto).unwrap();
 
         let supply_after = ledger.total_supply();
         let burned_after = ledger.total_burned();
@@ -912,7 +912,7 @@ mod property_tests {
             let result = ledger.transfer_with_burn(&pk, &to, amount, &crypto);
 
             // Si Ok, vérifier les invariants accessibles : burn = amount/100.
-            if let Ok((_tx, burn)) = result {
+            if let Ok((_tx, _burn_tx, burn)) = result {
                 prop_assert_eq!(burn, amount / 100,
                     "burn = amount/100 (intégré exact)");
             }

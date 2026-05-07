@@ -43,7 +43,7 @@ mod tests {
 
         // ── 4. Transfer (with 1% burn) ──
         let recipient = "b".repeat(64);
-        let (tx, burn) = ledger.transfer_with_burn(&pk, &recipient, 10 * MICRO, &crypto)
+        let (tx, _burn_tx, burn) = ledger.transfer_with_burn(&pk, &recipient, 10 * MICRO, &crypto)
             .expect("transfer must succeed");
         assert_eq!(burn, 100_000, "1% burn = 0.1 QNT");
         assert_eq!(tx.amount, 9_900_000, "net amount after burn");

@@ -589,7 +589,7 @@ mod late_joiner_simulation {
         for i in 0..50 {
             let to = &recipients[i % 10];
             match ledger.transfer_with_burn(&pk, to, 10 * MICRO, &crypto) {
-                Ok((_tx, _burn)) => {}
+                Ok((_tx, _burn_tx, _burn)) => {}
                 Err(e) => {
                     // Expected: sender runs out of balance eventually
                     println!("  Transfer #{} failed (expected): {}", i, e);

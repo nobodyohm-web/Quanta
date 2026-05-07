@@ -906,32 +906,46 @@ async fn handle_have_nodes(state: &Arc<AppState>, nodes: Vec<DagNode>) {
 }
 
 /// BroadcastTx → parse une transaction JSON, la valide et l'ajoute au ledger local.
+///
+/// AUDIT-TX-2: Nonce check relaxed from strict equality to monotonic non-regression.
+/// Gossip is unordered so two consecutive txs from the same sender can arrive
+/// in either order. The previous strict `tx.nonce != expected` rule dropped
+/// every tx that arrived out of order, permanently. We now accept any tx whose
+/// nonce is `>= last_seen_for_sender`, advance the high-water to `nonce + 1`,
+/// and rely on `seen_tx_hashes` for replay protection.
 async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
-    let tx: Option<crate::p2p::ledger::Transaction> = serde_json::from_str(tx_json).ok().flatten();
-    let Some(tx) = tx else {
-        log::warn!("◈ [Dispatch] BroadcastTx JSON invalide");
-        return;
+    let tx: crate::p2p::ledger::Transaction = match serde_json::from_str(tx_json) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("◈ [Dispatch] BroadcastTx JSON invalide: {}", e);
+            return;
+        }
     };
 
-    // Vérifier la signature hybride / Ed25519 avant tout.
+    // Vérifier la signature hybride / Ed25519 avant tout. AUDIT-TX-1: this now
+    // enforces signatures on burn-target txs (previously bypassed by `to == BURN`).
     match crate::p2p::ledger::Ledger::verify_tx(&tx) {
         Ok(true) => {}
         Ok(false) => { log::warn!("◈ [Dispatch] tx signature invalide — drop"); return; }
         Err(e) => { log::warn!("◈ [Dispatch] verify_tx erreur: {} — drop", e); return; }
     }
 
-    // MOD-1: Verify the transaction nonce matches the expected account nonce.
-    // NETWORK and ESCROW are synthetic addresses that don't use account nonces.
+    // AUDIT-TX-2: Per-account monotonic nonce check (anti-replay safety net).
+    // NETWORK and ESCROW are synthetic addresses that don't carry account nonces.
     if tx.from != "NETWORK" && tx.from != "ESCROW" {
         let ledger = state.node.ledger.read().await;
-        let expected = ledger.get_nonce(&tx.from);
-        if tx.nonce != expected {
+        let high_water = ledger.get_nonce(&tx.from);
+        // Reject txs whose nonce is strictly behind our high water — they are
+        // either stale replays or already-applied txs whose hash was evicted.
+        // Equality is allowed (out-of-order arrival within a window).
+        if tx.nonce + 1 < high_water {
             log::warn!(
-                "◈ [Dispatch] tx nonce mismatch for {}: got {}, expected {} — drop",
-                &tx.from[..tx.from.len().min(12)], tx.nonce, expected
+                "◈ [Dispatch] tx nonce {} too far behind high-water {} for {} — drop",
+                tx.nonce, high_water, &tx.from[..tx.from.len().min(12)]
             );
             return;
         }
+        drop(ledger);
     }
 
     // STRUCT-3: Reconcile dual ledger. Apply the tx to BOTH:
@@ -946,12 +960,23 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
     }
 
     // STRUCT-3: Replay the remote tx into the local linear ledger (idempotent dedup
-    // via seen_tx_hashes). Then MOD-1: advance the sender's nonce.
+    // via seen_tx_hashes). Then advance the sender's high-water nonce by one if
+    // we actually applied this tx — duplicates leave the counter alone.
     if tx.from != "NETWORK" && tx.from != "ESCROW" {
         let mut ledger = state.node.ledger.write().await;
         let applied = ledger.replay_remote_tx(tx.clone());
         if applied {
-            ledger.increment_nonce(&tx.from);
+            // AUDIT-TX-2: high-water = max(current, tx.nonce + 1) so out-of-order
+            // arrivals don't roll the counter backwards.
+            let current = ledger.get_nonce(&tx.from);
+            let new_hw = current.max(tx.nonce.saturating_add(1));
+            // Only bump if we need to (avoids needless writes).
+            if new_hw > current {
+                // increment_nonce only adds 1 at a time; loop to reach the target.
+                for _ in current..new_hw {
+                    ledger.increment_nonce(&tx.from);
+                }
+            }
         }
     }
 

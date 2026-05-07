@@ -11,6 +11,7 @@
 //!   - INT-4: Social + Search + Moderation cross-module pipeline
 
 #[cfg(test)]
+#[allow(clippy::module_inception)] // file name reflects module content
 mod integration_tests {
     use crate::p2p::ledger::{Ledger, MICRO};
     use crate::p2p::gossip::{GossipEnvelope, GossipMessage, GossipRouter};

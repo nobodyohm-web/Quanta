@@ -280,28 +280,57 @@ impl Ledger {
     }
 
     /// V2 — Burn-and-Mint : 1% brûlé automatiquement à chaque transfert (amount en µQTA).
-    /// Retourne `(tx_principale, montant_brûlé)` où le montant brûlé est en µQTA.
+    ///
+    /// AUDIT-TX-2: Returns `(transfer_tx, Option<burn_tx>, burn_amount)`. The
+    /// burn tx is now SIGNED (instead of system-generated/unsigned) so it can
+    /// be safely broadcast over gossip without bypassing signature checks.
+    /// The caller is responsible for broadcasting BOTH txs so peers' ledgers
+    /// stay in sync — sending only the transfer leaves a 1% gap on the
+    /// sender's balance on every other node.
+    ///
+    /// AUDIT-TX-3: Gross balance is checked upfront so the transfer leg never
+    /// succeeds when the burn leg would push the sender below zero.
     pub fn transfer_with_burn(
         &mut self,
         from: &str,
         to: &str,
         amount: u64,
         crypto: &CryptoEngine,
-    ) -> Result<(Transaction, u64), String> {
+    ) -> Result<(Transaction, Option<Transaction>, u64), String> {
         // Minimum transfer 0.01 QUANTA = 10_000 µQTA
         if amount < 10_000 {
             return Err("Minimum transfer: 0.01 QUANTA".into());
         }
+        // AUDIT-TX-3: pre-check gross balance so neither leg succeeds without
+        // the other. transfer_tx checks net (amount - burn), but if
+        // balance == net, the burn leg would silently push the cache
+        // negative (saturated by balance_of). Reject upfront instead.
+        let balance = self.balance_of(from);
+        if balance < amount {
+            return Err(format!(
+                "Solde insuffisant: {:.6} QUANTA",
+                balance as f64 / MICRO as f64
+            ));
+        }
         // 1% burn — integer math: amount / 100
         let burn_amount = amount / 100;
         let net_amount = amount - burn_amount;
-        let tx = self.transfer_tx(from, to, net_amount, crypto)?;
-        if burn_amount > 0 {
-            let burn_tx = self.build_unsigned_tx(from, "BURN", burn_amount, TxType::Burn);
-            self.cache_apply_tx(&burn_tx);
-            self.pending.push(burn_tx);
-        }
-        Ok((tx, burn_amount))
+        let transfer_tx = self.transfer_tx(from, to, net_amount, crypto)?;
+        let burn_tx = if burn_amount > 0 {
+            // AUDIT-TX-1: signed burn so verify_tx accepts it across gossip.
+            let bt = self.build_signed_tx(from, "BURN", burn_amount, TxType::Burn, crypto)?;
+            // Anti-replay (defense-in-depth — payload includes timestamp so
+            // hash collisions with the transfer leg are impossible).
+            if !self.seen_tx_hashes.insert(bt.hash.clone()) {
+                return Err("Burn tx déjà traitée (replay détecté)".into());
+            }
+            self.cache_apply_tx(&bt);
+            self.pending.push(bt.clone());
+            Some(bt)
+        } else {
+            None
+        };
+        Ok((transfer_tx, burn_tx, burn_amount))
     }
 
     /// Burn QUANTA — permanent destruction, signed by the owner (amount en µQTA).
@@ -363,15 +392,21 @@ impl Ledger {
     // ── Phase 3.1: Signature Verification (toujours hybride) ─────
 
     /// Verify the signature(s) on a user-signed transaction.
-    /// - Network-issued transactions (from == "NETWORK") are exempt.
-    /// - Toutes les autres tx passent par `HybridIdentity::verify_hybrid` :
-    ///   - Si `pq_signature` + `pq_public_key` non vides → Ed25519 OR ML-DSA-65
-    ///   - Sinon → Ed25519 seul (compatibilité ascendante)
+    ///
+    /// AUDIT-TX-1: Only the synthetic system addresses are exempt from
+    /// signature verification — `NETWORK` (mining tx) and `ESCROW` (state
+    /// machine transitions). Any tx whose `from` is a real wallet pubkey
+    /// MUST carry a valid signature, even if `to == "BURN"`. Previously a
+    /// bug allowed any peer to forge `from=victim, to=BURN` txs over gossip
+    /// because `to == "BURN"` short-circuited the check.
     pub fn verify_tx(tx: &Transaction) -> Result<bool, String> {
-        // Network-issued txs (mining) and system-generated burns/escrow are exempt
-        if tx.from == "NETWORK" || tx.to == "BURN" || tx.to == "ESCROW" || tx.from == "ESCROW" {
+        // Synthetic system addresses are exempt — they originate inside the
+        // node and are never accepted from gossip.
+        if tx.from == "NETWORK" || tx.from == "ESCROW" {
             return Ok(true);
         }
+        // Any other from value must carry a valid signature, regardless of
+        // destination (BURN included).
         if tx.signature.is_empty() {
             return Err("Transaction non signée".into());
         }
@@ -963,9 +998,15 @@ mod tests {
         ledger.mine_tx(&id.public_key_hex, 100 * MICRO, 0.0);
 
         let to = "d".repeat(64);
-        let (tx, burn_uqta) = ledger
+        let (tx, burn_tx, burn_uqta) = ledger
             .transfer_with_burn(&id.public_key_hex, &to, 10 * MICRO, &crypto)
             .expect("transfer should succeed");
+        // AUDIT-TX-1: burn leg must be present and signed for any burn > 0
+        assert!(burn_tx.is_some(), "burn tx must be returned for non-zero burn");
+        let bt = burn_tx.as_ref().unwrap();
+        assert_eq!(bt.to, "BURN");
+        assert!(!bt.signature.is_empty(), "burn tx must be signed");
+        assert!(Ledger::verify_tx(bt).unwrap(), "burn tx signature must verify");
 
         // 1% of 10 QUANTA = 0.1 QUANTA = 100_000 µQTA
         assert_eq!(burn_uqta, 100_000, "burn should be exactly 1%");
@@ -1050,5 +1091,155 @@ mod tests {
         // Each user got their exact amount
         assert_eq!(ledger.balance_of(&pk1), 10 * MICRO);
         assert_eq!(ledger.balance_of(&pk2), 20 * MICRO);
+    }
+
+    // ─── AUDIT-TX regression tests ─────────────────────────────────────
+
+    /// AUDIT-TX-1: a tx with `to == "BURN"` but empty signature must be
+    /// rejected by verify_tx. Previously `verify_tx` short-circuited on
+    /// `to == "BURN"`, allowing any peer to forge a victim's burn over gossip.
+    #[test]
+    fn audit_tx1_unsigned_burn_target_is_rejected() {
+        let pk = "a".repeat(64);
+        // Manually craft an unsigned burn tx — exactly what an attacker
+        // would have submitted under the previous bug.
+        let forged = Transaction {
+            id: "fake_burn".into(),
+            from: pk.clone(),
+            to: "BURN".into(),
+            amount: 1_000_000,
+            tx_type: TxType::Burn,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            signature: String::new(), // <-- the smoking gun: no sig
+            hash: "deadbeef".into(),
+            nonce: 0,
+            pq_signature: None,
+            pq_public_key: None,
+        };
+        assert!(
+            Ledger::verify_tx(&forged).is_err(),
+            "verify_tx must reject unsigned burn-target tx (AUDIT-TX-1)"
+        );
+    }
+
+    /// AUDIT-TX-1 (positive): burns from `transfer_with_burn` are signed and verifiable.
+    #[test]
+    fn audit_tx1_burn_leg_is_signed_and_verifies() {
+        let mut crypto = CryptoEngine::new();
+        let id = crypto.generate_keypair();
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&id.public_key_hex, 100 * MICRO, 0.0);
+
+        let to = "d".repeat(64);
+        let (transfer, burn_opt, burn_uqta) = ledger
+            .transfer_with_burn(&id.public_key_hex, &to, 10 * MICRO, &crypto)
+            .expect("transfer must succeed");
+
+        assert_eq!(burn_uqta, 100_000);
+        let burn = burn_opt.expect("burn leg must be present");
+        assert_eq!(burn.to, "BURN");
+        assert!(!burn.signature.is_empty(), "burn must carry a signature");
+        assert!(
+            Ledger::verify_tx(&burn).expect("verify must not error"),
+            "burn signature must verify"
+        );
+        // Both legs are different txs (different hashes).
+        assert_ne!(transfer.hash, burn.hash);
+    }
+
+    /// AUDIT-TX-3 (regression): transfer_with_burn rejects amounts where
+    /// `balance < gross` (the sender can cover net but not the 1% burn).
+    /// Previously the net-only check let the burn debit silently push the
+    /// cache below zero (saturated to 0 by `balance_of`, hiding the bug).
+    #[test]
+    fn audit_tx3_gross_balance_check_blocks_overdraw() {
+        let mut crypto = CryptoEngine::new();
+        let id = crypto.generate_keypair();
+        let mut ledger = Ledger::new();
+        // Sender holds 99_000 µQTA (= 0.099 QTA, just under the 0.1 QTA min).
+        // This is the boundary case: balance == net (99_000 = 100_000 - 1_000)
+        // but balance < gross (99_000 < 100_000). Old code would accept the
+        // transfer (net check passes) then apply the unsigned burn,
+        // overdrawing the sender by 1_000 µQTA.
+        ledger.mine_tx(&id.public_key_hex, 99_000, 0.0);
+
+        let to = "e".repeat(64);
+        let result = ledger.transfer_with_burn(&id.public_key_hex, &to, 100_000, &crypto);
+        assert!(
+            result.is_err(),
+            "transfer where balance < gross must be rejected (AUDIT-TX-3)"
+        );
+        // Balance untouched.
+        assert_eq!(ledger.balance_of(&id.public_key_hex), 99_000);
+    }
+
+    /// AUDIT-TX cross-ledger convergence: two independent ledgers receiving
+    /// the same transfer + burn pair must end up with IDENTICAL balances.
+    /// This exercises the same flow as A→B over gossip.
+    #[test]
+    fn audit_tx_cross_ledger_convergence() {
+        let mut crypto = CryptoEngine::new();
+        let id_a = crypto.generate_keypair();
+        let pk_a = id_a.public_key_hex.clone();
+        let pk_b = "b".repeat(64);
+
+        // Local ledger A: gives A 100 QTA, sends 10 to B with 1% burn.
+        let mut node_a = Ledger::new();
+        node_a.mine_tx(&pk_a, 100 * MICRO, 0.0);
+        let (transfer, burn_opt, _) = node_a
+            .transfer_with_burn(&pk_a, &pk_b, 10 * MICRO, &crypto)
+            .expect("transfer must succeed");
+        let burn = burn_opt.expect("burn must exist");
+
+        // Local ledger B: also has the original mining (would reach via chain sync).
+        let mut node_b = Ledger::new();
+        node_b.mine_tx(&pk_a, 100 * MICRO, 0.0);
+
+        // B receives BOTH legs over gossip (order-independent).
+        assert!(node_b.replay_remote_tx(burn.clone()), "B must apply burn");
+        assert!(node_b.replay_remote_tx(transfer.clone()), "B must apply transfer");
+
+        // Both ledgers MUST show identical balances.
+        assert_eq!(
+            node_a.balance_of(&pk_a),
+            node_b.balance_of(&pk_a),
+            "sender balance must converge"
+        );
+        assert_eq!(
+            node_a.balance_of(&pk_b),
+            node_b.balance_of(&pk_b),
+            "receiver balance must converge"
+        );
+        // Concrete values: A had 100 QTA, sent 10 (gross), 9.9 to B, 0.1 burned.
+        assert_eq!(node_a.balance_of(&pk_a), 90 * MICRO);
+        assert_eq!(node_a.balance_of(&pk_b), 9_900_000);
+    }
+
+    /// AUDIT-TX out-of-order delivery: B receives the burn (tx_type=Burn)
+    /// BEFORE the transfer. With the relaxed nonce policy, BOTH must be
+    /// applied — the previous strict equality dropped the second arrival.
+    #[test]
+    fn audit_tx_out_of_order_replay_both_apply() {
+        let mut crypto = CryptoEngine::new();
+        let id_a = crypto.generate_keypair();
+        let pk_a = id_a.public_key_hex.clone();
+        let pk_b = "b".repeat(64);
+
+        let mut node_a = Ledger::new();
+        node_a.mine_tx(&pk_a, 100 * MICRO, 0.0);
+        let (transfer, burn_opt, _) = node_a
+            .transfer_with_burn(&pk_a, &pk_b, 10 * MICRO, &crypto)
+            .expect("transfer must succeed");
+        let burn = burn_opt.unwrap();
+
+        // B applies burn FIRST, then transfer (reverse arrival order).
+        let mut node_b = Ledger::new();
+        node_b.mine_tx(&pk_a, 100 * MICRO, 0.0);
+        assert!(node_b.replay_remote_tx(burn));
+        assert!(node_b.replay_remote_tx(transfer));
+
+        // Both legs landed; balances match the in-order case exactly.
+        assert_eq!(node_b.balance_of(&pk_a), 90 * MICRO);
+        assert_eq!(node_b.balance_of(&pk_b), 9_900_000);
     }
 }

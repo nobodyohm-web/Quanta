@@ -582,7 +582,7 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     let crypto = state.crypto.lock().await;
     let from = crypto.get_identity()?.public_key_hex;
     let mut ledger = state.node.ledger.write().await;
-    let (tx, burn_uqta) = ledger.transfer_with_burn(&from, &to, uqta, &crypto)?;
+    let (tx, burn_tx, burn_uqta) = ledger.transfer_with_burn(&from, &to, uqta, &crypto)?;
     let net_uqta = uqta - burn_uqta;
     drop(ledger);
     let _ = state.node.reputation.write().await.transfer(&from, &to, net_uqta);
@@ -593,21 +593,26 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
         cons.ledger.credit(&from, &to, net_uqta);
     }
 
-    // ── CRITICAL: Broadcast transfer TX to peers via gossip ──
-    if let Ok(tx_json) = serde_json::to_string(&tx) {
-        let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        let nonce = state.node.gossip.read().await.next_outgoing_nonce();
-        let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&from, nonce, &timestamp, &msg);
-        let sig = crypto.sign(&signable).unwrap_or_default();
-        if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
-            from.clone(), msg, nonce, timestamp, &sig,
-        ) {
-            state.node.gossip.write().await.mark_seen(&env.id);
-            let _ = state.node.gossip_tx.send(env);
-            log::info!("◈ [Transfer] Broadcast {} QUANTA → {}", amount, &to[..12]);
+    // ── CRITICAL: Broadcast both legs (transfer + burn) so peers' ledgers
+    //   stay aligned with ours. AUDIT-TX-2: a previous bug only sent the
+    //   transfer leg, leaving every other node with a 1% balance gap.
+    for tx_obj in std::iter::once(&tx).chain(burn_tx.as_ref()) {
+        if let Ok(tx_json) = serde_json::to_string(tx_obj) {
+            let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let nonce = state.node.gossip.read().await.next_outgoing_nonce();
+            let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&from, nonce, &timestamp, &msg);
+            let sig = crypto.sign(&signable).unwrap_or_default();
+            if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
+                from.clone(), msg, nonce, timestamp, &sig,
+            ) {
+                state.node.gossip.write().await.mark_seen(&env.id);
+                let _ = state.node.gossip_tx.send(env);
+            }
         }
     }
+    log::info!("◈ [Transfer] Broadcast {} QUANTA (+{:.6} burn) → {}",
+        amount, burn_uqta as f64 / p2p::ledger::MICRO as f64, &to[..12]);
 
     let micro = p2p::ledger::MICRO as f64;
     Ok(serde_json::json!({
