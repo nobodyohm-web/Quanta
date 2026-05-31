@@ -17,9 +17,39 @@ targets = [
 ]
 
 [advisories]
-# Toute advisory RUSTSEC sur une dépendance fait échouer la CI.
+# cargo-deny couvre les advisories RustSec (vulnérabilités + unmaintained). On
+# documente ici les advisories TRANSITIVES non corrigeables en l'état — le fix
+# réel = bumper iroh/libsql, dans une PR dédiée + testée. Triage du 2026-05-31.
 yanked = "deny"
-ignore = []
+ignore = [
+    # ── "unmaintained" transitifs, sans mise à niveau sûre, PAS des vulns ──
+    # Bindings GTK3 (gtk-rs) tirés par Tauri sur Linux (résolu au passage GTK4).
+    "RUSTSEC-2024-0411", "RUSTSEC-2024-0412", "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414", "RUSTSEC-2024-0415", "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417", "RUSTSEC-2024-0418", "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    # Autres crates non maintenues, transitives (proc-macro-error, paste,
+    # fxhash, unic-*, …) — aucun correctif amont disponible.
+    "RUSTSEC-2024-0370", "RUSTSEC-2024-0436",
+    "RUSTSEC-2025-0057", "RUSTSEC-2025-0075", "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081", "RUSTSEC-2025-0098", "RUSTSEC-2025-0100",
+    "RUSTSEC-2025-0134", "RUSTSEC-2025-0141",
+
+    # ── Vulnérabilités transitives — verrouillées en amont, exposition évaluée ──
+    # rustls-webpki 0.102.8 via libsql → rustls 0.22. libsql est utilisé EN LOCAL
+    # uniquement (l'app ne fait AUCUNE requête HTTP sortante, cf. SECURITY.md) →
+    # le chemin TLS hyper-rustls/webpki n'est jamais exercé. Le TLS actif (iroh
+    # QUIC) utilise déjà rustls-webpki 0.103.13 (corrigé). Fix = bump libsql.
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
+    # hickory (DNS) via iroh 0.98.1 qui épingle hickory-resolver =0.26.0-beta.4.
+    # DoS-class sur le chemin de découverte DNS ; fix = bump iroh (transport
+    # cœur — PR dédiée + tests P2P).
+    { id = "RUSTSEC-2026-0119", reason = "hickory-proto via iroh (pin exact =0.26.0-beta.4); DoS découverte DNS; fix = bump iroh (PR dédiée)" },
+    { id = "RUSTSEC-2026-0120", reason = "hickory-net via iroh (pin exact =0.26.0-beta.4); DoS découverte DNS; fix = bump iroh (PR dédiée)" },
+]
 
 [licenses]
 # Projet Apache-2.0 : on n'accepte que des licences permissives compatibles avec
@@ -38,6 +68,7 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "BSL-1.0",
+    "CDLA-Permissive-2.0", # bundle CA (webpki-roots) via rustls/iroh — permissive
 ]
 confidence-threshold = 0.9
 
