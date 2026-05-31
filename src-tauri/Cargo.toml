@@ -1,9 +1,12 @@
 [package]
 name = "quanta-protocol"
-version = "1.0.0"
-description = "QUANTA Protocol — Energy-Indexed Decentralized Network"
+version = "3.3.0"
+description = "Quanta Protocol — sovereign peer-to-peer web and value network (coin: QUANTA)"
 authors = ["Quanta Protocol Contributors"]
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/nobodyohm-web/Torus"
+readme = "../README.md"
 
 [lib]
 name = "quanta_lib"
@@ -72,10 +75,14 @@ anyhow = "1"
 # ─── Platform Dirs ───
 dirs = "6"
 
-# ─── Phase 2A : Cryptographie Post-Quantique (NIST FIPS 203/204) ───
-# ml-kem et ml-dsa : conflit ed25519 v2 (dalek) vs v3-rc (module-lattice).
-# Infrastructure prête dans security/hybrid_crypto.rs — réactiver quand
-# ml-kem >= 0.3 et ml-dsa >= 0.2 seront compatibles avec ed25519-dalek v2.
+# ─── Cryptographie Post-Quantique — NIST FIPS 204 (ML-DSA-65) ───
+# Activé le 2026-05-31. `fips204` est pur Rust, constant-time, sans `unsafe`,
+# et SANS dépendance ed25519 → aucun conflit avec ed25519-dalek v2 (c'était le
+# blocage documenté en Phase 2A). La paire ML-DSA-65 est dérivée de façon
+# déterministe depuis la graine Ed25519 (XOF BLAKE3) → zéro migration de vault.
+# Voir security/hybrid_crypto.rs.
+fips204 = "0.4.6"
+rand_core = "0.6"
 
 # ─── Phase 2B : Consensus CRDT ───────────────────────────────────
 crdts = "7"        # G-Counter, PN-Counter, OR-Set, LWW-Register

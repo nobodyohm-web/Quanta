@@ -5,8 +5,17 @@
 //! Each block slot (= chain height) has exactly one elected leader who has the
 //! right to propose a block. The leader is selected deterministically based on:
 //!
-//!   leader_seed = BLAKE3(prev_block_hash || slot_number)
+//!   beacon       = BLAKE3(domain || buried_block_hash || slot)
+//!   leader_seed  = BLAKE3(domain || beacon || slot || round)
 //!   leader_index = seed_u64 % total_weighted_stake
+//!
+//! The election entropy (`beacon`) is sourced from a *buried* block —
+//! `LEADER_ENTROPY_LOOKBACK` slots behind the tip — not the freshly-sealed tip.
+//! This closes the obvious self-grinding vector: the validator who just sealed
+//! the tip cannot tweak its contents to bias (or re-elect) themselves at the
+//! next slot. Residual grinding by an older proposer is weaker and shrinks with
+//! a larger lookback; full block-withholding resistance needs a VDF (see
+//! SECURITY.md and the DAG-BFT consensus design doc).
 //!
 //! The weight of each validator is:
 //!   weight = staked_amount + (reputation_score * 10_000)
@@ -41,6 +50,16 @@ pub const LEADER_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum number of fallback rounds before any validator can propose.
 pub const MAX_FALLBACK_ROUNDS: u32 = 3;
+
+/// Domain-separation tag for the leader-election VRF (consensus v2).
+const LEADER_VRF_DOMAIN: &[u8] = b"QUANTA-leader-vrf-v2";
+
+/// Blocks behind the tip from which the election entropy (beacon) is sourced.
+/// Sourcing from a *buried* block prevents the immediate proposer from grinding
+/// freshly-sealed block contents to bias — or re-elect — themselves. Residual
+/// grinding by an older proposer is weaker and shrinks as this grows; full
+/// withholding resistance requires a VDF (see SECURITY.md / consensus design doc).
+pub const LEADER_ENTROPY_LOOKBACK: u64 = 2;
 
 /// A validator's identity and weight in the consensus.
 #[derive(Debug, Clone)]
@@ -227,16 +246,34 @@ pub fn build_validator_set(
     validators
 }
 
-/// Deterministic VRF seed from block hash + slot + round.
-/// Uses BLAKE3 for speed and collision resistance.
-fn compute_vrf_seed(prev_hash: &str, slot: u64, round: u32) -> u64 {
-    let input = format!("{}:{}:{}", prev_hash, slot, round);
-    let hash = blake3::hash(input.as_bytes());
-    let bytes = hash.as_bytes();
-    u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
+/// Derive the per-slot election **beacon** from a *buried* block hash.
+///
+/// The beacon is the entropy that decides the slot's leader. Because the caller
+/// (`mining_loop::pos_seal_if_leader`) sources `buried_block_hash` from a block
+/// `LEADER_ENTROPY_LOOKBACK` slots behind the tip, the validator who just sealed
+/// the tip cannot influence it — closing the obvious self-grinding vector. The
+/// output is a hex string so it slots directly into the existing election API.
+pub fn leader_beacon(buried_block_hash: &str, slot: u64) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(LEADER_VRF_DOMAIN);
+    h.update(b"|beacon|");
+    h.update(buried_block_hash.as_bytes());
+    h.update(&slot.to_le_bytes());
+    hex::encode(h.finalize().as_bytes())
+}
+
+/// Deterministic VRF seed from the election beacon + slot + round.
+/// Domain-separated BLAKE3; identical on every node for the same inputs.
+fn compute_vrf_seed(beacon: &str, slot: u64, round: u32) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(LEADER_VRF_DOMAIN);
+    h.update(b"|seed|");
+    h.update(beacon.as_bytes());
+    h.update(&slot.to_le_bytes());
+    h.update(&round.to_le_bytes());
+    let bytes = h.finalize();
+    let b = bytes.as_bytes();
+    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -356,5 +393,39 @@ mod tests {
         let alice = vals.iter().find(|v| v.pk == "alice").unwrap();
         assert_eq!(alice.stake, 5_000_000);
         assert_eq!(alice.reputation, 95);
+    }
+
+    // ─── Track C: aléa d'élection non-grindable (beacon d'entropie enterrée) ──
+
+    #[test]
+    fn leader_beacon_deterministic_and_bound() {
+        assert_eq!(leader_beacon("h", 1), leader_beacon("h", 1), "déterministe");
+        assert_ne!(leader_beacon("h", 1), leader_beacon("h", 2), "lié au slot");
+        assert_ne!(leader_beacon("h1", 1), leader_beacon("h2", 1), "lié à l'entropie");
+    }
+
+    #[test]
+    fn election_uses_buried_beacon_not_tip() {
+        // L'entropie d'élection provient du beacon (bloc enterré), jamais du tip
+        // fraîchement scellé : le proposeur immédiat ne peut pas se ré-élire en
+        // bricolant le contenu de son propre bloc.
+        let vals = test_validators();
+        let buried = "buried_hash_deadbeef";
+        let slot = 12;
+        let leader = elect_leader(&leader_beacon(buried, slot), slot, &vals);
+        assert!(leader.is_some());
+        // Même entropie enterrée ⇒ même leader (le tip non impliqué n'y change rien).
+        assert_eq!(leader, elect_leader(&leader_beacon(buried, slot), slot, &vals));
+    }
+
+    #[test]
+    fn buried_entropy_diversifies_leaders() {
+        // Des blocs enterrés différents produisent une distribution de leaders :
+        // l'entropie influe réellement sur l'élection.
+        let vals = test_validators();
+        let leaders: std::collections::HashSet<_> = (0..40u64)
+            .map(|s| elect_leader(&leader_beacon(&format!("blk{}", s % 7), s), s, &vals).unwrap())
+            .collect();
+        assert!(leaders.len() > 1, "l'entropie enterrée doit diversifier les leaders");
     }
 }

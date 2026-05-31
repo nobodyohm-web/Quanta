@@ -1,120 +1,125 @@
 #![allow(dead_code)]
-//! Hybrid post-quantum identity — infrastructure prête pour Ed25519 + ML-DSA-65 (FIPS 204)
+//! Hybrid post-quantum identity — Ed25519 + ML-DSA-65 (NIST FIPS 204).
 //!
-//! État actuel (Phase 2A) :
-//!   - Couche Ed25519 : ACTIVE — signature classique complète
-//!   - Couche ML-DSA-65 : DÉSACTIVÉE — interface réservée, voir `ML_DSA_AVAILABLE`
+//! État (Phase 2B — activé le 2026-05-31) :
+//!   - Couche Ed25519    : ACTIVE — signature classique (64 B).
+//!   - Couche ML-DSA-65  : ACTIVE — signature post-quantique (FIPS 204 final),
+//!     via le crate `fips204` (pur Rust, constant-time, sans `unsafe`, et SANS
+//!     dépendance `ed25519` → le conflit de version qui bloquait la Phase 2A
+//!     n'existe plus).
 //!
-//! ## Pourquoi le stub plutôt qu'une vraie impl ?
+//! ## Dérivation de la clé ML-DSA (zéro migration de vault)
 //!
-//! - `ml-dsa = "0.1.0-rc.9"` dépend de `ed25519 v3.0-rc`, alors qu'`ed25519-dalek v2.2`
-//!   utilise `ed25519 v2.x`. Conflit de version irréconciliable côté Cargo.
-//! - `pqcrypto-dilithium` lierait du C (Dilithium round-3) au lieu du standard final
-//!   FIPS 204 ML-DSA-65 — incompatible interop.
+//! La paire ML-DSA-65 est **dérivée de façon déterministe** de la graine Ed25519
+//! existante via un XOF BLAKE3 (`derive_ml_dsa`). Conséquence : aucune nouvelle
+//! matière secrète à persister — la clé PQ est recalculée au déverrouillage à
+//! partir de la même graine de 32 octets. Les identités créées avant l'activation
+//! gagnent donc transparemment une couche PQ au prochain unlock.
 //!
-//! ## Étapes de réactivation
+//! ## Sémantique de vérification (`verify_hybrid`)
 //!
-//! Quand `ml-dsa ≥ 0.2` (FIPS 204 final, ed25519 v2-compatible) sortira :
-//! 1. Ajouter `ml-dsa = "0.2"` à `Cargo.toml`.
-//! 2. Implémenter `verify_ml_dsa()` (voir le placeholder ci-dessous).
-//! 3. Faire générer la paire ML-DSA dans `HybridIdentity::generate()` et remplir
-//!    `quantum` dans `sign()`.
-//! 4. Basculer `ML_DSA_AVAILABLE` à `true`.
-//! 5. **Lire la note "Mode hybride OR vs AND" ci-dessous avant de merger.**
+//! - `quantum` vide (identité sans couche PQ) → **Ed25519 seul** fait foi
+//!   (rétro-compatibilité totale avec les signatures pré-activation).
+//! - `quantum` présent → **les DEUX** signatures doivent vérifier (AND strict).
+//!   Forger exige donc de casser à la fois Ed25519 ET ML-DSA-65.
 //!
-//! ## Mode hybride OR vs AND
+//! C'est une posture *plus forte* que le OR envisagé à l'origine : un ML-DSA
+//! éventuellement cassé ne suffit pas (Ed25519 reste requis), et un Ed25519 cassé
+//! par un ordinateur quantique ne suffit pas non plus (ML-DSA reste requis dès
+//! qu'une couche PQ est présente).
 //!
-//! La règle actuelle est OR : valide si **au moins une** des deux signatures vérifie.
-//! Ça protège contre la rupture d'un des deux systèmes mais ouvre une attaque si
-//! ML-DSA est jamais cassé. Pour un service plus prudent, basculer en AND
-//! (les deux doivent vérifier) ou en mode "PQ-only au-delà de la date X".
-//! Décision à arbitrer à l'activation, pas avant.
+//! ## Vers le « PQ obligatoire » (flag day futur)
 //!
-//! ## Posture de sécurité actuelle
-//!
-//! Tant que `ML_DSA_AVAILABLE = false` :
-//! - `sign()` produit `quantum: Vec::new()`.
-//! - Tout `quantum` non-vide reçu d'un peer est ignoré (le stub renvoie `false`).
-//! - Donc seule Ed25519 protège. C'est volontaire et explicite.
+//! `REQUIRE_PQ = false` aujourd'hui : on accepte encore les signatures Ed25519
+//! seules pour ne pas exclure les pairs/identités antérieurs à l'activation. Pour
+//! une protection PQ *totale* (un adversaire quantique ne peut plus rien forger,
+//! même en cassant Ed25519), il faudra un jour basculer `REQUIRE_PQ = true` — un
+//! changement de version de protocole qui rejette toute signature sans couche
+//! ML-DSA. Décision réseau, à arbitrer à maturité, pas avant.
 
 use ed25519_dalek::{
     Signer as _, Verifier as _,
     SigningKey as EdSk, VerifyingKey as EdVk, Signature as EdSig,
 };
+use fips204::ml_dsa_65;
+use fips204::traits::{SerDes, Signer as _, Verifier as _};
 use rand::rngs::OsRng;
+use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
-// ─── Activation flag ────────────────────────────────────────────────────────
+// ─── Flags ────────────────────────────────────────────────────────────────────
 
-/// Bascule unique pour activer la couche ML-DSA-65.
-/// Tant qu'à `false`, `verify_ml_dsa()` ne fait que renvoyer `false` (échec sûr).
-const ML_DSA_AVAILABLE: bool = false;
+/// La couche ML-DSA-65 est branchée et vérifiée.
+const ML_DSA_AVAILABLE: bool = true;
+
+/// Flag-day futur : exiger une couche PQ sur **toute** signature (rejette
+/// l'Ed25519 seul). Laissé à `false` pour la rétro-compatibilité réseau.
+pub const REQUIRE_PQ: bool = false;
+
+/// Domaine de séparation pour la dérivation déterministe de la clé ML-DSA.
+/// NE JAMAIS modifier : changerait la clé PQ de toutes les identités existantes.
+const ML_DSA_DOMAIN: &[u8] = b"QUANTA-ML-DSA-65-derive-v1";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /// Signature hybride — classique + post-quantique.
 ///
-/// Quand ML-DSA n'est pas activé, `quantum` est vide (Vec::new()).
-/// La vérification hybride tombe en mode Ed25519-seul automatiquement.
+/// `quantum` est vide quand l'identité signataire n'a pas de couche PQ ; la
+/// vérification retombe alors automatiquement en mode Ed25519-seul.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridSignature {
-    /// 64 octets — Ed25519 (classique, toujours présent)
+    /// 64 octets — Ed25519 (toujours présent).
     pub classical: Vec<u8>,
-    /// 3293 octets — ML-DSA-65 (post-quantique, vide jusqu'à ml-dsa ≥ 0.2.0)
+    /// `ml_dsa_65::SIG_LEN` octets — ML-DSA-65 (vide si pas de couche PQ).
     pub quantum: Vec<u8>,
 }
 
-/// Identité hybride : paire de clés Ed25519 + (future) ML-DSA-65.
+/// Identité hybride : paire Ed25519 + paire ML-DSA-65 dérivée déterministiquement.
 pub struct HybridIdentity {
     ed_sk:     EdSk,
     pub ed_vk: EdVk,
+    /// `(clé secrète ML-DSA, clé publique ML-DSA hex)`. `None` seulement si la
+    /// dérivation échoue (impossible avec le XOF → repli sûr en Ed25519 seul).
+    ml: Option<(ml_dsa_65::PrivateKey, String)>,
 }
 
 // ─── Implémentation ─────────────────────────────────────────────────────────
 
 impl HybridIdentity {
-    /// Génère une nouvelle identité hybride.
+    /// Génère une nouvelle identité hybride (Ed25519 + ML-DSA-65 dérivée).
     pub fn generate() -> Self {
         let ed_sk = EdSk::generate(&mut OsRng);
         let ed_vk = ed_sk.verifying_key();
-        Self { ed_sk, ed_vk }
+        let mut seed = ed_sk.to_bytes();
+        let ml = derive_ml_dsa(&seed);
+        seed.zeroize();
+        Self { ed_sk, ed_vk, ml }
     }
 
-    /// Hex de la clé publique PQ (vide jusqu'à activation de ML-DSA).
+    /// Hex de la clé publique ML-DSA-65 (vide si la dérivation a échoué).
     pub fn pq_vk_hex(&self) -> String {
-        String::new() // sera rempli quand ml-dsa ≥ 0.2.0 sera stable
+        self.ml.as_ref().map(|(_, h)| h.clone()).unwrap_or_default()
     }
 
-    /// Signe un message.
-    /// Couche classique : Ed25519 actif.
-    /// Couche PQ        : vide tant que `ML_DSA_AVAILABLE = false`.
+    /// Signe un message sur les deux couches (Ed25519 + ML-DSA-65).
     pub fn sign(&self, msg: &[u8]) -> HybridSignature {
         let classical = self.ed_sk.sign(msg).to_bytes().to_vec();
-        let sig = HybridSignature { classical, quantum: Vec::new() };
-        // Invariant : un signataire local en mode stub ne doit JAMAIS produire
-        // de couche quantum. Cristallise l'état actuel — si quelqu'un branche
-        // un vrai signer ML-DSA sans flipper `ML_DSA_AVAILABLE`, on s'en aperçoit.
-        #[allow(clippy::assertions_on_constants)]
-        {
-            debug_assert!(
-                ML_DSA_AVAILABLE || sig.quantum.is_empty(),
-                "stub mode must not produce ML-DSA signatures"
-            );
-        }
-        sig
+        let quantum = self
+            .ml
+            .as_ref()
+            .and_then(|(sk, _)| sk.try_sign_with_rng(&mut OsRng, msg, &[]).ok())
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        HybridSignature { classical, quantum }
     }
 
     // ── Vérification ────────────────────────────────────────────────────────
 
-    /// Vérification hybride.
+    /// Vérification hybride (voir le doc-module pour la sémantique complète).
     ///
-    /// Sémantique actuelle (`ML_DSA_AVAILABLE = false`) :
-    /// - La couche ML-DSA n'est jamais considérée valide.
-    /// - Toute donnée `quantum` reçue est journalisée (pour visibilité) puis ignorée.
-    /// - Le résultat est strictement le verdict Ed25519.
-    ///
-    /// Sémantique cible (`ML_DSA_AVAILABLE = true`) : règle OR — valide si au
-    /// moins une des deux signatures passe (cf. note "Mode hybride OR vs AND").
+    /// - `quantum` vide → Ed25519 seul (rétro-compat ; rejet si `REQUIRE_PQ`).
+    /// - `quantum` présent → AND strict : Ed25519 ET ML-DSA-65 doivent vérifier.
     pub fn verify_hybrid(
         ed_pk_hex: &str,
         pq_pk_hex: &str,
@@ -123,24 +128,21 @@ impl HybridIdentity {
     ) -> bool {
         let ed_ok = verify_ed25519(ed_pk_hex, msg, &sig.classical);
 
-        if sig.quantum.is_empty() || pq_pk_hex.is_empty() {
-            return ed_ok;
-        }
-
-        if !ML_DSA_AVAILABLE {
-            // Visibilité opérationnelle : un peer pousse une signature PQ qu'on
-            // ne peut pas vérifier. Ne pas l'accepter, ne pas planter.
-            log::warn!(
-                "◈ [HybridCrypto] PQ signature présente mais ML-DSA désactivé — \
-                 fallback Ed25519 seul ({}B quantum, {}B pq_pk)",
-                sig.quantum.len(),
-                pq_pk_hex.len() / 2
-            );
+        // Pas de couche PQ exploitable → Ed25519 gouverne.
+        if !ML_DSA_AVAILABLE || sig.quantum.is_empty() || pq_pk_hex.is_empty() {
+            if REQUIRE_PQ {
+                log::warn!(
+                    "◈ [HybridCrypto] REQUIRE_PQ actif mais signature sans couche \
+                     ML-DSA — rejet"
+                );
+                return false;
+            }
             return ed_ok;
         }
 
         let pq_ok = verify_ml_dsa(pq_pk_hex, msg, &sig.quantum);
-        ed_ok || pq_ok
+        // Hybride strict : couche PQ présente ⇒ les deux doivent vérifier.
+        ed_ok && pq_ok
     }
 
     /// Vérification Ed25519 seule (compatibilité ascendante).
@@ -149,7 +151,63 @@ impl HybridIdentity {
     }
 }
 
-// ─── Fonctions internes ──────────────────────────────────────────────────────
+// ─── Dérivation déterministe de la clé ML-DSA ────────────────────────────────
+
+/// CSPRNG déterministe adossé au XOF BLAKE3, graine = 32 octets secrets.
+///
+/// Sert UNIQUEMENT à dériver la paire ML-DSA-65 depuis la graine Ed25519 : la
+/// même graine produit toujours la même clé PQ, donc rien de neuf à persister.
+struct Blake3Rng {
+    reader: blake3::OutputReader,
+}
+
+impl Blake3Rng {
+    fn from_seed(seed: &[u8; 32]) -> Self {
+        let mut h = blake3::Hasher::new();
+        h.update(ML_DSA_DOMAIN);
+        h.update(seed);
+        Self { reader: h.finalize_xof() }
+    }
+}
+
+impl RngCore for Blake3Rng {
+    fn next_u32(&mut self) -> u32 {
+        let mut b = [0u8; 4];
+        self.reader.fill(&mut b);
+        u32::from_le_bytes(b)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut b = [0u8; 8];
+        self.reader.fill(&mut b);
+        u64::from_le_bytes(b)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.reader.fill(dest);
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.reader.fill(dest);
+        Ok(())
+    }
+}
+
+// Le flux provient d'un XOF cryptographique (BLAKE3) → utilisable comme CSPRNG.
+impl CryptoRng for Blake3Rng {}
+
+/// Dérive la paire ML-DSA-65 depuis une graine Ed25519 de 32 octets.
+/// Renvoie `(clé secrète, clé publique hex)`, ou `None` si la génération échoue
+/// (ne se produit pas avec le XOF — repli sûr documenté côté appelant).
+pub(crate) fn derive_ml_dsa(seed32: &[u8; 32]) -> Option<(ml_dsa_65::PrivateKey, String)> {
+    let mut rng = Blake3Rng::from_seed(seed32);
+    match ml_dsa_65::try_keygen_with_rng(&mut rng) {
+        Ok((pk, sk)) => Some((sk, hex::encode(pk.into_bytes()))),
+        Err(e) => {
+            log::error!("◈ [HybridCrypto] échec keygen ML-DSA-65 : {e}");
+            None
+        }
+    }
+}
+
+// ─── Fonctions de vérification internes ───────────────────────────────────────
 
 fn verify_ed25519(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
     (|| -> Option<bool> {
@@ -162,28 +220,15 @@ fn verify_ed25519(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
     .unwrap_or(false)
 }
 
-/// Vérification ML-DSA-65 — désactivée tant que `ML_DSA_AVAILABLE = false`.
-///
-/// Le contrat est : ne **jamais** renvoyer `true` avant qu'une vraie implémentation
-/// soit branchée et auditée. `verify_hybrid` n'appelle même pas cette fonction
-/// quand `ML_DSA_AVAILABLE` est faux — la garde ici est une seconde ceinture.
-///
-/// Réactivation (à faire en un seul commit) :
-/// ```ignore
-/// use ml_dsa::{MlDsa65, VerifyingKey, Signature};
-/// use ml_dsa::signature::Verifier as _;
-/// let vk = VerifyingKey::<MlDsa65>::try_from(pk_bytes).ok()?;
-/// let s  = Signature::<MlDsa65>::try_from(sig_bytes).ok()?;
-/// vk.verify(msg, &s).is_ok()
-/// ```
-#[allow(clippy::assertions_on_constants)]
-fn verify_ml_dsa(_pk_hex: &str, _msg: &[u8], _sig_bytes: &[u8]) -> bool {
-    debug_assert!(
-        ML_DSA_AVAILABLE,
-        "verify_ml_dsa appelé alors que ML_DSA_AVAILABLE=false — \
-         indique un bug logique dans verify_hybrid"
-    );
-    false
+/// Vérification ML-DSA-65 (FIPS 204). Renvoie `false` sur toute donnée malformée.
+fn verify_ml_dsa(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
+    (|| -> Option<bool> {
+        let pk_arr: [u8; ml_dsa_65::PK_LEN] = hex::decode(pk_hex).ok()?.try_into().ok()?;
+        let sig_arr: [u8; ml_dsa_65::SIG_LEN] = sig_bytes.try_into().ok()?;
+        let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_arr).ok()?;
+        Some(pk.verify(msg, &sig_arr, &[]))
+    })()
+    .unwrap_or(false)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -193,59 +238,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classical_sign_verify_roundtrip() {
+    fn hybrid_sign_verify_roundtrip() {
         let id  = HybridIdentity::generate();
-        let msg = b"QUANTA Phase 2A test vector";
+        let msg = b"QUANTA Phase 2B hybrid vector";
         let sig = id.sign(msg);
 
         assert_eq!(sig.classical.len(), 64);
-        assert!(sig.quantum.is_empty(), "PQ vide avant activation ml-dsa");
+        assert_eq!(sig.quantum.len(), ml_dsa_65::SIG_LEN, "couche ML-DSA présente");
 
         let ed_pk = hex::encode(id.ed_vk.to_bytes());
+        let pq_pk = id.pq_vk_hex();
+        assert!(!pq_pk.is_empty(), "clé publique PQ dérivée");
         assert!(
-            HybridIdentity::verify_hybrid(&ed_pk, "", msg, &sig),
-            "Vérification Ed25519 doit réussir"
+            HybridIdentity::verify_hybrid(&ed_pk, &pq_pk, msg, &sig),
+            "la signature hybride doit vérifier sur les deux couches"
         );
     }
 
     #[test]
-    fn tampered_message_fails() {
+    fn deterministic_pq_derivation() {
+        // Même graine Ed25519 ⇒ même clé publique ML-DSA (dérivation déterministe).
+        let ed_sk = EdSk::generate(&mut OsRng);
+        let seed = ed_sk.to_bytes();
+        let a = derive_ml_dsa(&seed).expect("keygen a");
+        let b = derive_ml_dsa(&seed).expect("keygen b");
+        assert_eq!(a.1, b.1, "la dérivation ML-DSA doit être déterministe");
+    }
+
+    #[test]
+    fn tampered_message_fails_hybrid() {
         let id  = HybridIdentity::generate();
         let sig = id.sign(b"original");
         let ed_pk = hex::encode(id.ed_vk.to_bytes());
+        let pq_pk = id.pq_vk_hex();
         assert!(
-            !HybridIdentity::verify_hybrid(&ed_pk, "", b"tampered", &sig),
-            "Message altéré doit échouer"
+            !HybridIdentity::verify_hybrid(&ed_pk, &pq_pk, b"tampered", &sig),
+            "un message altéré doit échouer"
         );
     }
 
-    /// En mode stub, une signature PQ fabriquée ne doit jamais "valider" via la
-    /// branche quantum : seul Ed25519 fait foi. Si Ed25519 échoue, le verdict
-    /// est `false` même si on prétend avoir une signature ML-DSA.
     #[test]
-    fn stub_mode_rejects_forged_pq_signature() {
+    fn strict_and_rejects_broken_pq_layer() {
+        // Ed25519 valide mais couche PQ corrompue ⇒ rejet (AND strict).
         let id = HybridIdentity::generate();
+        let mut sig = id.sign(b"msg");
+        if let Some(b) = sig.quantum.get_mut(0) { *b ^= 0xFF; }
         let ed_pk = hex::encode(id.ed_vk.to_bytes());
-
-        // Signature Ed25519 valide pour "good", mais on cherche à valider "bad"
-        // en y attachant un blob "quantum" arbitraire et un faux pq_pk.
-        let real_sig = id.sign(b"good");
-        let forged = HybridSignature {
-            classical: real_sig.classical.clone(),
-            quantum: vec![0xAA; 3293], // taille ML-DSA-65 plausible
-        };
-        let fake_pq_pk = hex::encode([0xBBu8; 1952]); // taille ML-DSA-65 plausible
-
-        // Ed25519 ne valide pas "bad" → quel que soit le quantum, le verdict est false.
+        let pq_pk = id.pq_vk_hex();
         assert!(
-            !HybridIdentity::verify_hybrid(&ed_pk, &fake_pq_pk, b"bad", &forged),
-            "stub mode ne doit jamais accepter une signature uniquement via la couche PQ"
+            !HybridIdentity::verify_hybrid(&ed_pk, &pq_pk, b"msg", &sig),
+            "une couche PQ présente mais invalide doit faire échouer la vérif"
         );
+    }
 
-        // Ed25519 valide "good" → verdict true même avec quantum bidon (fallback Ed25519).
+    #[test]
+    fn backward_compat_ed25519_only() {
+        // quantum vide ⇒ Ed25519 seul fait foi (rétro-compat pré-activation).
+        let id   = HybridIdentity::generate();
+        let full = id.sign(b"legacy");
+        let ed_only = HybridSignature {
+            classical: full.classical.clone(),
+            quantum: Vec::new(),
+        };
+        let ed_pk = hex::encode(id.ed_vk.to_bytes());
         assert!(
-            HybridIdentity::verify_hybrid(&ed_pk, &fake_pq_pk, b"good", &forged),
-            "Ed25519 valide doit suffire même quand quantum est bruité"
+            HybridIdentity::verify_hybrid(&ed_pk, "", b"legacy", &ed_only),
+            "Ed25519 seul doit suffire sans couche PQ"
+        );
+        assert!(
+            !HybridIdentity::verify_hybrid(&ed_pk, "", b"forged", &ed_only),
+            "mauvais message ⇒ échec même en Ed25519 seul"
+        );
+    }
+
+    #[test]
+    fn forged_pq_without_valid_ed25519_rejected() {
+        // Sans Ed25519 valide, une couche PQ ne peut pas « sauver » la signature.
+        let id = HybridIdentity::generate();
+        let sig_good = id.sign(b"good");
+        let ed_pk = hex::encode(id.ed_vk.to_bytes());
+        let pq_pk = id.pq_vk_hex();
+        assert!(
+            !HybridIdentity::verify_hybrid(&ed_pk, &pq_pk, b"bad", &sig_good),
+            "AND strict : Ed25519 invalide ⇒ rejet quelle que soit la couche PQ"
         );
     }
 }

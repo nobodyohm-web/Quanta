@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Torus / QUANTA — Audit 360° &amp; Feuille de route</title>
+<style>
+  :root{
+    --bg-0:#0a0b0f; --bg-1:#11131a; --bg-2:#171a22; --bg-3:#1e222c;
+    --bd:#262b38; --bd-2:#323848;
+    --tx-0:#e8eaf0; --tx-1:#a7adbb; --tx-2:#6b7280;
+    --acc:#00e5cc; --acc-2:#6366f1;
+    --crit:#ff4d5e; --eleve:#ff8c42; --moyen:#ffce3f; --faible:#4dabf7; --positif:#22d39a;
+    --radius:14px; --radius-sm:9px;
+    --mono:ui-monospace,"SF Mono",Menlo,"JetBrains Mono",monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg-0);color:var(--tx-0);font-family:var(--sans);
+    font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono);font-size:.86em}
+  h1,h2,h3{line-height:1.25;font-weight:700;letter-spacing:-.02em}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+
+  /* HEADER */
+  header.top{padding:46px 0 30px;border-bottom:1px solid var(--bd);
+    background:radial-gradient(1100px 380px at 12% -8%,rgba(99,102,241,.16),transparent 60%),
+               radial-gradient(900px 360px at 92% -12%,rgba(0,229,204,.13),transparent 60%);}
+  .brandline{display:flex;align-items:center;gap:11px;font-family:var(--mono);
+    font-size:12.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--tx-1)}
+  .dot{width:9px;height:9px;border-radius:50%;
+    background:linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 0 16px rgba(0,229,204,.6)}
+  header.top h1{font-size:38px;margin:16px 0 8px;
+    background:linear-gradient(120deg,#fff 20%,var(--acc) 120%);
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .subtitle{font-size:17px;color:var(--tx-1);max-width:760px;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:9px;margin-top:22px}
+  .meta span{font-family:var(--mono);font-size:11.5px;color:var(--tx-1);
+    background:var(--bg-2);border:1px solid var(--bd);padding:5px 11px;border-radius:99px}
+  .meta b{color:var(--tx-0);font-weight:600}
+
+  /* VERDICT */
+  .verdict{margin:30px 0;padding:24px 26px;border-radius:var(--radius);
+    background:linear-gradient(135deg,rgba(99,102,241,.10),rgba(0,229,204,.06));
+    border:1px solid var(--bd-2)}
+  .verdict .thesis{font-size:21px;font-weight:700;letter-spacing:-.02em;margin:0 0 8px}
+  .verdict .thesis em{font-style:normal;color:var(--acc)}
+  .verdict p{margin:6px 0 0;color:var(--tx-1);font-size:14.5px}
+
+  section{padding:40px 0;border-bottom:1px solid var(--bd)}
+  .sec-h{display:flex;align-items:baseline;gap:13px;margin:0 0 6px}
+  .sec-h .n{font-family:var(--mono);font-size:13px;color:var(--acc)}
+  .sec-h h2{font-size:25px;margin:0}
+  .sec-sub{color:var(--tx-1);margin:0 0 24px;font-size:14.5px}
+
+  /* SCORECARD */
+  .scores{display:grid;gap:13px}
+  .score{display:grid;grid-template-columns:230px 1fr 52px;align-items:center;gap:16px}
+  .score .lbl{font-size:14px;font-weight:600}
+  .score .lbl small{display:block;color:var(--tx-2);font-weight:400;font-size:11.5px}
+  .bar{height:11px;border-radius:99px;background:var(--bg-3);overflow:hidden;position:relative}
+  .bar > i{display:block;height:100%;border-radius:99px;
+    background:linear-gradient(90deg,var(--acc-2),var(--acc));transition:width 1.1s cubic-bezier(.2,.8,.2,1)}
+  .score .val{font-family:var(--mono);font-size:16px;font-weight:700;text-align:right}
+  .global{margin-top:26px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;
+    padding:20px 24px;border-radius:var(--radius);background:var(--bg-1);border:1px solid var(--bd)}
+  .ring{--p:62;width:104px;height:104px;border-radius:50%;flex:0 0 auto;
+    background:conic-gradient(var(--acc) calc(var(--p)*1%),var(--bg-3) 0);
+    display:grid;place-items:center;position:relative}
+  .ring::before{content:"";position:absolute;inset:9px;border-radius:50%;background:var(--bg-1)}
+  .ring b{position:relative;font-family:var(--mono);font-size:25px;font-weight:700}
+  .ring b small{font-size:12px;color:var(--tx-2)}
+  .global .gt{flex:1;min-width:260px}
+  .global .gt h3{margin:0 0 5px;font-size:17px}
+  .global .gt p{margin:0;color:var(--tx-1);font-size:13.5px}
+
+  /* PILLARS */
+  .pillars{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:6px}
+  .pill{padding:18px 20px;border-radius:var(--radius);border:1px solid var(--bd);background:var(--bg-1)}
+  .pill.good{border-color:rgba(34,211,154,.32)}
+  .pill.bad{border-color:rgba(255,140,66,.32)}
+  .pill h4{margin:0 0 12px;font-size:14px;display:flex;align-items:center;gap:8px}
+  .pill.good h4{color:var(--positif)} .pill.bad h4{color:var(--eleve)}
+  .pill ul{margin:0;padding-left:18px;color:var(--tx-1);font-size:13.5px}
+  .pill li{margin:5px 0}
+  .pill li b{color:var(--tx-0);font-weight:600}
+
+  /* TOP5 */
+  ol.top5{counter-reset:t;list-style:none;padding:0;margin:8px 0 0;display:grid;gap:11px}
+  ol.top5 li{counter-increment:t;display:grid;grid-template-columns:38px 1fr auto;gap:14px;
+    align-items:center;padding:15px 18px;border-radius:var(--radius-sm);
+    background:var(--bg-1);border:1px solid var(--bd)}
+  ol.top5 li::before{content:counter(t);font-family:var(--mono);font-weight:700;font-size:18px;
+    width:34px;height:34px;display:grid;place-items:center;border-radius:9px;
+    background:linear-gradient(135deg,var(--acc-2),var(--acc));color:#08121a}
+  ol.top5 .t-txt b{font-weight:600}
+  ol.top5 .t-txt span{display:block;color:var(--tx-1);font-size:13px;margin-top:2px}
+  ol.top5 .t-ref{font-family:var(--mono);font-size:11px;color:var(--tx-2)}
+
+  /* TOOLBAR */
+  .toolbar{position:sticky;top:0;z-index:30;background:rgba(10,11,15,.86);
+    backdrop-filter:blur(12px);border-bottom:1px solid var(--bd);padding:12px 0;margin-bottom:26px}
+  .toolbar .wrap{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:11.5px;padding:5px 11px;border-radius:99px;cursor:pointer;
+    border:1px solid var(--bd-2);background:var(--bg-2);color:var(--tx-1);user-select:none;
+    display:inline-flex;align-items:center;gap:6px;transition:.15s}
+  .chip:hover{border-color:var(--tx-2)}
+  .chip .sw{width:8px;height:8px;border-radius:50%}
+  .chip[aria-pressed="false"]{opacity:.38;text-decoration:line-through}
+  .chip[data-sev="critique"] .sw{background:var(--crit)}
+  .chip[data-sev="eleve"] .sw{background:var(--eleve)}
+  .chip[data-sev="moyen"] .sw{background:var(--moyen)}
+  .chip[data-sev="faible"] .sw{background:var(--faible)}
+  .chip[data-sev="positif"] .sw{background:var(--positif)}
+  .toolbar input[type=search]{flex:1;min-width:150px;background:var(--bg-2);border:1px solid var(--bd-2);
+    color:var(--tx-0);padding:7px 12px;border-radius:99px;font-size:13px;font-family:var(--sans)}
+  .toolbar select{background:var(--bg-2);border:1px solid var(--bd-2);color:var(--tx-1);
+    padding:7px 10px;border-radius:99px;font-size:12px;font-family:var(--mono)}
+  .btn{background:var(--bg-2);border:1px solid var(--bd-2);color:var(--tx-1);
+    padding:7px 13px;border-radius:99px;font-size:12px;cursor:pointer;font-family:var(--mono)}
+  .btn:hover{border-color:var(--acc);color:var(--tx-0)}
+  .prog{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:11.5px;color:var(--tx-1)}
+  .prog .pbar{width:90px;height:7px;border-radius:99px;background:var(--bg-3);overflow:hidden}
+  .prog .pbar > i{display:block;height:100%;background:linear-gradient(90deg,var(--acc-2),var(--positif));width:0;transition:.4s}
+
+  /* FINDINGS */
+  .find{border:1px solid var(--bd);border-left:3px solid var(--bd-2);border-radius:var(--radius);
+    background:var(--bg-1);margin:14px 0;overflow:hidden;transition:.18s}
+  .find[data-sev="critique"]{border-left-color:var(--crit)}
+  .find[data-sev="eleve"]{border-left-color:var(--eleve)}
+  .find[data-sev="moyen"]{border-left-color:var(--moyen)}
+  .find[data-sev="faible"]{border-left-color:var(--faible)}
+  .find[data-sev="positif"]{border-left-color:var(--positif)}
+  .find.hidden{display:none}
+  .find.done{opacity:.55}
+  .find.done .fh-title{text-decoration:line-through}
+  .fh{display:flex;align-items:center;gap:12px;padding:15px 18px;cursor:pointer;user-select:none}
+  .fid{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--tx-0);
+    background:var(--bg-3);padding:3px 8px;border-radius:7px;flex:0 0 auto}
+  .sev{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    padding:3px 9px;border-radius:99px;flex:0 0 auto}
+  .sev.critique{background:rgba(255,77,94,.16);color:var(--crit)}
+  .sev.eleve{background:rgba(255,140,66,.16);color:var(--eleve)}
+  .sev.moyen{background:rgba(255,206,63,.15);color:var(--moyen)}
+  .sev.faible{background:rgba(77,171,247,.15);color:var(--faible)}
+  .sev.positif{background:rgba(34,211,154,.15);color:var(--positif)}
+  .fh-title{flex:1;font-weight:600;font-size:15px}
+  .eff{font-family:var(--mono);font-size:10.5px;color:var(--tx-2);border:1px solid var(--bd-2);
+    padding:2px 8px;border-radius:99px;flex:0 0 auto}
+  .eff b{color:var(--tx-1)}
+  .chk{flex:0 0 auto;width:19px;height:19px;cursor:pointer;accent-color:var(--positif)}
+  .caret{flex:0 0 auto;color:var(--tx-2);transition:.2s;font-size:12px}
+  .find.open .caret{transform:rotate(90deg)}
+  .fbody{display:none;padding:2px 18px 20px 18px;border-top:1px solid var(--bd)}
+  .find.open .fbody{display:block}
+  .fbody .row{margin:14px 0 0}
+  .fbody .k{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--tx-2);margin-bottom:4px}
+  .fbody .v{font-size:14px;color:var(--tx-1)}
+  .fbody .v b{color:var(--tx-0)}
+  .reco{background:rgba(0,229,204,.05);border:1px solid rgba(0,229,204,.18);
+    border-radius:var(--radius-sm);padding:12px 14px}
+  .reco .k{color:var(--acc)}
+  pre.ev{background:var(--bg-0);border:1px solid var(--bd);border-radius:var(--radius-sm);
+    padding:11px 13px;margin:4px 0 0;overflow-x:auto;font-family:var(--mono);font-size:12px;color:var(--tx-1)}
+  pre.ev .fl{color:var(--acc)}
+  pre.ev .cm{color:var(--tx-2)}
+
+  /* DOMAIN HEADER */
+  .dom-h{display:flex;align-items:center;gap:12px;margin:34px 0 4px;padding-top:8px}
+  .dom-h .dl{font-family:var(--mono);font-size:13px;font-weight:700;width:30px;height:30px;
+    display:grid;place-items:center;border-radius:8px;background:var(--bg-3);color:var(--acc)}
+  .dom-h h3{margin:0;font-size:19px}
+  .dom-h .ct{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--tx-2)}
+
+  /* MATRIX */
+  .matrix{display:grid;grid-template-columns:80px 1fr 1fr 1fr;gap:8px;margin-top:8px}
+  .matrix .hd{font-family:var(--mono);font-size:11px;color:var(--tx-2);display:grid;place-items:center;text-align:center}
+  .matrix .yl{font-family:var(--mono);font-size:11px;color:var(--tx-2);display:grid;place-items:center;writing-mode:vertical-rl;transform:rotate(180deg)}
+  .cell{min-height:74px;border:1px solid var(--bd);border-radius:var(--radius-sm);padding:9px;
+    display:flex;flex-wrap:wrap;gap:5px;align-content:flex-start;background:var(--bg-1)}
+  .cell.hot{background:rgba(34,211,154,.06);border-color:rgba(34,211,154,.28)}
+  .cell.warm{background:rgba(255,206,63,.04)}
+  .tag{font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:6px;
+    background:var(--bg-3);color:var(--tx-1);border:1px solid var(--bd-2)}
+  .tag.c{color:var(--crit);border-color:rgba(255,77,94,.4)}
+  .tag.e{color:var(--eleve);border-color:rgba(255,140,66,.4)}
+  .legend-mx{font-size:12px;color:var(--tx-2);margin-top:10px}
+
+  /* PHASES */
+  .phase{margin:18px 0;border:1px solid var(--bd);border-radius:var(--radius);overflow:hidden}
+  .phase > .ph-h{display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--bg-2)}
+  .phase .ph-h .pno{font-family:var(--mono);font-weight:700;color:#08121a;background:linear-gradient(135deg,var(--acc),var(--acc-2));
+    padding:3px 10px;border-radius:7px;font-size:12px}
+  .phase .ph-h h4{margin:0;font-size:16px;flex:1}
+  .phase .ph-h .when{font-family:var(--mono);font-size:11px;color:var(--tx-2)}
+  .phase ul.tasks{list-style:none;margin:0;padding:8px 18px 16px}
+  .phase ul.tasks li{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--bd);font-size:14px}
+  .phase ul.tasks li:last-child{border-bottom:0}
+  .phase ul.tasks input{margin-top:3px;width:17px;height:17px;accent-color:var(--positif);cursor:pointer;flex:0 0 auto}
+  .phase ul.tasks .rf{font-family:var(--mono);font-size:10.5px;color:var(--tx-2);margin-left:auto;flex:0 0 auto;
+    border:1px solid var(--bd-2);padding:1px 7px;border-radius:99px}
+  .phase .done-t{opacity:.5;text-decoration:line-through}
+
+  /* TABLES */
+  table.metrics{width:100%;border-collapse:collapse;margin-top:8px;font-size:13.5px}
+  table.metrics th,table.metrics td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--bd)}
+  table.metrics th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx-2)}
+  table.metrics td.mono{font-family:var(--mono);color:var(--tx-0)}
+  table.metrics .ok{color:var(--positif)} table.metrics .no{color:var(--eleve)}
+
+  footer{padding:34px 0 60px;color:var(--tx-2);font-size:12.5px}
+  footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+
+  .note{font-size:12.5px;color:var(--tx-2);background:var(--bg-1);border:1px dashed var(--bd-2);
+    border-radius:var(--radius-sm);padding:13px 16px;margin-top:18px}
+
+  @media(max-width:720px){
+    header.top h1{font-size:29px}
+    .score{grid-template-columns:130px 1fr 44px;gap:10px}
+    .pillars{grid-template-columns:1fr}
+    .matrix{grid-template-columns:30px 1fr 1fr 1fr}
+    ol.top5 li{grid-template-columns:34px 1fr}
+    ol.top5 .t-ref{display:none}
+  }
+  @media print{
+    .toolbar{display:none}
+    .find .fbody{display:block!important}
+    .find{break-inside:avoid;border-left-width:3px}
+    body{background:#fff;color:#111}
+    .verdict,.pill,.find,.phase{background:#fff!important}
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brandline"><span class="dot"></span> Audit technique indépendant · 360°</div>
+    <h1>Torus / QUANTA — Audit &amp; Feuille de route</h1>
+    <p class="subtitle">Diagnostic franc et priorisé pour passer d'un prototype d'ingénieur talentueux à un produit perçu comme <b>professionnel</b>. Code · Sécurité · Produit · Crédibilité · Production.</p>
+    <div class="meta">
+      <span>Commit <b>4d98fed</b></span>
+      <span>Branche <b>feat/v3.3-production</b></span>
+      <span>Date <b>2026-05-31</b></span>
+      <span><b>~26 700</b> LOC</span>
+      <span><b>256</b> tests</span>
+      <span><b>70</b> commandes Tauri</span>
+      <span>Public <b>équipe technique</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="verdict">
+    <p class="thesis"><em>Le moteur est plus professionnel que le projet.</em></p>
+    <p>L'ingénierie est sérieuse : crypto à l'état de l'art, pipeline de réception P2P complet et signé, ~5 <code>unwrap</code> en production seulement, 0 <code>unsafe</code>, CI avec <code>clippy -D warnings</code>, updater OTA réellement signé. Ce qui fait « amateur » n'est <b>presque jamais le code</b> — c'est la couche externe : un README qui décrit un autre produit, une marque éclatée en 5 noms, des versions incohérentes, aucune licence, et quelques promesses post-quantiques que le code lui-même contredit honnêtement. <b>Bonne nouvelle : l'essentiel de ce déficit se corrige en jours, pas en mois.</b></p>
+  </div>
+
+  <!-- ====================== SYNTHÈSE ====================== -->
+  <section id="synthese">
+    <div class="sec-h"><span class="n">01</span><h2>Synthèse exécutive</h2></div>
+    <p class="sec-sub">Note par domaine (évaluation d'expert à la lecture du code, pas un simple comptage). Cliquez une jauge mentalement comme « distance au niveau pro ».</p>
+
+    <div class="scores">
+      <div class="score"><div class="lbl">Architecture &amp; code<small>modularité, lisibilité, dette</small></div><div class="bar"><i data-w="78"></i></div><div class="val">78</div></div>
+      <div class="score"><div class="lbl">Sécurité &amp; crypto<small>signatures, KDF, secrets, pipeline</small></div><div class="bar"><i data-w="80"></i></div><div class="val">80</div></div>
+      <div class="score"><div class="lbl">Robustesse<small>error handling, panics, edge cases</small></div><div class="bar"><i data-w="72"></i></div><div class="val">72</div></div>
+      <div class="score"><div class="lbl">Réseau P2P &amp; consensus<small>convergence, tests réseau réels</small></div><div class="bar"><i data-w="60"></i></div><div class="val">60</div></div>
+      <div class="score"><div class="lbl">Produit &amp; UX/UI<small>onboarding, parcours, i18n, a11y</small></div><div class="bar"><i data-w="62"></i></div><div class="val">62</div></div>
+      <div class="score"><div class="lbl">Crédibilité &amp; docs<small>README, marque, claims, licence</small></div><div class="bar"><i data-w="33"></i></div><div class="val">33</div></div>
+      <div class="score"><div class="lbl">Prod-readiness<small>CI/CD, signature, releases</small></div><div class="bar"><i data-w="52"></i></div><div class="val">52</div></div>
+    </div>
+
+    <div class="global">
+      <div class="ring" style="--p:62"><b>62<small>/100</small></b></div>
+      <div class="gt">
+        <h3>Socle technique solide, vitrine amateur</h3>
+        <p>La note globale est tirée vers le bas par la <b>crédibilité (33)</b> et la <b>prod-readiness (52)</b> — précisément les deux dimensions les moins coûteuses à redresser. Un projet « google web3 » se juge d'abord sur sa vitrine ; ici la vitrine ment sur la qualité réelle du code.</p>
+      </div>
+    </div>
+
+    <div class="pillars">
+      <div class="pill good">
+        <h4>◆ Déjà solide (à préserver)</h4>
+        <ul>
+          <li><b>Crypto</b> : Ed25519 par enveloppe, AES-256-GCM, Argon2id 64 Mo, BLAKE3, <code>zeroize</code> + <code>ZeroizeOnDrop</code>.</li>
+          <li><b>Pipeline réception</b> : taille → ban → dedup → fraîcheur → rate-limit adaptatif → nonce → signature.</li>
+          <li><b>Discipline Rust</b> : ~5 <code>unwrap</code> en prod, 0 <code>unsafe</code>, 0 TODO, <code>clippy -D warnings</code> en CI.</li>
+          <li><b>256 tests</b> dont convergence multi-nœuds (in-process) + property-testing (proptest).</li>
+          <li><b>Updater OTA</b> réellement configuré (clé minisign + endpoints).</li>
+          <li><b>Onboarding</b> : wizard chiffré, auto-lock, StrengthMeter, Cmd+K, 48 attributs a11y.</li>
+        </ul>
+      </div>
+      <div class="pill bad">
+        <h4>▲ Ce qui bloque le « pro »</h4>
+        <ul>
+          <li><b>README ≠ produit</b> : décrit 15 commandes, Willow/Lightning, v0.4.0 — le code en a 70 et fait tout autre chose.</li>
+          <li><b>Marque éclatée</b> : Torus / Quanta / Sovereign Web Engine / SOVA / Willow.</li>
+          <li><b>Post-quantique survendu</b> alors que <code>ML_DSA_AVAILABLE = false</code>.</li>
+          <li><b>Versions incohérentes</b> : 0.1.0 / 0.4.0 / 1.0.0 / 1.0.1 ; <b>aucun tag git</b>.</li>
+          <li><b>Aucune LICENSE</b> ; <code>package.json</code> encore nommé <code>tauri-app</code>.</li>
+          <li><b>Robustesse réseau réelle</b> prouvée par un seul test manuel à 2 machines.</li>
+          <li><b>Clé de récupération non forcée</b> sur le parcours d'onboarding principal.</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3 style="margin:30px 0 4px;font-size:17px">Top 5 — fort impact, faible effort</h3>
+    <ol class="top5">
+      <li><div class="t-txt"><b>Réécrire le README sur le produit réel</b><span>Le premier document que lit un dev ou un investisseur décrit aujourd'hui un autre logiciel.</span></div><div class="t-ref">F1 · effort M</div></li>
+      <li><div class="t-txt"><b>Requalifier les promesses post-quantiques</b><span>« Defense-Grade Post-Quantum » → « post-quantum-ready (roadmap) ». Supprime un risque réputationnel.</span></div><div class="t-ref">F2 · effort S</div></li>
+      <li><div class="t-txt"><b>Ajouter LICENSE + nettoyer package.json</b><span>Débloque la contribution open-source et supprime le signal « projet bricolé ».</span></div><div class="t-ref">F6/F7 · effort S</div></li>
+      <li><div class="t-txt"><b>Choisir UN nom + UN whitepaper canonique</b><span>Aujourd'hui un lecteur ne peut pas dire ce qu'est le produit ni comment il s'appelle.</span></div><div class="t-ref">F3/F4 · effort M</div></li>
+      <li><div class="t-txt"><b>Forcer la sauvegarde de la clé de récupération</b><span>Sur le parcours Welcome, l'utilisateur peut entrer sans jamais sauvegarder sa clé maître.</span></div><div class="t-ref">E1 · effort S</div></li>
+    </ol>
+  </section>
+
+  <!-- ====================== MÉTHODO ====================== -->
+  <section id="methodo">
+    <div class="sec-h"><span class="n">02</span><h2>Méthodologie &amp; périmètre</h2></div>
+    <p class="sec-sub">Comment lire ce rapport, et la limite de ce qui a été audité.</p>
+    <div class="fbody" style="display:block;border:0;padding:0">
+      <div class="row"><div class="k">Périmètre</div><div class="v">Audit 360° à <code>4d98fed</code> (branche <code>feat/v3.3-production</code>) : backend Rust (<code>src-tauri/src</code>, 18 874 l.), frontend Svelte (<code>src</code>, 7 819 l.), configuration prod, dépôt, docs publiques (README, 2 whitepapers).</div></div>
+      <div class="row"><div class="k">Méthode</div><div class="v">Lecture ciblée des modules critiques (pipeline gossip, ledger, consensus PoS, crypto, dev-API, app-shell), mesures reproductibles (<code>rg</code>, <code>wc</code>, <code>git</code>), recoupement <b>code ↔ docs</b> pour détecter les écarts de discours. Chaque finding cite une preuve <code>fichier:ligne</code>.</div></div>
+      <div class="row"><div class="k">Notes &amp; sévérité</div><div class="v">Les scores sont une <b>évaluation d'expert</b>, pas une métrique automatique. Sévérité = impact sur la qualité/perception « pro ». Effort : <b>S</b> = heures, <b>M</b> = jours, <b>L</b> = semaines. Les <span style="color:var(--positif)">findings positifs</span> sont inclus volontairement pour un diagnostic honnête.</div></div>
+      <div class="row"><div class="k">Transparence d'une correction</div><div class="v">Une première passe brute comptait « ~238 <code>unwrap</code> ». Re-mesuré proprement (hors modules <code>#[cfg(test)]</code>), le chiffre réel en production est <b>≈5</b>, tous bénins. Ce rapport reflète la réalité, pas la première impression.</div></div>
+      <div class="row"><div class="k">Hors périmètre</div><div class="v">Pas de test de pénétration réseau live, pas d'audit cryptographique formel, pas de revue exhaustive des 70 commandes. Les angles morts sont signalés comme tels (ex. D1).</div></div>
+    </div>
+  </section>
+
+  <!-- ====================== FINDINGS ====================== -->
+  <section id="findings">
+    <div class="sec-h"><span class="n">03</span><h2>Findings détaillés</h2></div>
+    <p class="sec-sub">31 constats (7 positifs · 24 actionnables) répartis en 7 domaines. Filtrez par sévérité, cochez ce qui est traité (sauvegardé localement dans ce navigateur).</p>
+
+    <div class="toolbar">
+      <div class="wrap">
+        <div class="chips" id="sevChips">
+          <span class="chip" data-sev="critique" aria-pressed="true"><span class="sw"></span>Critique</span>
+          <span class="chip" data-sev="eleve" aria-pressed="true"><span class="sw"></span>Élevé</span>
+          <span class="chip" data-sev="moyen" aria-pressed="true"><span class="sw"></span>Moyen</span>
+          <span class="chip" data-sev="faible" aria-pressed="true"><span class="sw"></span>Faible</span>
+          <span class="chip" data-sev="positif" aria-pressed="true"><span class="sw"></span>Positif</span>
+        </div>
+        <select id="domSel">
+          <option value="all">Tous domaines</option>
+          <option value="A">A · Architecture</option>
+          <option value="B">B · Sécurité</option>
+          <option value="C">C · Robustesse</option>
+          <option value="D">D · Réseau P2P</option>
+          <option value="E">E · Produit/UX</option>
+          <option value="F">F · Crédibilité</option>
+          <option value="G">G · Prod-readiness</option>
+        </select>
+        <input type="search" id="search" placeholder="Rechercher…">
+        <button class="btn" id="expandAll">Tout ouvrir</button>
+        <button class="btn" id="printBtn" onclick="window.print()">Imprimer</button>
+        <div class="prog"><span id="progTxt">0/0</span><div class="pbar"><i id="progFill"></i></div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN A -->
+    <div class="dom-h"><span class="dl">A</span><h3>Architecture &amp; qualité de code</h3><span class="ct">1 positif · 2 axes</span></div>
+
+    <div class="find" data-sev="positif" data-dom="A">
+      <div class="fh"><span class="fid">A0</span><span class="sev positif">Positif</span><span class="fh-title">Backend modulaire et discipliné</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Le backend P2P est découpé en ~25 modules à responsabilité unique (<code>ledger</code>, <code>pos_consensus</code>, <code>dispatcher</code>, <code>gossip</code>, <code>domains</code>, <code>social</code>, <code>forums</code>, <code>moderation</code>, <code>trust_graph</code>…). <b>0 <code>unsafe</code></b>, <b>0 TODO/FIXME</b>, TypeScript sur tous les composants Svelte.</div></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">C'est la fondation qui rend tout le reste réparable rapidement. À préserver lors des refactors ci-dessous.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="A">
+      <div class="fh"><span class="fid">A1</span><span class="sev moyen">Moyen</span><span class="fh-title">Fichiers monolithiques (jusqu'à 3 113 lignes)</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="A1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Plusieurs fichiers dépassent largement le seuil de maintenabilité.</div>
+          <pre class="ev"><span class="fl">src/lib/PageBuilder.svelte</span>        3113 lignes
+<span class="fl">src-tauri/src/p2p/dispatcher.rs</span>   1455 lignes
+<span class="fl">src-tauri/src/p2p/ledger.rs</span>       1380 lignes
+<span class="fl">src-tauri/src/commands_v3.rs</span>      1365 lignes
+<span class="fl">src-tauri/src/p2p/search.rs</span>       1015 lignes
+<span class="fl">src-tauri/src/lib.rs</span>               936 lignes</pre></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Difficiles à tester unitairement, à relire et à modifier sans régression. Un fichier qui grossit est le symptôme qu'il fait trop de choses.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Découper par responsabilité : <code>PageBuilder</code> → (palette de blocs / rendu / toolbar / thèmes) ; <code>dispatcher</code> → (garde-fous / handlers par famille de message) ; <code>commands_v3</code> → modules de commandes par domaine. Cible : &lt; 500 l./fichier.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="faible" data-dom="A">
+      <div class="fh"><span class="fid">A2</span><span class="sev faible">Faible</span><span class="fh-title">70 commandes derrière un seul <code>generate_handler!</code></span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="A2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Les 70 <code>#[tauri::command]</code> sont enregistrées en bloc dans <code>lib.rs</code> (936 l.). Surface IPC très large, peu hiérarchisée.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Lisibilité et revue de la surface d'attaque IPC dégradées ; difficile de savoir d'un coup d'œil ce qui est exposé au frontend.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Regrouper les commandes par domaine (façade <code>commands/{wallet,sites,social,network}.rs</code>) et documenter la liste exposée. Pas urgent, mais clarifie la frontière app↔cœur.</div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN B -->
+    <div class="dom-h"><span class="dl">B</span><h3>Sécurité &amp; cryptographie</h3><span class="ct">2 positifs · 4 axes</span></div>
+
+    <div class="find" data-sev="positif" data-dom="B">
+      <div class="fh"><span class="fid">B0a</span><span class="sev positif">Positif</span><span class="fh-title">Pipeline de réception P2P complet &amp; signé</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Chaque enveloppe entrante traverse 8 garde-fous avant traitement.</div>
+          <pre class="ev"><span class="cm">// dispatcher.rs : dispatch_incoming()</span>
+<span class="fl">:225</span>  taille max 10 Mo
+<span class="fl">:243</span>  ban check (par pair)
+<span class="fl">:245</span>  dedup (seen_messages LRU)
+<span class="fl">:278</span>  fraîcheur timestamp (±90 s)
+<span class="fl">:289</span>  rate-limit adaptatif
+<span class="fl">:304</span>  nonce monotone par sender
+<span class="fl">:318</span>  Ed25519 (canonique STRUCT-1)</pre></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">C'est exactement la défense en profondeur attendue d'un protocole P2P sérieux. Verify-before-process correctement implémenté.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="positif" data-dom="B">
+      <div class="fh"><span class="fid">B0b</span><span class="sev positif">Positif</span><span class="fh-title">Primitives crypto à l'état de l'art + gestion des secrets</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Ed25519 (ed25519-dalek 2.2), AES-256-GCM, Argon2id (64 Mo), BLAKE3. Les secrets sont effacés : <code>plaintext.zeroize()</code> après chiffrement (<code>cipher.rs:45</code>), <code>sk_bytes.zeroize()</code> (<code>pq_vault.rs:85</code>), <code>SecureBuffer</code> <code>#[derive(Zeroize, ZeroizeOnDrop)]</code> (<code>mod.rs:111</code>).</div></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">Conforme aux propres règles du projet (zeroize, Ed25519 partout). Rien à corriger ici — c'est un argument de vente réel, à condition de ne pas le survendre (cf. B1).</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="B">
+      <div class="fh"><span class="fid">B1</span><span class="sev eleve">Élevé</span><span class="fh-title">Post-quantique annoncé partout, désactivé dans le code</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="B1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">La couche ML-DSA-65 est un stub explicite. Le <b>code est honnête</b> ; ce sont les docs qui ne le sont pas (cf. F2).</div>
+          <pre class="ev"><span class="cm">// hybrid_crypto.rs</span>
+<span class="fl">:51</span>  const ML_DSA_AVAILABLE: bool = false;
+<span class="fl">:93</span>  sign() → quantum: Vec::new()   <span class="cm">// jamais de signature PQ</span>
+<span class="fl">:180</span> verify_ml_dsa() → false        <span class="cm">// seconde ceinture</span></pre></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Aucun risque <i>technique</i> (fallback Ed25519 propre, testé). Mais risque <b>réputationnel</b> majeur : en crypto, annoncer une protection inexistante détruit la confiance dès qu'un expert lit le code.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Décider explicitement : soit <b>(a)</b> activer ML-DSA quand <code>ml-dsa ≥ 0.2</code> sera compatible (et arbitrer OR vs AND), soit <b>(b)</b> requalifier tout le discours externe en « post-quantum-<i>ready</i> » (roadmap). Tant que (a) n'est pas fait, faire (b) immédiatement.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="B">
+      <div class="fh"><span class="fid">B2</span><span class="sev moyen">Moyen</span><span class="fh-title">Anti-Sybil réel ≠ anti-Sybil documenté</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="B2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Le README décrit des « <b>S/Kademlia crypto puzzles</b> (~500 ms CPU pour rejoindre) ». La réalité (<code>sybil.rs:1</code>) est un <b>Proof-of-Contribution</b> : score <code>uptime×0.35 + énergie×0.30 + stake×0.25 + ancienneté×0.10</code> qui pondère le mining — pas un puzzle d'admission.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Mécanisme légitime, mais <b>différent et plus faible</b> comme défense Sybil que ce qui est annoncé. Un attaquant ne « paie » pas à l'entrée ; il accumule un score dans le temps.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Aligner la doc sur le mécanisme réel (PoC économique), et — si la résistance Sybil est un argument central — ajouter un vrai coût d'admission (puzzle BLAKE3 ou stake minimal vérifié au join).</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="faible" data-dom="B">
+      <div class="fh"><span class="fid">B3</span><span class="sev faible">Faible</span><span class="fh-title">Contournement de l'anti-replay pour <code>nonce == 0</code></span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="B3"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>dispatcher.rs:304</code> — la vérification monotone du nonce est sautée si <code>nonce == 0</code> (compatibilité messages legacy). Le dedup par ID + la fraîcheur ±90 s compensent partiellement.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Fenêtre de rejeu théorique réduite mais non nulle pour des messages forgés à <code>nonce=0</code> dans la fenêtre de fraîcheur.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Une fois la migration de protocole terminée (tous les pairs émettent un nonce &gt; 0), rejeter <code>nonce == 0</code>. Documenter la date de bascule.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="faible" data-dom="B">
+      <div class="fh"><span class="fid">B4</span><span class="sev faible">Faible</span><span class="fh-title">Auth dev-API fragile sur token vide</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="B4"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>dev_api.rs:371</code> : <code>ensure_token().unwrap_or_default()</code> → token vide si la lecture disque échoue. La comparaison <code>h.trim() == "Bearer {token}"</code> ne tient alors que par un espace en fin de chaîne (échoue « par chance »).</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Faible : l'API est loopback (<code>127.0.0.1:7654</code>, <code>is_loopback()</code> en double-vérification) et désactivée par défaut. Mais une auth qui dépend d'un détail accidentel est à proscrire.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Si le token est vide/illisible → <b>refuser toutes</b> les requêtes (fail-closed explicite), au lieu de comparer une chaîne dégradée.</div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN C -->
+    <div class="dom-h"><span class="dl">C</span><h3>Robustesse &amp; fiabilité</h3><span class="ct">1 positif · 2 axes</span></div>
+
+    <div class="find" data-sev="positif" data-dom="C">
+      <div class="fh"><span class="fid">C0</span><span class="sev positif">Positif</span><span class="fh-title">La règle « Zéro unwrap » est quasi tenue</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Sur 286 occurrences brutes de <code>unwrap/expect/panic</code>, <b>~98 % sont dans des modules <code>#[cfg(test)]</code></b>. En production réelle : <b>≈5</b>, toutes bénignes — <code>SystemTime</code> via <code>unwrap_or_default()</code> (pattern sûr), <code>chain.last().unwrap()</code> sur un vecteur prouvé non-vide (genesis), <code>eligible.last().unwrap()</code> après garde <code>Some(..)</code>.</div></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">Contredit la perception initiale d'un code « truffé d'unwrap ». L'idiome <code>Result&lt;T,E&gt; + ?</code> est réellement appliqué. Argument de qualité solide.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="C">
+      <div class="fh"><span class="fid">C1</span><span class="sev moyen">Moyen</span><span class="fh-title">Pas de fuzzing des parseurs réseau</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="C1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">proptest couvre des invariants (Shapley, overflow ledger), mais les <b>surfaces d'entrée non fiables</b> ne sont pas fuzzées : désérialisation <code>GossipEnvelope</code> (JSON depuis le réseau) et le parseur HTTP maison de la dev-API.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Un parseur écrit à la main sur entrée adverse est la source classique de paniques/DoS. C'est précisément là qu'un crash réseau peut survenir.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v"><code>cargo-fuzz</code> sur <code>dispatch_incoming</code> (bytes → envelope) et sur le parseur HTTP. Objectif : 0 panic sur entrée arbitraire.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="faible" data-dom="C">
+      <div class="fh"><span class="fid">C2</span><span class="sev faible">Faible</span><span class="fh-title">Durcir les 5 <code>unwrap</code> résiduels</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="C2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Ex. <code>ledger.rs:480</code> <code>self.chain.last().unwrap()</code>, <code>pos_consensus.rs:113/153</code>. Invariants vrais aujourd'hui, mais implicites.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Remplacer par <code>?</code> ou <code>.expect("invariant: genesis present")</code> documenté. Coût quasi nul, supprime tout doute lors d'une revue de sécurité.</div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN D -->
+    <div class="dom-h"><span class="dl">D</span><h3>Réseau P2P &amp; consensus</h3><span class="ct">1 positif · 2 axes</span></div>
+
+    <div class="find" data-sev="positif" data-dom="D">
+      <div class="fh"><span class="fid">D0</span><span class="sev positif">Positif</span><span class="fh-title">Protocole riche et durci (NET-1 → NET-16)</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">22 messages gossip, priority queue 4 voies, auto-reconnect, chain-sync parallèle, DAG incrémental, compression, métriques par pair, score qualité, vue topologie 2-hop, heuristique eclipse, rate-limit adaptatif, mempool TTL/cap.</div></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">C'est un niveau de soin réseau rare pour un projet de cette taille. La <i>logique</i> est mûre.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="D">
+      <div class="fh"><span class="fid">D1</span><span class="sev eleve">Élevé</span><span class="fh-title">Convergence prouvée en in-process, pas sur le transport réel</span><span class="eff">effort <b>L</b></span><input class="chk" type="checkbox" data-id="D1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>simulation.rs</code> et <code>integration_tests.rs</code> (INT-1, « 3 nodes reach identical state ») prouvent la convergence <b>logique</b> : des ledgers en mémoire qui s'échangent des blocs <i>par appel de fonction</i>. Le « vérifié entre 2 machines » de la doc est un <b>test manuel unique</b>.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Non testés automatiquement : sérialisation réelle sur le fil (Iroh QUIC), traversée NAT, perte de paquets, churn de pairs, partition, pairs adverses. Or la mission V2 promet « convergence garantie ≤5 s » et « 0 perte » — affirmations non démontrées au niveau transport.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Harness multi-process en CI : spawn de N nœuds <i>réels</i> (vrais endpoints Iroh) sur la même machine, assertions de convergence, injection de fautes (kill/restart/latence). C'est l'investissement n°1 pour transformer « ça a marché une fois » en « c'est prouvé robuste ».</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="D">
+      <div class="fh"><span class="fid">D2</span><span class="sev moyen">Moyen</span><span class="fh-title">Résilience aux partitions non démontrée</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="D2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">La découverte/bootstrap et le comportement en cas de partition réseau (split-brain, re-merge de chaînes divergentes après reconnexion prolongée) ne sont pas couverts par des tests ni documentés comme garantie.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Documenter la stratégie de discovery (relays, bootstrap nodes), et ajouter un scénario de test « partition puis re-merge » s'appuyant sur le harness D1. Préciser la garantie réelle (convergence éventuelle, pas instantanée).</div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN E -->
+    <div class="dom-h"><span class="dl">E</span><h3>Produit &amp; UX/UI</h3><span class="ct">1 positif · 4 axes</span></div>
+
+    <div class="find" data-sev="positif" data-dom="E">
+      <div class="fh"><span class="fid">E0</span><span class="sev positif">Positif</span><span class="fh-title">Onboarding &amp; sécurité UX soignés</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Wizard create/unlock/recovery/confirm chiffré, <code>StrengthMeter</code>, auto-lock après inactivité (<code>+page.svelte:64-84</code>), navigation Cmd+K et 1-5, thèmes persistés, 48 attributs <code>aria-/role</code>, <b>0 <code>alert()</code></b>, 62 blocs <code>try/catch</code> autour des appels backend.</div></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">L'app a déjà une vraie maturité d'expérience. Le socle UX est bon — il faut le rendre cohérent et global (ci-dessous).</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="E">
+      <div class="fh"><span class="fid">E1</span><span class="sev eleve">Élevé</span><span class="fh-title">Clé de récupération non forcée sur le parcours principal</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="E1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Le flux <code>Welcome.onCreated</code> entre directement dans l'app — commentaire assumé dans le code :</div>
+          <pre class="ev"><span class="cm">// +page.svelte:155</span>
+<span class="cm">// Skip the forced recovery screen — go straight to the app.</span>
+ready = true;</pre>
+          <div class="v">Le parcours <code>create</code> classique, lui, <b>force</b> l'écran de sauvegarde + vérification du dernier bloc. Incohérence entre les deux chemins de création.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Un nouvel utilisateur peut entrer <b>sans jamais sauvegarder sa clé maître</b> — alors que l'UI elle-même prévient « <i>Si vous la perdez, personne ne pourra récupérer votre compte</i> ». Perte d'identité/fonds irréversible. Pour un produit crypto, c'est un défaut de sûreté, pas un détail UX.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Rendre l'affichage + la vérification de la clé <b>obligatoires sur tous les chemins de création</b> (y compris Welcome). Aucune entrée dans l'app sans confirmation de sauvegarde.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="E">
+      <div class="fh"><span class="fid">E2</span><span class="sev moyen">Moyen</span><span class="fh-title">Français figé en dur, zéro i18n</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="E2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Tout le texte d'interface est codé en dur en français ; aucune couche i18n, aucun sélecteur de langue.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Incompatible avec une ambition « google web3 » mondiale. Barrière d'adoption immédiate hors francophonie.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Extraire les chaînes vers un dictionnaire (clé → texte), i18n minimal <code>fr/en</code> avec détection système. Pas besoin de framework lourd ; une petite store Svelte suffit.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="E">
+      <div class="fh"><span class="fid">E3</span><span class="sev moyen">Moyen</span><span class="fh-title">PageBuilder monolithique (3 113 l.)</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="E3"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Le builder no-code (20 types de blocs, 5 thèmes, 5 templates, undo/redo, preview responsive) tient dans un seul fichier de 3 113 lignes.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Le composant le plus précieux du produit (« créer un site en 1 clic ») est aussi le plus risqué à faire évoluer. Chaque nouvelle feature accroît la dette.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Extraire : registre de blocs, rendu de bloc, toolbar, gestion thèmes/templates, store d'historique. Tester les blocs isolément.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="E">
+      <div class="fh"><span class="fid">E4</span><span class="sev moyen">Moyen</span><span class="fh-title">Surface backend &gt;&gt; profondeur produit</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="E4"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">70 commandes backend exposent forums, marketplace compute, modération par jury VRF, trust graph, domaines .torus… La maturité UX de ces surfaces est très inégale par rapport au cœur (wallet, builder, browser).</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Risque de « 10 demi-fonctionnalités » au lieu de 2-3 parcours excellents. Un produit perçu comme pro fait <b>peu de choses, parfaitement</b>.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Choisir 2-3 parcours « héros » (ex. <i>publier un site .torus</i>, <i>miner/recevoir des QUANTA</i>, <i>chercher/naviguer le web P2P</i>), les polir à fond, et marquer le reste comme « expérimental » dans l'UI plutôt que de l'exposer au même niveau.</div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN F -->
+    <div class="dom-h"><span class="dl">F</span><h3>Crédibilité &amp; positionnement</h3><span class="ct">le domaine le plus faible · 7 axes</span></div>
+
+    <div class="find" data-sev="critique" data-dom="F">
+      <div class="fh"><span class="fid">F1</span><span class="sev critique">Critique</span><span class="fh-title">Le README décrit un autre produit</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="F1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Le README (« v4 Quanta ») ne correspond pas au code réel.</div>
+          <pre class="ev"><span class="cm">README dit</span>            →   <span class="cm">réalité du code</span>
+« 15 Commandes Tauri »  →   70 commandes
+Editor / Lightning /    →   PageBuilder no-code, ledger PoS,
+Willow / indexer.rs         forums, social, domaines, modération
+« Version 0.4.0 »       →   Cargo 1.0.0 / tauri.conf 1.0.1
+Wallet « LDK-ready »    →   aucun Lightning dans le code</pre>
+          <div class="v">Aucune mention dans le README de : consensus PoS, blockchain QUANTA, mining, burn-and-mint, forums, social, .torus, modération, les 22 messages gossip, NET-1→16.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">C'est le <b>premier document</b> que lit un développeur, un investisseur ou un journaliste. Aujourd'hui il est faux — il dévalue un code qui mérite mieux et détruit la crédibilité dès la première lecture.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Réécrire le README sur le produit réel : pitch en une phrase, capture d'écran, les 3 capacités (créer/miner/échanger), architecture réelle, démarrage, statut honnête des features (livré / beta / roadmap).</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="F">
+      <div class="fh"><span class="fid">F2</span><span class="sev eleve">Élevé</span><span class="fh-title">Surpromesse « Defense-Grade Post-Quantum »</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="F2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>README.md:3</code> titre « Defense-Grade Post-Quantum Web » ; matrice de sécurité avec « Quantique ✓ » sur Ed25519, BLAKE3, AES, Argon2, QUIC, Willow. Or ML-DSA est <code>false</code> dans le code (cf. B1).</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">En cryptographie, ce type de claim non tenu est le plus toxique : il transforme un bon travail en « projet qui ment ». Risque réputationnel et potentiellement juridique selon la communication.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Remplacer par « post-quantum-<b>ready</b> (Ed25519 aujourd'hui, ML-DSA-65 prévu) ». Retirer les « Quantique ✓ » trompeurs. La crypto réelle (zeroize, Argon2id, AES-GCM) est déjà un excellent argument <i>vrai</i>.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="F">
+      <div class="fh"><span class="fid">F3</span><span class="sev eleve">Élevé</span><span class="fh-title">Marque éclatée en 5 noms</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="F3"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Le même projet s'appelle simultanément :</div>
+          <pre class="ev"><span class="fl">Torus</span>                 <span class="cm">dossier, branche, repo, whitepaper FR</span>
+<span class="fl">Quanta / QUANTA</span>       <span class="cm">Cargo (quanta-protocol), README, coin</span>
+<span class="fl">Sovereign Web Engine</span>  <span class="cm">commits, identifiant com.sovereign.webengine</span>
+<span class="fl">SOVA Protocol</span>         <span class="cm">commit V2.0</span>
+<span class="fl">Willow Protocol</span>       <span class="cm">README (transport)</span></pre></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Impossible pour un tiers de savoir ce qu'est le produit, comment le citer, quoi taper dans un moteur de recherche. C'est rédhibitoire pour un positionnement « révolutionnaire ».</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Choisir <b>UN</b> nom de produit (+ éventuellement un nom de coin distinct, ex. produit « Torus », coin « QUANTA »). L'appliquer partout : repo, <code>Cargo.toml</code>, identifiant Tauri, README, whitepaper, UI, copyright.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="F">
+      <div class="fh"><span class="fid">F4</span><span class="sev eleve">Élevé</span><span class="fh-title">Deux whitepapers = deux produits</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="F4"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>WHITEPAPER.md</code> (EN) : « <b>QUANTA</b> — The World's Computational Energy Protocol… energy into value for science. <b>V2.0, avril</b> ». <code>WHITEPAPER_FR.md</code> : « <b>Torus</b> — Le Web P2P récompensé… créer/modérer rapporte des QUANTA. <b>V3, mai</b> ». Noms, versions <i>et</i> thèses différents.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Deux promesses de valeur incompatibles (calcul-pour-la-science vs web-social-récompensé). Le lecteur ne sait pas quelle est la vision.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">UN whitepaper canonique, UNE thèse, versionné, puis sa traduction. Trancher : Torus est-il un « web P2P souverain » ou un « protocole d'énergie computationnelle » ? (Les deux peuvent coexister, mais une seule doit être <i>la</i> proposition de tête.)</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="F">
+      <div class="fh"><span class="fid">F5</span><span class="sev eleve">Élevé</span><span class="fh-title">Aucune LICENSE (alors que MIT est déclaré)</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="F5"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>package.json:18</code> déclare <code>"license": "MIT"</code> mais <b>aucun fichier LICENSE</b> n'existe à la racine.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Juridiquement, « pas de fichier de licence = tous droits réservés » par défaut. Personne ne peut légalement forker, contribuer ou redistribuer — ce qui <b>contredit frontalement</b> le positionnement « souverain / open / P2P ».</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Ajouter un fichier <code>LICENSE</code> (MIT, ou Apache-2.0, ou AGPL selon la stratégie). Décider en connaissance de cause : MIT = adoption maximale ; AGPL = protection contre l'appropriation propriétaire.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="F">
+      <div class="fh"><span class="fid">F6</span><span class="sev moyen">Moyen</span><span class="fh-title"><code>package.json</code> = scaffold par défaut</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="F6"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div>
+          <pre class="ev"><span class="cm">// package.json</span>
+"name": <span class="fl">"tauri-app"</span>,   <span class="cm">// ← nom du template Tauri jamais changé</span>
+"version": "0.1.0",
+"description": <span class="fl">""</span>,    <span class="cm">// ← vide</span></pre></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Signal immédiat « projet bricolé / abandonné en cours ». C'est la première chose que voit un outil d'analyse ou un dev qui clone.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Renseigner <code>name</code>, <code>description</code>, <code>repository</code>, <code>homepage</code>, <code>keywords</code>, <code>author</code>. 10 minutes, gros effet de sérieux.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="F">
+      <div class="fh"><span class="fid">F7</span><span class="sev moyen">Moyen</span><span class="fh-title">Chaos de versions (4 numéros différents)</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="F7"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div>
+          <pre class="ev"><span class="fl">package.json</span>     0.1.0
+<span class="fl">README.md</span>        0.4.0
+<span class="fl">Cargo.toml</span>       1.0.0
+<span class="fl">tauri.conf.json</span>  1.0.1
+<span class="fl">CLAUDE.md</span>        V2.0 / v3.3
+<span class="cm">git tags</span>         (aucun)</pre></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Impossible de savoir quelle version est « la » version. L'updater OTA s'appuie pourtant sur la version de <code>tauri.conf.json</code> — un décalage peut casser la logique de mise à jour.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Source de vérité unique (ex. <code>tauri.conf.json</code>), script de release qui synchronise les autres fichiers, et <b>tag git</b> à chaque release (<code>vX.Y.Z</code>) + CHANGELOG.</div></div>
+      </div>
+    </div>
+
+    <!-- DOMAIN G -->
+    <div class="dom-h"><span class="dl">G</span><h3>Prod-readiness</h3><span class="ct">1 positif · 3 axes</span></div>
+
+    <div class="find" data-sev="positif" data-dom="G">
+      <div class="fh"><span class="fid">G0</span><span class="sev positif">Positif</span><span class="fh-title">Updater OTA réellement configuré</span><span class="eff">—</span><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v"><code>tauri.conf.json</code> : <code>createUpdaterArtifacts: true</code>, plugin updater avec <b>clé publique minisign réelle</b> + endpoints. CI présente (<code>cargo check/test/clippy -D warnings</code> + <code>npm build</code>).</div></div>
+        <div class="row"><div class="k">Pourquoi ça compte</div><div class="v">La mise à jour signée est un vrai mécanisme de prod, déjà en place. Il manque juste de quoi l'<i>alimenter</i> (cf. G1).</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="G">
+      <div class="fh"><span class="fid">G1</span><span class="sev eleve">Élevé</span><span class="fh-title">Pas de pipeline de build/release/signature</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="G1"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Workflows présents : <code>ci.yml</code>, <code>claude-review.yml</code>. <b>Aucun workflow de release.</b> L'updater attend des artefacts GitHub Release signés, mais rien ne les construit/signe automatiquement → releases faites <b>à la main sur le Mac du dev</b>.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Non reproductible, non auditable, bus-factor 1. Une release ratée ou non signée casse l'auto-update de tous les utilisateurs.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Workflow GitHub Actions sur tag <code>v*</code> : <code>tauri build</code> multi-cible (macOS arm64/x64, Windows, Linux), signature des artefacts updater (clé minisign en secret CI), publication automatique de la Release. <code>tauri-action</code> fait l'essentiel.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="eleve" data-dom="G">
+      <div class="fh"><span class="fid">G2</span><span class="sev eleve">Élevé</span><span class="fh-title">App non signée / non notarisée (macOS)</span><span class="eff">effort <b>M</b></span><input class="chk" type="checkbox" data-id="G2"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">Aucune config de signature/notarisation macOS dans <code>tauri.conf.json</code> (pas de <code>signingIdentity</code>, <code>hardenedRuntime</code>, notarisation). La doc demande explicitement <code>xattr -cr /Applications/Quanta.app</code> pour contourner Gatekeeper.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Expérience d'installation effrayante (« app endommagée / développeur non identifié »), incompatible avec une distribution grand public. Signal « non-pro » fort.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Apple Developer ID + hardened runtime + notarisation (intégrable au workflow G1). Équivalents : signature Authenticode (Windows). Objectif : double-clic → ça s'ouvre, sans terminal.</div></div>
+      </div>
+    </div>
+
+    <div class="find" data-sev="moyen" data-dom="G">
+      <div class="fh"><span class="fid">G3</span><span class="sev moyen">Moyen</span><span class="fh-title">Hygiène de branches &amp; tags</span><span class="eff">effort <b>S</b></span><input class="chk" type="checkbox" data-id="G3"><span class="caret">▶</span></div>
+      <div class="fbody">
+        <div class="row"><div class="k">Constat</div><div class="v">3 branches divergentes (<code>master</code>, <code>feat/v3.3-production</code>, <code>net/message-prioritization</code>), <b>0 tag</b> malgré un commit « v1.0 — Sovereign Web Engine » et une « Release DMG » annoncée. 22 commits au total.</div></div>
+        <div class="row"><div class="k">Impact</div><div class="v">Difficile de savoir quelle branche est la vérité, et impossible de retrouver/installer « la v1.0 » précise.</div></div>
+        <div class="row reco"><div class="k">Recommandation</div><div class="v">Définir la branche par défaut (<code>main</code>), merger/archiver les autres, tagger les releases passées et futures, ajouter un <code>CHANGELOG.md</code>.</div></div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ====================== ROADMAP ====================== -->
+  <section id="roadmap">
+    <div class="sec-h"><span class="n">04</span><h2>Feuille de route priorisée</h2></div>
+    <p class="sec-sub">Quoi faire, dans quel ordre. La règle : d'abord ce qui a le plus fort ratio impact/effort.</p>
+
+    <h3 style="font-size:16px;margin:6px 0 4px">Matrice Impact × Effort</h3>
+    <div class="matrix">
+      <div></div>
+      <div class="hd">Effort S (heures)</div>
+      <div class="hd">Effort M (jours)</div>
+      <div class="hd">Effort L (semaines)</div>
+
+      <div class="yl">Impact fort</div>
+      <div class="cell hot">
+        <span class="tag e">F2</span><span class="tag e">F5</span><span class="tag e">E1</span><span class="tag e">B1</span>
+      </div>
+      <div class="cell hot">
+        <span class="tag c">F1</span><span class="tag e">F3</span><span class="tag e">F4</span><span class="tag e">G1</span><span class="tag e">G2</span>
+      </div>
+      <div class="cell">
+        <span class="tag e">D1</span>
+      </div>
+
+      <div class="yl">Impact moyen</div>
+      <div class="cell warm">
+        <span class="tag">F6</span><span class="tag">F7</span><span class="tag">B2</span><span class="tag">G3</span>
+      </div>
+      <div class="cell warm">
+        <span class="tag">A1</span><span class="tag">E2</span><span class="tag">E3</span><span class="tag">E4</span><span class="tag">C1</span><span class="tag">D2</span>
+      </div>
+      <div class="cell"></div>
+
+      <div class="yl">Impact faible</div>
+      <div class="cell">
+        <span class="tag">A2</span><span class="tag">B3</span><span class="tag">B4</span><span class="tag">C2</span>
+      </div>
+      <div class="cell"></div>
+      <div class="cell"></div>
+    </div>
+    <p class="legend-mx">▦ Zone verte = à faire en premier (fort impact, effort raisonnable). <span class="tag c" style="display:inline-block">F1</span> en rouge = seul finding critique.</p>
+
+    <div class="phase">
+      <div class="ph-h"><span class="pno">P0</span><h4>Hygiène &amp; crédibilité</h4><span class="when">~1 semaine · surtout effort S</span></div>
+      <ul class="tasks">
+        <li><input type="checkbox" data-id="P0-1"><span>Réécrire le README sur le produit réel (3 capacités, archi réelle, statut honnête des features)</span><span class="rf">F1</span></li>
+        <li><input type="checkbox" data-id="P0-2"><span>Requalifier toutes les promesses « post-quantum » en « post-quantum-ready (roadmap) »</span><span class="rf">F2 · B1</span></li>
+        <li><input type="checkbox" data-id="P0-3"><span>Ajouter un fichier LICENSE (trancher MIT / Apache-2.0 / AGPL)</span><span class="rf">F5</span></li>
+        <li><input type="checkbox" data-id="P0-4"><span>Corriger <code>package.json</code> (name, description, repository, keywords)</span><span class="rf">F6</span></li>
+        <li><input type="checkbox" data-id="P0-5"><span>Unifier les versions + tagger les releases (source de vérité unique)</span><span class="rf">F7 · G3</span></li>
+        <li><input type="checkbox" data-id="P0-6"><span>Forcer la sauvegarde + vérification de la clé de récupération sur tous les parcours</span><span class="rf">E1</span></li>
+        <li><input type="checkbox" data-id="P0-7"><span>Choisir UN nom produit + UN whitepaper canonique</span><span class="rf">F3 · F4</span></li>
+        <li><input type="checkbox" data-id="P0-8"><span>Dev-API : fail-closed si token vide ; aligner doc anti-Sybil sur le mécanisme réel</span><span class="rf">B4 · B2</span></li>
+      </ul>
+    </div>
+
+    <div class="phase">
+      <div class="ph-h"><span class="pno">P1</span><h4>Robustesse &amp; sécurité</h4><span class="when">~3-5 semaines</span></div>
+      <ul class="tasks">
+        <li><input type="checkbox" data-id="P1-1"><span>Harness réseau multi-process en CI (N nœuds Iroh réels + injection de fautes)</span><span class="rf">D1</span></li>
+        <li><input type="checkbox" data-id="P1-2"><span>Workflow GitHub Actions de build/release/signature sur tag <code>v*</code></span><span class="rf">G1</span></li>
+        <li><input type="checkbox" data-id="P1-3"><span>Signature + notarisation macOS (et Authenticode Windows)</span><span class="rf">G2</span></li>
+        <li><input type="checkbox" data-id="P1-4"><span>Fuzzing des parseurs (<code>dispatch_incoming</code>, HTTP dev-API) via cargo-fuzz</span><span class="rf">C1</span></li>
+        <li><input type="checkbox" data-id="P1-5"><span>Scénario de test « partition puis re-merge » ; documenter la garantie de convergence réelle</span><span class="rf">D2</span></li>
+        <li><input type="checkbox" data-id="P1-6"><span>Décision ferme post-quantique : activer ML-DSA OU figer définitivement le discours « ready »</span><span class="rf">B1</span></li>
+        <li><input type="checkbox" data-id="P1-7"><span>Durcir nonce==0 + les 5 unwrap résiduels</span><span class="rf">B3 · C2</span></li>
+      </ul>
+    </div>
+
+    <div class="phase">
+      <div class="ph-h"><span class="pno">P2</span><h4>Produit &amp; polish</h4><span class="when">~4-6 semaines</span></div>
+      <ul class="tasks">
+        <li><input type="checkbox" data-id="P2-1"><span>i18n minimal fr/en + détection système</span><span class="rf">E2</span></li>
+        <li><input type="checkbox" data-id="P2-2"><span>Découper PageBuilder.svelte (registre blocs / rendu / toolbar / thèmes / historique)</span><span class="rf">E3</span></li>
+        <li><input type="checkbox" data-id="P2-3"><span>Refactor des autres gros fichiers backend (&lt; 500 l./fichier)</span><span class="rf">A1</span></li>
+        <li><input type="checkbox" data-id="P2-4"><span>Choisir 2-3 parcours « héros », les polir ; marquer le reste « expérimental »</span><span class="rf">E4</span></li>
+        <li><input type="checkbox" data-id="P2-5"><span>Whitepaper unique finalisé + traduction</span><span class="rf">F4</span></li>
+        <li><input type="checkbox" data-id="P2-6"><span>Rebrand complet appliqué partout (repo, Cargo, id Tauri, UI, copyright)</span><span class="rf">F3</span></li>
+        <li><input type="checkbox" data-id="P2-7"><span>Façade de commandes IPC par domaine + doc de la surface exposée</span><span class="rf">A2</span></li>
+      </ul>
+    </div>
+
+    <div class="phase">
+      <div class="ph-h"><span class="pno">P3</span><h4>Scale &amp; différenciation</h4><span class="when">trimestriel</span></div>
+      <ul class="tasks">
+        <li><input type="checkbox" data-id="P3-1"><span>Cryptographie post-quantique réellement active (ML-KEM-768 + ML-DSA-65)</span><span class="rf">roadmap</span></li>
+        <li><input type="checkbox" data-id="P3-2"><span>Observabilité : métriques réseau exportables + logs structurés</span><span class="rf">prod</span></li>
+        <li><input type="checkbox" data-id="P3-3"><span>Résilience discovery/relais avancée (NAT difficiles, anti-eclipse renforcé)</span><span class="rf">D</span></li>
+        <li><input type="checkbox" data-id="P3-4"><span>Tenir (ou retirer) les promesses roadmap : ZK, mobile, marketplace compute</span><span class="rf">crédibilité</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ====================== ANNEXE ====================== -->
+  <section id="annexe" style="border-bottom:0">
+    <div class="sec-h"><span class="n">05</span><h2>Annexe — métriques</h2></div>
+    <p class="sec-sub">Chiffres reproductibles relevés à <code>4d98fed</code>.</p>
+    <table class="metrics">
+      <tr><th>Métrique</th><th>Valeur</th><th>Lecture</th></tr>
+      <tr><td>Lignes Rust</td><td class="mono">18 874</td><td>backend dense, ~25 modules p2p</td></tr>
+      <tr><td>Lignes frontend (Svelte+TS)</td><td class="mono">7 819</td><td>19 composants, 100 % TypeScript</td></tr>
+      <tr><td>Tests</td><td class="mono">256</td><td class="ok">élevé pour la taille</td></tr>
+      <tr><td>Commandes Tauri</td><td class="mono">70</td><td class="no">README en annonce 15</td></tr>
+      <tr><td><code>unsafe</code></td><td class="mono">0</td><td class="ok">excellent</td></tr>
+      <tr><td>TODO / FIXME</td><td class="mono">0</td><td class="ok">code propre</td></tr>
+      <tr><td><code>unwrap/expect</code> bruts</td><td class="mono">286</td><td>dont ~98 % en tests</td></tr>
+      <tr><td><code>unwrap</code> en prod réel</td><td class="mono">≈5</td><td class="ok">tous bénins</td></tr>
+      <tr><td>Commits git</td><td class="mono">22</td><td>jeune historique</td></tr>
+      <tr><td>Tags git</td><td class="mono">0</td><td class="no">malgré « v1.0 release »</td></tr>
+      <tr><td>Fichier le plus gros</td><td class="mono">3 113 l.</td><td class="no">PageBuilder.svelte</td></tr>
+      <tr><td>CI</td><td class="mono">check · test · clippy -D · build</td><td class="ok">solide, manque release</td></tr>
+      <tr><td>LICENSE</td><td class="mono">absente</td><td class="no">MIT déclaré sans fichier</td></tr>
+    </table>
+
+    <div class="note">
+      <b>Comment utiliser ce rapport.</b> Les cases cochées (findings &amp; tâches de roadmap) sont mémorisées <b>dans ce navigateur</b> (localStorage) — ouvrez le même fichier pour retrouver votre progression. « Imprimer » génère un PDF propre (tous les findings dépliés). Aucune donnée n'est envoyée nulle part : tout est 100 % local, 0 dépendance, fidèle à l'éthos du projet.
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>Audit 360° · Torus / QUANTA · commit 4d98fed · 2026-05-31</span>
+    <span>Diagnostic technique interne — destiné à l'équipe</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var LS = "torus-audit-v1:";
+
+  // anim jauges
+  window.addEventListener("load", function(){
+    document.querySelectorAll(".bar > i").forEach(function(el){
+      el.style.width = (el.getAttribute("data-w")||0) + "%";
+    });
+  });
+
+  // collapse / expand finding
+  document.querySelectorAll(".find .fh").forEach(function(fh){
+    fh.addEventListener("click", function(e){
+      if(e.target.classList.contains("chk")) return; // ne pas toggle sur la checkbox
+      fh.parentElement.classList.toggle("open");
+    });
+  });
+
+  // checkboxes persistantes (findings + roadmap)
+  function loadChecks(){
+    document.querySelectorAll("input[type=checkbox][data-id]").forEach(function(cb){
+      var k = LS + cb.getAttribute("data-id");
+      if(localStorage.getItem(k) === "1"){
+        cb.checked = true;
+        var card = cb.closest(".find"); if(card) card.classList.add("done");
+        var li = cb.closest("li"); if(li){ var s=li.querySelector("span"); if(s) s.classList.add("done-t"); }
+      }
+      cb.addEventListener("change", function(){
+        localStorage.setItem(k, cb.checked ? "1":"0");
+        var card = cb.closest(".find"); if(card) card.classList.toggle("done", cb.checked);
+        var li = cb.closest("li"); if(li){ var s=li.querySelector("span"); if(s) s.classList.toggle("done-t", cb.checked); }
+        updateProgress();
+      });
+    });
+  }
+
+  function updateProgress(){
+    var all = document.querySelectorAll(".find input[type=checkbox][data-id]");
+    var done = 0; all.forEach(function(c){ if(c.checked) done++; });
+    document.getElementById("progTxt").textContent = done + "/" + all.length;
+    document.getElementById("progFill").style.width = (all.length? (done/all.length*100):0) + "%";
+  }
+
+  // filtres sévérité
+  var activeSev = {critique:1,eleve:1,moyen:1,faible:1,positif:1};
+  document.querySelectorAll("#sevChips .chip").forEach(function(ch){
+    ch.addEventListener("click", function(){
+      var s = ch.getAttribute("data-sev");
+      activeSev[s] = !activeSev[s];
+      ch.setAttribute("aria-pressed", activeSev[s] ? "true":"false");
+      applyFilters();
+    });
+  });
+
+  var domSel = document.getElementById("domSel");
+  var search = document.getElementById("search");
+  domSel.addEventListener("change", applyFilters);
+  search.addEventListener("input", applyFilters);
+
+  function applyFilters(){
+    var dom = domSel.value;
+    var q = (search.value||"").toLowerCase().trim();
+    document.querySelectorAll(".find").forEach(function(f){
+      var sev = f.getAttribute("data-sev");
+      var fdom = f.getAttribute("data-dom");
+      var txt = f.textContent.toLowerCase();
+      var ok = activeSev[sev] && (dom==="all"||fdom===dom) && (!q || txt.indexOf(q)>-1);
+      f.classList.toggle("hidden", !ok);
+    });
+    // masquer les en-têtes de domaine vides
+    document.querySelectorAll(".dom-h").forEach(function(h){
+      var dl = h.querySelector(".dl").textContent;
+      var anyVisible = false;
+      var n = h.nextElementSibling;
+      while(n && n.classList && n.classList.contains("find")){
+        if(!n.classList.contains("hidden")){ anyVisible = true; break; }
+        n = n.nextElementSibling;
+      }
+      h.style.display = (dom==="all"||dom===dl) && anyVisible ? "" : ((dom!=="all"&&dom!==dl)?"none":(anyVisible?"":"none"));
+    });
+  }
+
+  // tout ouvrir / fermer
+  var expanded = false;
+  document.getElementById("expandAll").addEventListener("click", function(){
+    expanded = !expanded;
+    document.querySelectorAll(".find").forEach(function(f){ f.classList.toggle("open", expanded); });
+    this.textContent = expanded ? "Tout fermer" : "Tout ouvrir";
+  });
+
+  loadChecks();
+  updateProgress();
+  applyFilters();
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import StrengthMeter from "./StrengthMeter.svelte";
+  import { t, setLocale, locale } from "./i18n.svelte";
 
   let {
     onCreated = (_pk: string) => {},
@@ -27,11 +28,11 @@
   async function start() {
     err = "";
     if (pass.length < 8) {
-      err = "Mot de passe : minimum 8 caractères";
+      err = t("welcome.errPass");
       return;
     }
     if (showAdvanced && confirmPass !== pass) {
-      err = "Les mots de passe ne correspondent pas";
+      err = t("welcome.errMismatch");
       return;
     }
     loading = true;
@@ -43,7 +44,7 @@
       });
       onCreated(id.public_key_hex);
     } catch (e) {
-      err = (e as Error)?.toString() || "Erreur lors de la création";
+      err = (e as Error)?.toString() || t("welcome.errCreate");
     } finally {
       loading = false;
     }
@@ -57,18 +58,19 @@
 <div class="welcome">
   <div class="w-content">
     <span class="w-logo">QUANTA</span>
-    <h1 class="w-headline">Le Web sans serveur,<br/>la monnaie sans banque.</h1>
-    <p class="w-sub">
-      Publiez · cherchez · récompensez. <br/>
-      Aucun cloud. Aucun intermédiaire. Vous êtes le serveur.
-    </p>
+    <div class="lang-switch">
+      <button type="button" class:active={locale() === "fr"} onclick={() => setLocale("fr")}>FR</button>
+      <button type="button" class:active={locale() === "en"} onclick={() => setLocale("en")}>EN</button>
+    </div>
+    <h1 class="w-headline">{@html t("welcome.headline")}</h1>
+    <p class="w-sub">{@html t("welcome.sub")}</p>
 
     <div class="form">
       <div class="fg">
         <input
           type="password"
           class="big-input"
-          placeholder="Mot de passe (min. 8 caractères)"
+          placeholder={t("welcome.password")}
           bind:value={pass}
           onkeydown={onKey}
           autocomplete="new-password"
@@ -81,7 +83,7 @@
           <input
             type="password"
             class="big-input"
-            placeholder="Confirmer le mot de passe"
+            placeholder={t("welcome.confirm")}
             bind:value={confirmPass}
             onkeydown={onKey}
             autocomplete="new-password"
@@ -91,7 +93,7 @@
           <input
             type="text"
             class="big-input"
-            placeholder="Pseudo (optionnel — auto si vide)"
+            placeholder={t("welcome.pseudo")}
             bind:value={name}
             onkeydown={onKey}
             maxlength="64"
@@ -102,25 +104,22 @@
       {#if err}<div class="err">{err}</div>{/if}
 
       <button class="primary" onclick={start} disabled={loading || pass.length < 8}>
-        {loading ? "Création…" : "Démarrer en 1 clic"}
+        {loading ? t("welcome.creating") : t("welcome.start")}
       </button>
 
       <div class="links">
         {#if !showAdvanced}
           <button class="ghost-link" onclick={() => showAdvanced = true}>
-            Options avancées (pseudo, confirmation)
+            {t("welcome.advanced")}
           </button>
         {/if}
         <button class="ghost-link" onclick={onSwitchToUnlock}>
-          J'ai déjà une identité
+          {t("welcome.haveIdentity")}
         </button>
       </div>
     </div>
 
-    <p class="security-note">
-      Identité chiffrée localement (Argon2id + AES-256-GCM, signature Ed25519).<br/>
-      Vous pourrez sauvegarder votre clé de récupération à tout moment dans <b>Profil → Sauvegarde</b>.
-    </p>
+    <p class="security-note">{@html t("welcome.securityNote")}</p>
   </div>
 </div>
 
@@ -142,8 +141,27 @@
     font-size: 14px; font-weight: 700;
     letter-spacing: 0.15em;
     color: var(--color-text-2);
-    margin-bottom: 24px;
+    margin-bottom: 16px;
   }
+  .lang-switch {
+    display: flex; justify-content: center; gap: 4px;
+    margin-bottom: 20px;
+  }
+  .lang-switch button {
+    background: none;
+    border: 1px solid var(--color-border);
+    color: var(--color-text-2);
+    font-size: 11px; font-weight: 600;
+    padding: 3px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .lang-switch button.active {
+    color: var(--color-text-0);
+    border-color: var(--color-accent);
+  }
+  .lang-switch button:hover:not(.active) { color: var(--color-text-1); }
   .w-headline {
     font-size: 28px; font-weight: 700;
     letter-spacing: -0.03em;

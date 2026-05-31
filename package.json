@@ -1,7 +1,7 @@
 {
-  "name": "tauri-app",
-  "version": "0.1.0",
-  "description": "",
+  "name": "quanta",
+  "version": "3.3.0",
+  "description": "Sovereign peer-to-peer web and value network — no server, no cloud, no intermediary. Native coin: QUANTA.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -15,7 +15,13 @@
     "ai:audit": "cd src-tauri && cargo audit",
     "ai:format": "npx prettier --write . && cd src-tauri && cargo fmt"
   },
-  "license": "MIT",
+  "author": "Quanta Protocol Contributors",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nobodyohm-web/Torus.git"
+  },
+  "homepage": "https://github.com/nobodyohm-web/Torus",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

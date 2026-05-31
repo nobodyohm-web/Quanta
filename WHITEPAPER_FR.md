@@ -1,12 +1,17 @@
-# Torus — Le Web P2P récompensé
+# Quanta — Le Web P2P récompensé
 
-> **Whitepaper V3 — Mai 2026**
+> **Whitepaper — Quanta v3.3**
 > Un protocole où créer, découvrir et modérer rapporte des QUANTA.
 > Pas de serveur. Pas d'algorithme caché. Pas de censeur.
 
+> **État d'implémentation.** Quanta est un logiciel alpha de recherche. Ce document décrit
+> le protocole tel que conçu et largement implémenté ; pour la répartition précise
+> « réel vs expérimental vs pas-encore », voir le tableau d'état du [README](README.md).
+> Rien ici n'est une promesse de sécurité de production ou de valeur monétaire actuelle.
+
 ---
 
-## 1. Pourquoi Torus
+## 1. Pourquoi Quanta
 
 Le Web actuel est un oligopole d'attention :
 
@@ -18,7 +23,7 @@ Le Web actuel est un oligopole d'attention :
 | Modération opaque | Un compte supprimé = un travail perdu |
 | Créateurs paient (hosting) ou vendent leur audience | Aucune valeur captée par le créateur direct |
 
-**Torus inverse le contrat** :
+**Quanta inverse le contrat** :
 - L'hébergement est mutualisé (P2P, BLAKE3 content-addressing).
 - Le classement est public (algorithme **QuantaRank** open-source, paramètres on-chain).
 - La modération est exercée par un jury aléatoire (style Kleros, mais P2P pur).
@@ -28,7 +33,7 @@ Le Web actuel est un oligopole d'attention :
 
 ## 2. Vision en 30 secondes
 
-> Tu télécharges Torus. Tu génères ton wallet. Tu publies `torus://alex` en 3 clics. Quelqu'un cherche « cuisine vegan rapide », tombe sur ton site, te like, t'abonne. Tu mines plus. Tu achètes son ebook avec tes QUANTA. Lui modère un thread, gagne du QUANTA aussi. Personne ne possède Torus.
+> Tu télécharges Quanta. Tu génères ton wallet. Tu publies `torus://alex` en 3 clics. Quelqu'un cherche « cuisine vegan rapide », tombe sur ton site, te like, t'abonne. Tu mines plus. Tu achètes son ebook avec tes QUANTA. Lui modère un thread, gagne du QUANTA aussi. Personne ne possède Quanta.
 
 ---
 
@@ -88,7 +93,7 @@ Le Web actuel est un oligopole d'attention :
 
 ### 5.3 Pinning incentivé (innovation)
 > **Problème classique du P2P** : si personne ne pin, le contenu disparaît.
-> **Solution Torus** : un pair peut déclarer `Pin { cid, until_ts }`. À chaque téléchargement servi par ce pair, le créateur du contenu reçoit `0.001 QUANTA`, le pair pinneur `0.0005 QUANTA`. Statistique vérifiable on-chain (compteurs CRDT).
+> **Solution Quanta** : un pair peut déclarer `Pin { cid, until_ts }`. À chaque téléchargement servi par ce pair, le créateur du contenu reçoit `0.001 QUANTA`, le pair pinneur `0.0005 QUANTA`. Statistique vérifiable on-chain (compteurs CRDT).
 
 ---
 
@@ -101,7 +106,7 @@ Le Web actuel est un oligopole d'attention :
 
 ### 6.2 Harberger Tax (innovation)
 > **Problème** : sur ENS, des squatters achètent des noms évidents (`google.eth`) et les gardent à vie pour 5 $/an.
-> **Solution Torus** : le propriétaire **déclare** la valeur de son domaine (`value_qta`). Il paie un loyer mensuel = `value_qta × 1%`. **N'importe qui** peut racheter le domaine en payant exactement `value_qta` au propriétaire actuel.
+> **Solution Quanta** : le propriétaire **déclare** la valeur de son domaine (`value_qta`). Il paie un loyer mensuel = `value_qta × 1%`. **N'importe qui** peut racheter le domaine en payant exactement `value_qta` au propriétaire actuel.
 >
 > ⇒ Si tu sous-évalues, tu te fais racheter à perte. Si tu surévalues, tu paies trop de loyer. **Le marché trouve le juste prix.**
 
@@ -149,7 +154,7 @@ score(page, query) =
 
 ### 8.1 Like quadratique (innovation)
 > **Problème** : sur Twitter, un like coûte 0. Une ferme de bots peut générer 1 M de likes pour 0 $.
-> **Solution Torus** : chaque like coûte au minimum 0,1 QUANTA. Tu peux mettre plus pour amplifier ; influence = √(QTA dépensé). Mettre 100 QTA sur **un** like = 10× influence d'un like normal. Mettre 1 QTA × 100 likes différents = 100× plus efficace que 100 QTA sur 1 like. **Force la diversité.**
+> **Solution Quanta** : chaque like coûte au minimum 0,1 QUANTA. Tu peux mettre plus pour amplifier ; influence = √(QTA dépensé). Mettre 100 QTA sur **un** like = 10× influence d'un like normal. Mettre 1 QTA × 100 likes différents = 100× plus efficace que 100 QTA sur 1 like. **Force la diversité.**
 
 ### 8.2 Abonnements à 3 tiers
 | Tier | Coût | Effet |
@@ -214,7 +219,7 @@ reports validés (30 derniers jours)  →  malus mining
 ## 11. Web of Trust — `trust_graph.rs`
 
 > **Problème PageRank classique** : sensible aux fermes de liens.
-> **Solution Torus** : chaque user calcule **localement** un PageRank personnalisé partant de **lui-même** (damping 0,85, 20 itérations). Les fermes de likes externes ne te touchent pas si tu ne les suis pas.
+> **Solution Quanta** : chaque user calcule **localement** un PageRank personnalisé partant de **lui-même** (damping 0,85, 20 itérations). Les fermes de likes externes ne te touchent pas si tu ne les suis pas.
 
 Score de confiance utilisé pour pondérer :
 - Le poids des likes reçus dans QuantaRank (du POV de qui cherche)
@@ -293,7 +298,7 @@ R. Jury communautaire. Si verdict `Hide`/`Ban`, les pairs cessent volontairement
 R. Iroh est un transport (QUIC). On peut basculer libp2p ou implémenter notre propre transport. L'architecture (DAG, ledger CRDT, gossip) est transport-agnostique.
 
 **Q. Et si un État tente de censurer ?**
-R. Aucun point central à fermer. Les pairs peuvent tourner sur Tor/I2P. Pour bloquer Torus, il faudrait bloquer toutes les connexions QUIC sortantes du pays.
+R. Aucun point central à fermer. Les pairs peuvent tourner sur Tor/I2P. Pour bloquer Quanta, il faudrait bloquer toutes les connexions QUIC sortantes du pays.
 
 **Q. Et si quelqu'un publie 1 million de pages spam ?**
 R. Coût : 1 QTA × 1M = 1M QTA. Plus le coût Harberger des domaines. Plus le slashing si signalé. Économiquement non viable.
@@ -305,7 +310,7 @@ R. Télécharge l'app, génère un wallet. 1h plus tard tu as 100 QTA disponible
 
 ## 18. Conclusion
 
-Torus n'est pas un Twitter décentralisé, ni un Google libre, ni un Wordpress P2P.
+Quanta n'est pas un Twitter décentralisé, ni un Google libre, ni un Wordpress P2P.
 **C'est les trois en un seul protocole, avec un coin qui aligne créateurs, modérateurs et lecteurs.**
 
 L'architecture est conservatrice : Rust + Iroh + Ed25519 + BLAKE3 — du standard cryptographique audité. L'innovation est dans la composition : Harberger pour les noms, quadratic voting pour les likes, jury VRF pour la modération, web of trust personnel pour le ranking, mining énergie pour l'émission.
@@ -314,4 +319,4 @@ Le but n'est pas de remplacer Google demain. C'est de prouver qu'un Web où **ch
 
 ---
 
-*Torus est un protocole libre (AGPLv3). Le code est ouvert, les paramètres sont sur le ledger, les décisions de gouvernance future passeront par vote on-chain pondéré reputation.*
+*Quanta est un protocole libre (Apache-2.0). Le code est ouvert, les paramètres sont sur le ledger, les décisions de gouvernance future passeront par vote on-chain pondéré reputation.*

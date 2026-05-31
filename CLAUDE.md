@@ -1,15 +1,18 @@
-# Torus Protocol — CLAUDE.md
+# Quanta Protocol — CLAUDE.md
 
-> **Version** : V2.0 Network Hardening | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
-> **Status** : ✅ P2P vérifié entre 2 machines physiques (06/05/2026)
-> **Mission** : Réseau blockchain P2P parfait avec protocole souverain
+> **Marque** : **Quanta** (réseau + app + pièce). Les identifiants techniques/wire hérités
+> — TLD `.torus`, `TORUS_PROTOCOL_VERSION`, events Tauri `torus://…` — sont **conservés tels
+> quels** pour la compatibilité réseau ; ne pas les renommer sans changement de protocole.
+> **Version** : v3.3 (Site Engine) | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
+> **Licence** : Apache-2.0
+> **Status** : ✅ P2P vérifié entre 2 machines physiques (06/05/2026) · ⚠️ alpha, non audité par un tiers
 > **Repo** : [github.com/nobodyohm-web/Torus](https://github.com/nobodyohm-web/Torus)
 
 ---
 
 ## Mission V2 — Network Perfection
 
-**Torus est un Web P2P souverain — sans serveur, sans cloud, sans intermédiaire.**
+**Quanta est un Web P2P souverain — sans serveur, sans cloud, sans intermédiaire.**
 
 La V1 est fonctionnelle. La V2 vise la **perfection réseau** :
 
@@ -36,7 +39,7 @@ La V1 est fonctionnelle. La V2 vise la **perfection réseau** :
 | CSS | Vanilla CSS, tokens | `src/app.css` |
 | P2P transport | Iroh (QUIC), iroh-gossip | `src-tauri/src/p2p/` |
 | Consensus | Proof-of-Stake + VRF (BLAKE3) | `p2p/pos_consensus.rs` |
-| Crypto | Ed25519 + AES-256-GCM + BLAKE3 + Argon2id | `src-tauri/src/security/` |
+| Crypto | **Ed25519 + ML-DSA-65 (FIPS 204)** + AES-256-GCM + BLAKE3 + Argon2id | `src-tauri/src/security/` |
 | DB | libSQL (turso) | `src-tauri/src/storage/` |
 | CRDT | `crdts` crate (PNCounter) | `p2p/consensus.rs` |
 
@@ -76,7 +79,7 @@ src-tauri/src/
 ├── security/
 │   ├── mod.rs             ← CryptoEngine (Ed25519)
 │   ├── pq_vault.rs        ← Identity vault (Argon2id + AES-256-GCM)
-│   └── hybrid_crypto.rs   ← Hybrid signatures (Ed25519 + post-quantum ready)
+│   └── hybrid_crypto.rs   ← ⭐ Signatures hybrides Ed25519 + ML-DSA-65 (FIPS 204, actif)
 └── storage/               ← libSQL persistence
 ```
 
@@ -372,6 +375,7 @@ npx tauri build
 | 2026-05-06 | **🔧 V2 Network Hardening — protocole Torus P2P parfait** |
 | 2026-05-07 | **🛡️ Audit P2P complet — 5 critiques + 3 high + 2 medium corrigés (243 tests)** |
 | 2026-05-07 | **🧱 Site Engine v3.3 — smart tags, no-code builder, dev HTTP API (256 tests)** |
+| 2026-05-31 | **🔐 Post-quantique hybride ACTIF (ML-DSA-65/FIPS 204, dérivé de la graine Ed25519) + invariants formels (proptest) + aléa d'élection non-grindable (beacon enterré) — 265 tests** |
 
 ---
 

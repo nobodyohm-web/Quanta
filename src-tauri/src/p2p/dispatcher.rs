@@ -298,14 +298,17 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
     }
 
-    // ── CRIT-1: PER-PEER NONCE CHECK (anti-replay within ±90s window) ──
-    // The nonce must be strictly increasing per sender. If it's 0 (legacy
-    // message without nonce), we skip the check for backward compatibility.
-    if env.nonce > 0 {
+    // ── CRIT-1 / B3: PER-PEER NONCE CHECK (anti-replay within ±90s window) ──
+    // Every V2 envelope MUST carry a strictly-monotonic nonce ≥ 1. Production
+    // senders start their counter at 1 (AtomicU64::new(1)) and persist it across
+    // restarts (clamped .max(1)), so a nonce of 0 can only come from a legacy or
+    // forged envelope. We reject it outright instead of skipping the tracker —
+    // otherwise nonce-0 traffic would bypass anti-replay entirely (audit B3).
+    {
         let mut tracker = state.node.nonce_tracker.write().await;
-        if !tracker.check_and_advance(&env.sender, env.nonce) {
+        if env.nonce == 0 || !tracker.check_and_advance(&env.sender, env.nonce) {
             log::warn!(
-                "◈ [Dispatch] ⚠ NONCE REPLAY from {} — nonce {} ≤ high-water mark → drop",
+                "◈ [Dispatch] ⚠ NONCE REPLAY/ZERO from {} — nonce {} (≤ high-water mark or 0) → drop",
                 &env.sender[..env.sender.len().min(12)],
                 env.nonce
             );

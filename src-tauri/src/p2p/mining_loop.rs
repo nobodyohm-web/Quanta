@@ -220,14 +220,22 @@ async fn seal_and_broadcast(state: &AppState, pk: &str) {
 /// If no validators have sufficient stake, falls back to the original
 /// seal_and_broadcast (permissionless mode for bootstrap).
 async fn pos_seal_if_leader(state: &AppState, pk: &str) {
-    // Read current chain state
-    let (prev_hash, slot) = {
+    // Source the election entropy from a *buried* block (LOOKBACK behind the
+    // tip), not the freshly-sealed tip, so the immediate proposer can't grind
+    // block contents to bias — or re-elect — themselves at the next slot.
+    let (beacon, slot) = {
         let ledger = state.node.ledger.read().await;
-        let tip = ledger.block_at(ledger.chain_height() - 1);
-        match tip {
-            Some(b) => (b.hash.clone(), ledger.chain_height()),
+        let height = ledger.chain_height();
+        if height == 0 {
+            // No chain — just seal (bootstrap)
+            seal_and_broadcast(state, pk).await;
+            return;
+        }
+        let tip_index = height - 1;
+        let buried_index = tip_index.saturating_sub(p2p::pos_consensus::LEADER_ENTROPY_LOOKBACK);
+        match ledger.block_at(buried_index) {
+            Some(b) => (p2p::pos_consensus::leader_beacon(&b.hash, height), height),
             None => {
-                // No chain — just seal (bootstrap)
                 seal_and_broadcast(state, pk).await;
                 return;
             }
@@ -274,7 +282,7 @@ async fn pos_seal_if_leader(state: &AppState, pk: &str) {
     let elapsed = now.saturating_sub(tip_time);
 
     let (is_valid, is_primary) = p2p::pos_consensus::is_valid_proposer(
-        pk, &prev_hash, slot, elapsed, &validators,
+        pk, &beacon, slot, elapsed, &validators,
     );
 
     if is_valid {

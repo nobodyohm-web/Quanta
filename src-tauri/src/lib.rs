@@ -18,6 +18,12 @@ mod storage;
 mod commands_v3;
 mod dev_api;
 
+/// Re-exported for fuzz harnesses (`src-tauri/fuzz/`). Not part of the stable
+/// API: it exposes the stateless gossip-envelope parser/validator so a fuzzer
+/// can hammer it with arbitrary untrusted bytes. See `fuzz/README.md`.
+#[doc(hidden)]
+pub use p2p::dispatcher::try_process_raw_gossip as fuzz_parse_gossip;
+
 use security::{CryptoEngine, pq_vault::PQVault};
 use p2p::willow_node::WillowNode;
 use storage::db::Database;

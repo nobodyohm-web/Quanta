@@ -26,9 +26,9 @@ pub struct Transaction {
     pub nonce: u64, // Sender's account nonce at time of signing
     // ── Phase 2A : Post-quantum hybrid fields (optional, backward-compatible) ──
     #[serde(default)]
-    pub pq_signature: Option<String>, // ML-DSA-65 signature hex (3293 B)
+    pub pq_signature: Option<String>, // ML-DSA-65 signature hex (3309 B, FIPS 204)
     #[serde(default)]
-    pub pq_public_key: Option<String>, // ML-DSA-65 public key hex (1952 B)
+    pub pq_public_key: Option<String>, // ML-DSA-65 public key hex (1952 B, FIPS 204)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

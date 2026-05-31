@@ -151,10 +151,15 @@
       pk = created_pk;
       try {
         recoveryKey = await invoke<string>("get_recovery_key");
-      } catch { recoveryKey = ""; }
-      // Skip the forced recovery screen — go straight to the app.
-      // Recovery key remains visible later via Profile / Settings.
-      ready = true;
+        // Force the backup gate: the user must see and confirm their recovery
+        // key before entering. Losing it means losing the account for good.
+        step = "recovery";
+      } catch {
+        // If the key can't be fetched (rare), don't lock the user out of the
+        // account they just created — they can still back up later via Profile.
+        recoveryKey = "";
+        ready = true;
+      }
     }}
     onSwitchToUnlock={() => step = "unlock"}
   />

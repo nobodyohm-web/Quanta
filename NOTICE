@@ -1,0 +1,31 @@
+Quanta Protocol
+Copyright 2026 Quanta Protocol Contributors
+
+This product includes software developed by the Quanta Protocol Contributors.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full license text.
+
+---
+
+Quanta is a sovereign peer-to-peer web and value network: no server, no cloud,
+no intermediary. The native coin is QUANTA (smallest unit: µQTA, 1 QUANTA =
+1,000,000 µQTA).
+
+This software bundles, links against, or otherwise depends on third-party
+open-source components, each distributed under its own license. Notable
+dependencies include (non-exhaustive):
+
+  - Iroh / iroh-gossip / iroh-blobs (QUIC P2P transport)        — MIT / Apache-2.0
+  - ed25519-dalek (Ed25519 signatures)                          — BSD-3-Clause
+  - aes-gcm (AES-256-GCM authenticated encryption)              — Apache-2.0 / MIT
+  - argon2 (Argon2id key derivation)                            — Apache-2.0 / MIT
+  - blake3 (BLAKE3 hashing)                                     — Apache-2.0 / CC0-1.0
+  - zeroize (secret zeroization)                                — Apache-2.0 / MIT
+  - libsql (embedded SQL storage)                              — MIT
+  - crdts (PN-Counter CRDTs)                                    — Apache-2.0 / MIT
+  - Tauri (desktop runtime)                                     — Apache-2.0 / MIT
+  - Svelte / SvelteKit (frontend)                              — MIT
+
+Refer to each dependency's source distribution for the authoritative license
+terms.

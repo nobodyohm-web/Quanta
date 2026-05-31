@@ -367,8 +367,17 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::
         return Ok(());
     }
 
-    // Auth.
-    let token = ensure_token().unwrap_or_default();
+    // Auth — fail CLOSED. If we cannot load a valid 64-hex token, every
+    // authenticated route is refused (503) instead of silently comparing
+    // against an empty string, which would let `Authorization: Bearer ` pass.
+    let token = match ensure_token() {
+        Ok(t) if t.len() == 64 => t,
+        _ => {
+            let resp = err_json(503, "dev api token unavailable");
+            stream.write_all(&resp).await?;
+            return Ok(());
+        }
+    };
     let auth_ok = req
         .header("authorization")
         .map(|h| h.trim() == format!("Bearer {token}"))
