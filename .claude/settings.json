@@ -3,15 +3,42 @@
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "command": "echo 'Tool: Bash'",
-        "description": "Log bash commands"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '◈ [Hook] Bash tool invoked'"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '◈ [Hook] File modification — cargo check will run after'"
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit",
-        "command": "cd src-tauri && cargo check 2>&1 | tail -3",
-        "description": "Auto-check Rust compilation after every file edit"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$TOOL_INPUT\" | grep -q '\\.rs'; then cd src-tauri && cargo check 2>&1 | tail -5; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '◈ [Torus] Session complete — run cargo test before pushing'"
+          }
+        ]
       }
     ]
   }

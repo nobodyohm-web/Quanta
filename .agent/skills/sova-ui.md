@@ -1,38 +1,38 @@
 ---
-name: sova-ui-perfection
-description: "SOVA UI specialist enforcing Apple/Trade Republic/Linear design. Read the Design Bible at artifacts/sova_design_bible.md BEFORE touching any frontend code. Triggers: UI, design, component, feed, wallet, dashboard, social, SOVA, styling, CSS."
+name: quanta-ui-perfection
+description: "QUANTA UI specialist enforcing Apple/Trade Republic/Linear design. Read the Design Bible at artifacts/quanta_design_bible.md BEFORE touching any frontend code. Triggers: UI, design, component, feed, wallet, dashboard, social, QUANTA, styling, CSS."
 metadata:
   version: "3.0.0"
   domain: frontend
-  triggers: UI, Svelte, SOVA, design, component, feed, wallet, CSS, styling
+  triggers: UI, Svelte, QUANTA, design, component, feed, wallet, CSS, styling
   role: specialist
   scope: implementation
   output-format: code
 ---
 
-# SOVA UI Perfection — Apple/Trade Republic/Linear Level
+# QUANTA UI Perfection — Apple/Trade Republic/Linear Level
 
 ## FIRST: Read the Design Bible
-**BEFORE writing ANY frontend code**, read `.agent/design/sova_design_bible.md`.
+**BEFORE writing ANY frontend code**, read `.agent/design/quanta_design_bible.md`.
 It contains mockup images (4 PNGs in `.agent/design/`), exact pixel specifications, and justifications from Apple HIG 2026, Material Design 3, Dieter Rams, Trade Republic, Linear, and Stripe.
 
 ## Quick Reference — Design Tokens
 
 ```css
 /* Surfaces */
---sova-bg-0: #000000;   --sova-bg-1: #0f0f0f;   --sova-bg-2: #1a1a1a;   --sova-bg-3: #2a2a2a;
+--quanta-bg-0: #000000;   --quanta-bg-1: #0f0f0f;   --quanta-bg-2: #1a1a1a;   --quanta-bg-3: #2a2a2a;
 
 /* Text */
---sova-text-0: #ffffff;  --sova-text-1: #a0a0a0;  --sova-text-2: #666666;
+--quanta-text-0: #ffffff;  --quanta-text-1: #a0a0a0;  --quanta-text-2: #666666;
 
 /* ONE accent */
---sova-accent: #00DC82;
+--quanta-accent: #00DC82;
 
 /* Semantic */
---sova-positive: #00DC82;  --sova-negative: #FF4444;  --sova-warning: #FFB800;
+--quanta-positive: #00DC82;  --quanta-negative: #FF4444;  --quanta-warning: #FFB800;
 
 /* Borders — ultra-subtle */
---sova-border: rgba(255,255,255,0.06);
+--quanta-border: rgba(255,255,255,0.06);
 ```
 
 ## Typography — Inter ONLY
@@ -65,7 +65,7 @@ It contains mockup images (4 PNGs in `.agent/design/`), exact pixel specificatio
 14. ❌ Emoji in navigation
 
 ## Component Specs (see Bible for full details)
-- **TopBar**: 48px, black bg, "SOVA" left, balance+dot right
+- **TopBar**: 48px, black bg, "QUANTA" left, balance+dot right
 - **NavBar**: 56px bottom, #0f0f0f, 5 items, Create=green circle
 - **Feed posts**: NO card borders, separator lines only, 36px circle avatars
 - **Wallet**: 48px centered balance, 3 action buttons, transaction list

@@ -1,281 +1,322 @@
-# SOVA — Le Protocole Mondial d'Énergie Computationnelle
+# Quanta — Le Web P2P récompensé
 
-## Un Réseau Décentralisé Où Chaque Ordinateur Transforme Son Énergie en Valeur — Pour Son Propriétaire et Pour la Science
+> **Whitepaper — Quanta v3.3**
+> Un protocole où créer, découvrir et modérer rapporte des QUANTA.
+> Pas de serveur. Pas d'algorithme caché. Pas de censeur.
 
-**Version 2.0 — Avril 2026**
-
----
-
-## Résumé
-
-SOVA est un protocole décentralisé qui transforme l'énergie électrique consommée par les ordinateurs du quotidien en un actif numérique vérifiable et échangeable. Contrairement aux cryptomonnaies à Preuve de Travail qui gaspillent délibérément de l'énergie, SOVA mesure la consommation réelle des nœuds participants et les récompense proportionnellement depuis un pool d'émission fixe à l'échelle du réseau. Les ressources informatiques inutilisées sont automatiquement dirigées vers du calcul scientifique utile — repliement de protéines, modélisation climatique, entraînement d'IA — créant un supercalculateur distribué financé par le collectif. Le protocole utilise des Types de Données Répliquées sans Conflit (CRDT) pour un consensus sans verrouillage, des preuves à divulgation nulle (RISC Zero) pour une vérification trustless du travail, et la distribution par Valeur de Shapley pour une récompense mathématiquement équitable. Un mécanisme de Burn-and-Mint prévient l'inflation tout en maintenant une offre illimitée. Une DAO DeSci alloue 5% des émissions pour financer la recherche scientifique choisie par les participants.
-
-**Le premier protocole où consommer de l'énergie = créer de la valeur = faire avancer la science.**
+> **État d'implémentation.** Quanta est un logiciel alpha de recherche. Ce document décrit
+> le protocole tel que conçu et largement implémenté ; pour la répartition précise
+> « réel vs expérimental vs pas-encore », voir le tableau d'état du [README](README.md).
+> Rien ici n'est une promesse de sécurité de production ou de valeur monétaire actuelle.
 
 ---
 
-## Table des Matières
+## 1. Pourquoi Quanta
 
-1. [Introduction](#1-introduction)
-2. [Le Pool d'Énergie](#2-le-pool-dénergie)
-3. [Trois Modes de Contribution](#3-trois-modes-de-contribution)
-4. [Distribution par Valeur de Shapley](#4-distribution-par-valeur-de-shapley)
-5. [Vérification : De la Confiance à la Preuve](#5-vérification--de-la-confiance-à-la-preuve)
-6. [Économie du Jeton](#6-économie-du-jeton)
-7. [Consensus : Merkle-CRDT](#7-consensus--merkle-crdt)
-8. [Transport Réseau](#8-transport-réseau)
-9. [Fondation Cryptographique](#9-fondation-cryptographique)
-10. [Marketplace de Calcul](#10-marketplace-de-calcul)
-11. [DAO DeSci](#11-dao-desci)
-12. [Analyse de Sécurité](#12-analyse-de-sécurité)
-13. [Feuille de Route](#13-feuille-de-route)
-14. [Conclusion](#14-conclusion)
+Le Web actuel est un oligopole d'attention :
 
----
+| Problème | Effet |
+|---|---|
+| 5 plateformes captent 80% du trafic | Censure unilatérale, démonétisation arbitraire |
+| Algorithmes de classement opaques | Personne ne sait *pourquoi* un contenu remonte |
+| Hébergement centralisé | Si AWS tombe, la moitié du Web tombe |
+| Modération opaque | Un compte supprimé = un travail perdu |
+| Créateurs paient (hosting) ou vendent leur audience | Aucune valeur captée par le créateur direct |
 
-## 1. Introduction
-
-### 1.1 Le Problème
-
-Chaque jour, des milliards d'ordinateurs consomment de l'énergie en ne faisant rien. Un laptop tourne au repos à 15W. Un PC gaming à 80W. Un poste de travail à 200W. Cette énergie est payée, consommée et gaspillée — ne produisant aucune valeur au-delà du maintien de la machine en veille.
-
-Pendant ce temps, Bitcoin consomme 150 TWh par an pour résoudre des puzzles sans autre but que la sécurité du réseau. La recherche scientifique est sous-financée : le CERN, l'Institut Pasteur et les labos climatiques se battent pour des subventions limitées tandis que des milliards de cycles CPU restent inutilisés dans le monde entier.
-
-### 1.2 La Solution
-
-SOVA connecte ces deux problèmes :
-
-1. **Ton ordinateur consomme déjà de l'énergie.** SOVA la mesure et te récompense proportionnellement.
-2. **Ton CPU/GPU idle peut faire du travail utile.** SOVA le dirige vers la science, l'entraînement IA et le rendu 3D.
-3. **Tout le monde en profite.** Plus de participants = plus d'énergie totale = plus de valeur pour chacun.
-
-### 1.3 Principes de Conception
-
-1. **L'Énergie Est Valeur** — Chaque jeton est adossé à une consommation énergétique mesurée et vérifiable.
-2. **Pas de Rareté Artificielle** — Pas de cap, pas de halving. Offre illimitée avec équilibre par burn.
-3. **Travail Utile** — Les ressources idle contribuent à la science, l'IA et le calcul distribué.
-4. **Justice Mathématique** — Distribution via la Valeur de Shapley (Prix Nobel 2012).
-5. **Vérification Trustless** — Les preuves à divulgation nulle garantissent qu'aucun nœud ne peut falsifier sa contribution.
-6. **Gouvernance Démocratique** — Une DAO DeSci permet aux participants de financer la science de leur choix.
+**Quanta inverse le contrat** :
+- L'hébergement est mutualisé (P2P, BLAKE3 content-addressing).
+- Le classement est public (algorithme **QuantaRank** open-source, paramètres on-chain).
+- La modération est exercée par un jury aléatoire (style Kleros, mais P2P pur).
+- Chaque interaction (publication, like, abonnement, modération honnête) **rapporte des QUANTA**.
 
 ---
 
-## 2. Le Pool d'Énergie
+## 2. Vision en 30 secondes
 
-### 2.1 Émission Fixe du Réseau
+> Tu télécharges Quanta. Tu génères ton wallet. Tu publies `torus://alex` en 3 clics. Quelqu'un cherche « cuisine vegan rapide », tombe sur ton site, te like, t'abonne. Tu mines plus. Tu achètes son ebook avec tes QUANTA. Lui modère un thread, gagne du QUANTA aussi. Personne ne possède Quanta.
 
-Le réseau émet **100 SOVA par heure**, en permanence, quel que soit le nombre de participants.
+---
 
-### 2.2 Distribution Proportionnelle
+## 3. Coin QUANTA — invariants
+
+| Paramètre | Valeur |
+|---|---|
+| Émission | **100 QUANTA / heure**, fixe, à perpétuité |
+| Halving | **Aucun** — l'inflation devient asymptotiquement nulle quand le supply croît |
+| Distribution (Shapley v2) | 25% énergie · 25% travail compute · 20% validation · 15% uptime · **15% utilité sociale** |
+| Burn | 1% par transfert · 2% par tâche compute · 5% par boost · 10% slashing modération |
+| Unité | 1 QUANTA = 1 000 000 µQTA (`u64`, déterministe) |
+| Bridge | Quand masse critique : pool Uniswap v4 + bridge ERC-20 audité |
+
+**Pourquoi 100/h fixe** : un coin avec halving favorise les early-adopters au détriment des nouveaux. Un coin avec inflation nominale fixe + burn variable converge vers une émission *réelle* nulle quand l'usage explose, sans privilégier qui que ce soit.
+
+---
+
+## 4. Architecture — vue d'ensemble
 
 ```
-ma_part = (mes_watts / watts_total_réseau) × 100 SOVA/heure
+┌──────────────────────────────────────────────────────────┐
+│                    APPLICATION TAURI                     │
+│  ┌────────────────────┐    ┌──────────────────────────┐  │
+│  │  Frontend Svelte 5 │ ←→ │   Backend Rust (tokio)   │  │
+│  │ Browser · Builder  │IPC │  P2P · Search · Social   │  │
+│  │ Search · Forums    │    │  Mining · Ledger · Mod   │  │
+│  └────────────────────┘    └──────────┬───────────────┘  │
+└────────────────────────────────────────┼──────────────────┘
+                                          │ Iroh QUIC + Gossip
+            ┌─────────────────────────────┼─────────────────────────────┐
+            ▼                             ▼                             ▼
+   ┌────────────────┐           ┌────────────────┐           ┌────────────────┐
+   │  Pair Alice    │           │   Pair Bob     │           │  Pair Charlie  │
+   │  Index shard A │           │ Index shard B  │           │  Index shard C │
+   │  Pages, votes  │           │ Pages, votes   │           │  Pages, votes  │
+   └────────────────┘           └────────────────┘           └────────────────┘
+                          (DAG BLAKE3 + Ledger CRDT)
 ```
 
-Laptop 15W dans un réseau de 50 000W → 0,03 SOVA/h. Station de montage 300W → 0,6 SOVA/h.
+---
 
-### 2.3 Plus d'Utilisateurs = Plus de Valeur
+## 5. Publication d'un site
 
-```
-valeur(1 SOVA) = énergie_totale_réseau_kWh / SOVA_en_circulation
-```
+### 5.1 PageBuilder
+- Éditeur WYSIWYG par blocs : **titre · paragraphe · image · vidéo · lien · code · embed**
+- Templates : **blog · vitrine · portfolio · shop · landing · forum**
+- Aperçu live, multi-page, navigation interne
+- Toggle JS sandboxé (opt-in par site, désactivé par défaut)
 
-| Participants | Puissance | SOVA/h | Valeur/SOVA | Gain/h (50W) |
-|-------------|-----------|--------|-------------|--------------|
-| 100 | 5 kW | 100 | 0,0075 € | 0,0075 € |
-| 10 000 | 500 kW | 100 | 0,75 € | 0,75 € |
-| 1 000 000 | 50 MW | 100 | 75 € | 75 € |
+### 5.2 Stockage
+1. Le site est sérialisé en arbre `Site { routes: HashMap<path, PageNode> }`
+2. Chaque page > 64 KB est découpée en chunks DAG BLAKE3 (réutilise `merkle_dag.rs`)
+3. Le manifest `Site` est signé Ed25519 par le wallet créateur
+4. Diffusion via gossip `PublishSite { manifest_cid }`
+5. Les pairs intéressés (déjà abonnés ou recherche match) téléchargent à la demande
 
-**Le gain en EUR par watt est IDENTIQUE pour tous**, quel que soit le moment où l'on rejoint.
-
-### 2.4 Mesure Énergétique
-
-- **Intel/AMD** : compteurs RAPL (silicium, depuis 2012)
-- **Apple Silicon** : `powermetrics` (hardware)
-- **Oracle** : 33 pays, prix Eurostat/EIA Q1 2026, détection par timezone
+### 5.3 Pinning incentivé (innovation)
+> **Problème classique du P2P** : si personne ne pin, le contenu disparaît.
+> **Solution Quanta** : un pair peut déclarer `Pin { cid, until_ts }`. À chaque téléchargement servi par ce pair, le créateur du contenu reçoit `0.001 QUANTA`, le pair pinneur `0.0005 QUANTA`. Statistique vérifiable on-chain (compteurs CRDT).
 
 ---
 
-## 3. Trois Modes de Contribution
+## 6. Noms de domaine — `*.torus`
 
-### 3.1 Mode Actif — Tu travailles, tu mines (×1.0)
+### 6.1 Registre
+- Format : `^[a-z0-9-]{2,40}\.torus$`
+- Stockage : `HashMap<name, DomainRecord>` répliqué CRDT
+- `DomainRecord { name, owner_pk, target_pk, value_qta, last_paid_ts, signature }`
 
-Tu utilises ton ordinateur normalement. Les watts sont mesurés et convertis en SOVA. Aucune action requise.
+### 6.2 Harberger Tax (innovation)
+> **Problème** : sur ENS, des squatters achètent des noms évidents (`google.eth`) et les gardent à vie pour 5 $/an.
+> **Solution Quanta** : le propriétaire **déclare** la valeur de son domaine (`value_qta`). Il paie un loyer mensuel = `value_qta × 1%`. **N'importe qui** peut racheter le domaine en payant exactement `value_qta` au propriétaire actuel.
+>
+> ⇒ Si tu sous-évalues, tu te fais racheter à perte. Si tu surévalues, tu paies trop de loyer. **Le marché trouve le juste prix.**
 
-### 3.2 Mode Recherche — Ton idle aide la science (×2.0)
+### 6.3 Sous-domaines
+- Le propriétaire de `alex.torus` signe un `SubdomainGrant { sub, target_pk }` pour `shop.alex.torus`
+- Délégation arbitraire en profondeur (`a.b.c.alex.torus`)
 
-Ordinateur idle → exécute automatiquement du calcul scientifique (BOINC), de l'entraînement IA (Federated Learning), ou du rendu 3D. Le travail est vérifié cryptographiquement.
-
-### 3.3 Mode Validateur — Tu vérifies, tu gagnes (×0.1)
-
-CPU < 10% → le nœud vérifie les blocs des autres, confirme les transactions, insère dans le DAG.
-
----
-
-## 4. Distribution par Valeur de Shapley
-
-La Valeur de Shapley (Lloyd Shapley, Nobel d'Économie 2012) est la seule méthode mathématiquement prouvée pour distribuer équitablement la valeur dans un système coopératif.
-
-```
-Shapley(nœud) = 0.30 × énergie + 0.35 × travail_utile + 0.20 × validation + 0.15 × uptime
-ma_part = Shapley(moi) / Σ(Shapley(tous)) × ÉMISSION_RÉSEAU
-```
-
-Un nœud qui fait du calcul utile gagne PLUS qu'un nœud qui consomme juste du courant. La **valeur** de la contribution, pas juste son **coût**, détermine la récompense.
+### 6.4 Période de grâce
+- 30 jours après expiration de loyer, le nom reste réservé au propriétaire (avertissement)
+- Au-delà, le nom revient au pool public
 
 ---
 
-## 5. Vérification : De la Confiance à la Preuve
+## 7. Moteur de recherche — QuantaRank
 
-### Phase 1 — Trust-but-Verify
-Le message Hello inclut le modèle CPU. Les validateurs comparent les watts déclarés au TDP connu du processeur.
+### 7.1 Index inversé distribué
+- Tokenizer multilingue (FR, EN, ES, DE, JA initial) : NFKD + lowercase + stop-words
+- Chaque token est shardé : `shard_id = blake3(token)[0..2] % N`
+- Réplication k=3 par shard (résilience à la perte de pairs)
+- Chaque pair maintient les shards qui lui sont assignés
 
-### Phase 2 — Cross-Validation
-Corrélation statistique entre watts déclarés et latence réseau observée. Écart > 2σ → pénalité.
-
-### Phase 3 — ZK-Proof of Work (RISC Zero)
-
+### 7.2 Algorithme QuantaRank
 ```
-Tâche → Exécution dans zkVM RISC Zero → PROOF cryptographique
-→ Validateurs vérifient (~1ms) → Énergie DÉDUITE du travail prouvé
-flops_prouvés × joules/flop[CPU] = énergie certifiée
+score(page, query) =
+   Σ termes ∈ query  TF-IDF(terme, page)
+ × log(1 + likes_pondérés(page))
+ × log(1 + abonnés(auteur))
+ × reputation(auteur)^0.5
+ × freshness(page.updated_at)        # half-life 30 jours
+ × diversity_bonus(page, results)    # pénalise la sur-représentation d'un auteur
+ × (1 - moderation_malus(auteur))    # 0 si banni, 0.5 si warn
 ```
 
-**RISC Zero** : zkVM open source, Rust natif, $40M de financement, production. L'énergie n'est plus auto-déclarée — elle est mathématiquement dérivée du travail prouvé.
+### 7.3 Anti-spam SEO
+- Un mot-clé ne peut apparaître plus de 5× dans les méta-tags d'une page (sinon on ignore)
+- Mots cachés (CSS `display:none`) → pénalité
+- Réseau d'auto-likes (clusters fermés détectés via graphe) → pondération annulée
+
+### 7.4 Filtres utilisateur
+`lang` · `since` · `type` (`site`, `forum`, `shop`, `blog`, `comment`) · `creator` · `min_likes`
 
 ---
 
-## 6. Économie du Jeton
+## 8. Économie d'attention — `social.rs`
 
-### 6.1 Émission
-- 100 SOVA/h, constant, pour toujours
-- 5% → Trésorerie DeSci DAO
+### 8.1 Like quadratique (innovation)
+> **Problème** : sur Twitter, un like coûte 0. Une ferme de bots peut générer 1 M de likes pour 0 $.
+> **Solution Quanta** : chaque like coûte au minimum 0,1 QUANTA. Tu peux mettre plus pour amplifier ; influence = √(QTA dépensé). Mettre 100 QTA sur **un** like = 10× influence d'un like normal. Mettre 1 QTA × 100 likes différents = 100× plus efficace que 100 QTA sur 1 like. **Force la diversité.**
 
-### 6.2 Burn-and-Mint Equilibrium
+### 8.2 Abonnements à 3 tiers
+| Tier | Coût | Effet |
+|---|---|---|
+| 1 (signal) | 0 QTA | Suis le créateur (notifications) |
+| 2 (supporter) | 1 QTA / mois | +5% de mining boost pour le créateur |
+| 3 (mécène) | 10 QTA / mois | +15% de mining boost pour le créateur |
 
-| Action | Taux de burn |
-|--------|-------------|
-| Transfert | 1% |
-| Soumission de tâche | 2% |
-| Bridge ERC-20 | 0,5% |
-| Récompense validation | 0,1% |
+L'abonné ne paie pas le réseau ; il **redirige** une part de son propre mining futur. Les QUANTA brûlés en compensation sont aussi à l'échelle (5%/15% du mining mensuel de l'abonné).
 
-Réseau peu actif → supply croît. Réseau très actif → burns > émission → **supply déflationnaire**.
-
-### 6.3 Sources de Demande
-1. **Laboratoires** paient en SOVA pour soumettre des tâches
-2. **Startups IA** paient pour l'entraînement distribué
-3. **Studios** paient pour le rendu 3D
-4. **Traders** arbitrent les différences de prix d'énergie entre pays
+### 8.3 Tip · Boost · Sponsor
+- **Tip** : transfert direct, mémo, taxe 1% (BME)
+- **Boost** : payer X QUANTA pour ranking ×1,5 pendant 24h. Cap : 100 QTA / page / jour. Burn 5%.
+- **Sponsor** : flux récurrent créateur → créateur, déductible du mining sponsorisé
 
 ---
 
-## 7. Consensus : Merkle-CRDT
+## 9. Modération — Jury VRF (Kleros-like)
 
-Double registre : Journal linéaire (auditabilité) + État CRDT (consensus sans verrouillage).
+### 9.1 Cycle d'un signalement
+```
+1. Reporter signale  ──► 0.1 QTA dépensé (anti-spam)
+2. Si ≥5 reports indépendants  ──► déclenche jury
+3. VRF tire 7 jurés  ──► parmi pool stake ≥100 QTA, rep > 0.6
+4. Vote scellé 24h  ──► commit-reveal Schnorr
+5. Verdict majorité  ──► payouts/slashing
+```
 
-- **PN-Counters** : soldes (incrémentation/décrémentation)
-- **G-Counters** : métriques réseau (total_watts, total_sova, total_kwh)
-- **DAG de Merkle** : nœuds adressés par BLAKE3, append-only, multi-têtes
+### 9.2 Verdicts et conséquences
+| Verdict | Créateur | Reporters | Jurés majoritaires | Jurés minoritaires |
+|---|---|---|---|---|
+| Innocent | rien | -0.1 QTA chacun | +0.5 QTA | 0 |
+| Warning | -10% mining 7j | rien | +0.5 QTA | 0 |
+| Hide | -50% mining 30j, vitrine masquée | rien | +0.5 QTA | 0 |
+| Ban | vitrine permanente off, -10% slashing balance | rien | +0.5 QTA | 0 |
 
-Propriétés CRDT : commutativité, associativité, idempotence → **cohérence à terme garantie** sans leader, sans vote, sans coordination. Pas d'attaque à 51% possible.
+### 9.3 Appel
+Coût : 50 QTA. Super-jury de 21 jurés. Verdict définitif.
 
----
-
-## 8. Transport Réseau
-
-**Iroh QUIC** : UDP chiffré, traversée NAT, gossip natif.
-
-Messages : Hello (watts+CPU+pays), WantNodes, HaveNodes, BroadcastTx, TaskAssign, TaskResult, Ping/Pong, ReportPeer.
-
-**Slashing** : avertissement (Shapley -50% / 24h) → suspension (7j) → expulsion (consensus des pairs).
-
----
-
-## 9. Fondation Cryptographique
-
-| Primitive | Algorithme |
-|-----------|-----------|
-| Signatures | Ed25519 |
-| Chiffrement | AES-256-GCM |
-| Dérivation clé | Argon2id |
-| Hachage | BLAKE3 |
-| Effacement mémoire | zeroize |
-| Preuves ZK | RISC Zero |
-| Post-Quantique | ML-DSA-65 (préparé) |
+### 9.4 Pourquoi VRF + commit-reveal
+- **VRF** (`schnorrkel`) : sélection prouvablement aléatoire, vérifiable, non-manipulable
+- **Commit-reveal** : empêche les jurés de copier les votes des premiers
+- **Schelling point** : voter avec la majorité paie ; les jurés cherchent la "vérité focalisable", pas leur opinion
 
 ---
 
-## 10. Marketplace de Calcul
+## 10. Anti-troll graduel
 
-**Niveau 1 — GRATUIT** : Calcul scientifique BOINC bénévole, financé par l'émission réseau.
+```
+reports validés (30 derniers jours)  →  malus mining
+   1                                 →  warning
+   3                                 →  -10%
+   5                                 →  -25%
+   8                                 →  -50%
+  12                                 →  -100% + vitrine off
+```
 
-**Niveau 2 — PAYÉ** : Labos/studios soumettent des tâches, paient en SOVA (2% brûlé).
-
-**Niveau 3 — PREMIUM** : Location GPU continue, enchères inversées (modèle Akash Network).
-
-**Federated Learning** : Entraînement IA distribué, données ne quittent jamais la machine → conformité RGPD native. Multiplicateur ×3.
-
-**Proof of Storage** (optionnel) : 10-100 GB de disque alloué, vérifié par challenges périodiques. Bonus ×0.5.
-
----
-
-## 11. DAO DeSci
-
-- **Trésorerie** : 5% des émissions (5 SOVA/h)
-- **Vote** : 1 SOVA staké = 1 vote
-- **Quorum** : 10% | **Majorité** : 66%
-- **Impact** : Les participants décident quelle science est financée. Résultats publiés en accès libre.
+**Récupération** : +1% par like positif validé. Reset complet après 30 jours sans nouveau report.
 
 ---
 
-## 12. Analyse de Sécurité
+## 11. Web of Trust — `trust_graph.rs`
 
-- **Sybil** : Shapley null-player + multiplicateur ×0.1 → économiquement irrationnel
-- **Fraude énergie** : TDP check → cross-validation → ZK-proof (infalsifiable)
-- **Double dépense** : PN-Counter monotone + burn double les pertes
-- **Capture consensus** : Impossible — CRDTs convergent algébriquement, pas par vote
-- **Tâche malveillante** : Sandboxing WASM/zkVM, aucun accès filesystem/réseau
+> **Problème PageRank classique** : sensible aux fermes de liens.
+> **Solution Quanta** : chaque user calcule **localement** un PageRank personnalisé partant de **lui-même** (damping 0,85, 20 itérations). Les fermes de likes externes ne te touchent pas si tu ne les suis pas.
 
----
-
-## 13. Feuille de Route
-
-| Phase | Délai | Jalon | Statut |
-|-------|-------|-------|--------|
-| Protocole Central | Terminé | Ed25519, AES-256, BLAKE3, Argon2id, zeroize | ✅ |
-| Oracle Énergétique | Terminé | 33 pays, watts CPU réels | ✅ |
-| Transport P2P | Terminé | Iroh QUIC, gossip vérifié 2 nœuds | ✅ |
-| Consensus CRDT | Terminé | PN/G-Counter, snapshot/restore | ✅ |
-| Phase 1 : Pivot | 2 semaines | Émission fixe, Shapley, BME | 🔧 |
-| Phase 2 : Solidité | 1 mois | Cross-validation, validateur passif, testnet | 📋 |
-| Phase 3 : Travail Utile | 2-4 mois | BOINC, marketplace, DeSci DAO | 📋 |
-| Phase 4 : ZK-Proof | 6+ mois | RISC Zero, vérification trustless | 📋 |
-| Phase 5 : Bridge | 3-6 mois | wSOVA ERC-20, Uniswap | 📋 |
-| Phase 6 : Échelle | 12+ mois | Federated Learning, Storage, GPU | 📋 |
+Score de confiance utilisé pour pondérer :
+- Le poids des likes reçus dans QuantaRank (du POV de qui cherche)
+- L'éligibilité au pool de jurés
+- La pondération des reports
 
 ---
 
-## 14. Conclusion
+## 12. Forums — Threads DAG
 
-SOVA repense fondamentalement ce qu'une cryptomonnaie peut être. En combinant la mesure d'énergie réelle (pas gaspillée), le calcul scientifique utile (pas du hachage vide), la distribution équitable par Shapley (pas premier arrivé, premier servi), la vérification par preuves à divulgation nulle (pas la confiance), et le financement démocratique de la science (pas des subventions centralisées), le protocole crée un système où chaque participant bénéficie de la présence de chaque autre.
-
-**Installe SOVA. Ton ordinateur aide à guérir le cancer pendant que tu dors. Tu es payé pour ça.**
-
----
-
-## Références
-
-1. Nakamoto, S. (2008). *Bitcoin : Un Système de Monnaie Électronique Pair-à-Pair.*
-2. Shapiro et al. (2011). *Types de Données Répliquées sans Conflit.* INRIA.
-3. Shapley, L. S. (1953). *Une Valeur pour les Jeux à N Personnes.* Prix Nobel 2012.
-4. Eurostat (2026). *Prix de l'électricité pour les consommateurs domestiques.*
-5. RISC Zero (2025). *RISC Zero zkVM : Preuves à Divulgation Nulle Généralistes.*
-6. Anderson, D. (2004). *BOINC : Un Système de Calcul sur Ressources Publiques.* UC Berkeley.
-7. McMahan et al. (2017). *Apprentissage Efficace en Communication sur Données Décentralisées.* Google.
-8. Render Network (2024). *Burn-and-Mint Equilibrium.*
-9. Protocol Labs (2017). *Filecoin : Un Réseau de Stockage Décentralisé.*
+- Forum = nœud racine signé (`name`, `description`, `creator_pk`)
+- Thread = enfant du forum, body sur DAG (>64 KB chunked)
+- Comment = enfant d'un thread ou d'un comment (réponses imbriquées)
+- Like / dislike / report par nœud
+- **Soft-fork** : un user peut copier un thread + l'embrancher différemment (clone signé, lien retour vers original) — utile pour scinder une discussion qui dérive
 
 ---
 
-**Licence** : CC BY-SA 4.0 | **Code Source** : Open source — Rust/Tauri/Svelte
+## 13. Identité et vie privée
+
+### 13.1 Pseudo + Wallet
+- Identité = clé Ed25519 (32 octets)
+- Pseudo affiché = libre, vérifié par le wallet (pas d'unicité globale forcée)
+- Avatar = identicon BLAKE3 par défaut
+
+### 13.2 Proof-of-personhood léger (innovation)
+> Pour réduire la barre, on ne demande pas KYC. On utilise un **âge de wallet + uptime** pondéré.
+> Pour des actions sensibles (jury, vote pondéré fort), on peut requérir un *attestation circle* : 5 wallets eux-mêmes attestés vouchent pour toi via signature. Web of trust scellé.
+
+### 13.3 Pages chiffrées (groupes privés)
+- Chiffrement symétrique AES-256-GCM, clé chiffrée par NaCl box pour chaque membre abonné
+- Le créateur peut révoquer un membre (rotation de clé + re-publication chunks)
+
+---
+
+## 14. Marketplace (déjà existant, élargi)
+
+Le module `marketplace.rs` v2 (tâches compute) reste. V3 ajoute :
+- **Services humains** : devs, designers, traducteurs proposent leurs prestations payées QUANTA. Escrow + arbitrage par jury si litige.
+- **Items numériques** : ebooks, musiques, modèles 3D, code source — chiffrés, débloqués à l'achat.
+- **Commissions** : 1% au protocole (burn), 0,5% au créateur du shop si embed sur autre site.
+
+---
+
+## 15. Bridges et exchanges (long terme)
+
+Quand 100 000 wallets actifs / 30 jours :
+1. Pool Uniswap v4 (Ethereum L2) — paire QTA/USDC
+2. Bridge ERC-20 audité (LayerZero ou Wormhole)
+3. Listing CEX (CoinGecko → Gate.io → MEXC → Kraken progressif)
+4. **Pas de pré-mine** : aucun token n'est créé hors mining. Le bridge nécessitera un *lockbox* on-protocol.
+
+---
+
+## 16. Roadmap
+
+| Phase | Contenu | Statut |
+|---|---|---|
+| V2 | Mining énergie, ledger, gossip, marketplace compute | ✅ |
+| V3.0 | CLAUDE.md + Whitepaper pivot | ✅ ce document |
+| V3.1 | Modules backend `domains` · `search` · `social` · `moderation` · `forums` · `trust_graph` | 🚧 en cours |
+| V3.2 | Site multi-pages + assets DAG, gossip étendu | 🚧 |
+| V3.3 | Frontend : Browser, PageBuilder, Search, Profile, Forums | 🚧 |
+| V3.4 | Tests + audit sécurité externe | À faire |
+| V3.5 | Bêta publique 100 testeurs | À faire |
+| V3.6 | Bridge + listing | T+12 mois |
+
+---
+
+## 17. FAQ
+
+**Q. Et si un site est illégal ?**
+R. Jury communautaire. Si verdict `Hide`/`Ban`, les pairs cessent volontairement de servir le contenu. Les pairs récalcitrants risquent leur propre réputation (les autres pairs peuvent les blacklister).
+
+**Q. Et si Iroh tombe ?**
+R. Iroh est un transport (QUIC). On peut basculer libp2p ou implémenter notre propre transport. L'architecture (DAG, ledger CRDT, gossip) est transport-agnostique.
+
+**Q. Et si un État tente de censurer ?**
+R. Aucun point central à fermer. Les pairs peuvent tourner sur Tor/I2P. Pour bloquer Quanta, il faudrait bloquer toutes les connexions QUIC sortantes du pays.
+
+**Q. Et si quelqu'un publie 1 million de pages spam ?**
+R. Coût : 1 QTA × 1M = 1M QTA. Plus le coût Harberger des domaines. Plus le slashing si signalé. Économiquement non viable.
+
+**Q. Comment commencer ?**
+R. Télécharge l'app, génère un wallet. 1h plus tard tu as 100 QTA disponibles (mining solo). Tu peux acheter ton premier domaine.
+
+---
+
+## 18. Conclusion
+
+Quanta n'est pas un Twitter décentralisé, ni un Google libre, ni un Wordpress P2P.
+**C'est les trois en un seul protocole, avec un coin qui aligne créateurs, modérateurs et lecteurs.**
+
+L'architecture est conservatrice : Rust + Iroh + Ed25519 + BLAKE3 — du standard cryptographique audité. L'innovation est dans la composition : Harberger pour les noms, quadratic voting pour les likes, jury VRF pour la modération, web of trust personnel pour le ranking, mining énergie pour l'émission.
+
+Le but n'est pas de remplacer Google demain. C'est de prouver qu'un Web où **chaque interaction crée de la valeur partagée** est techniquement possible — et économiquement soutenable.
+
+---
+
+*Quanta est un protocole libre (Apache-2.0). Le code est ouvert, les paramètres sont sur le ledger, les décisions de gouvernance future passeront par vote on-chain pondéré reputation.*

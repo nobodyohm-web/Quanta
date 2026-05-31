@@ -7,7 +7,7 @@
 ```
 Lis CLAUDE.md, .agent/memory.md, et .agent/design/tech_references.md.
 
-# Mission : Implémenter les 4 mécanismes V2 du protocole SOVA
+# Mission : Implémenter les 4 mécanismes V2 du protocole QUANTA
 
 Le code est propre (purge terminée). Il reste 4 features V2 critiques à câbler.
 Procède étape par étape. cargo check APRÈS CHAQUE ÉTAPE.
@@ -105,17 +105,17 @@ pub fn uptime_tick(&mut self, pk: &str, _total_mined: f64, total_network_watts: 
     };
 
     let poc = SybilGuard::poc_score(user);
-    let sova = my_share * SybilGuard::mining_multiplier(poc);
+    let quanta = my_share * SybilGuard::mining_multiplier(poc);
 
-    user.atn_balance += sova;
-    user.atn_earned += sova;
-    user.energy_atn_mined += sova;
+    user.atn_balance += quanta;
+    user.atn_earned += quanta;
+    user.energy_atn_mined += quanta;
 
     let score = compute_trust_score(user);
     user.trust_score = score;
     user.status = TrustStatus::from_score(score);
 
-    (sova, kwh_per_min)
+    (quanta, kwh_per_min)
 }
 ```
 
@@ -181,10 +181,10 @@ mod tests {
     #[test]
     fn test_emission_solo_full() {
         let mut rep = ReputationEngine::new();
-        let (sova, _kwh) = rep.uptime_tick("test_pk", 0.0, 0.0);
+        let (quanta, _kwh) = rep.uptime_tick("test_pk", 0.0, 0.0);
         // Solo : devrait recevoir ~EMISSION_PER_TICK (ajusté par PoC)
-        assert!(sova > 0.0);
-        assert!(sova <= EMISSION_PER_TICK * 1.1);
+        assert!(quanta > 0.0);
+        assert!(quanta <= EMISSION_PER_TICK * 1.1);
     }
 
     #[test]

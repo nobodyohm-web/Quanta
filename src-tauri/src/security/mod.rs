@@ -1,4 +1,4 @@
-// security/mod.rs — Post-Quantum Security Layer (SOVA)
+// security/mod.rs — Post-Quantum Security Layer (QUANTA)
 // ML-KEM (FIPS 203), ML-DSA (FIPS 204), AES-256-GCM, Argon2id, zeroize
 
 pub mod pq_vault;
@@ -7,6 +7,9 @@ pub mod crypto_agility;
 pub mod hybrid_crypto;
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use fips204::ml_dsa_65;
+use fips204::traits::Signer as _;
+use hybrid_crypto::derive_ml_dsa;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -28,18 +31,26 @@ pub struct PublicIdentity {
 /// Core crypto engine with zeroize-on-drop sensitive state
 pub struct CryptoEngine {
     key_pair: Option<KeyPair>,
+    /// Clé secrète ML-DSA-65 + clé publique hex, dérivées de la graine Ed25519.
+    /// `fips204::PrivateKey` est zeroize-on-drop (feature activée par défaut).
+    ml_dsa: Option<(ml_dsa_65::PrivateKey, String)>,
 }
 
 impl CryptoEngine {
-    pub fn new() -> Self { Self { key_pair: None } }
+    pub fn new() -> Self { Self { key_pair: None, ml_dsa: None } }
 
     pub fn generate_keypair(&mut self) -> PublicIdentity {
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();
         let bytes = vk.to_bytes().to_vec();
         let hex_str = hex::encode(&bytes);
+        // Dérive la paire ML-DSA-65 depuis la même graine (zéro secret en plus).
+        let mut seed = sk.to_bytes();
         self.key_pair = Some(KeyPair { signing_key: sk, verifying_key: vk });
-        PublicIdentity { public_key_hex: hex_str, public_key_bytes: bytes, pq_public_key_hex: None }
+        self.ml_dsa = derive_ml_dsa(&seed);
+        seed.zeroize();
+        let pq_public_key_hex = self.ml_dsa.as_ref().map(|(_, h)| h.clone());
+        PublicIdentity { public_key_hex: hex_str, public_key_bytes: bytes, pq_public_key_hex }
     }
 
     pub fn import_keypair(&mut self, sk_bytes: &[u8; 32]) -> Result<PublicIdentity, String> {
@@ -48,13 +59,17 @@ impl CryptoEngine {
         let bytes = vk.to_bytes().to_vec();
         let hex_str = hex::encode(&bytes);
         self.key_pair = Some(KeyPair { signing_key: sk, verifying_key: vk });
-        Ok(PublicIdentity { public_key_hex: hex_str, public_key_bytes: bytes, pq_public_key_hex: None })
+        // Recalcule la paire ML-DSA-65 à partir de la graine restaurée.
+        self.ml_dsa = derive_ml_dsa(sk_bytes);
+        let pq_public_key_hex = self.ml_dsa.as_ref().map(|(_, h)| h.clone());
+        Ok(PublicIdentity { public_key_hex: hex_str, public_key_bytes: bytes, pq_public_key_hex })
     }
 
     pub fn get_identity(&self) -> Result<PublicIdentity, String> {
         let kp = self.key_pair.as_ref().ok_or("No active keypair")?;
         let bytes = kp.verifying_key.to_bytes().to_vec();
-        Ok(PublicIdentity { public_key_hex: hex::encode(&bytes), public_key_bytes: bytes, pq_public_key_hex: None })
+        let pq_public_key_hex = self.ml_dsa.as_ref().map(|(_, h)| h.clone());
+        Ok(PublicIdentity { public_key_hex: hex::encode(&bytes), public_key_bytes: bytes, pq_public_key_hex })
     }
 
     pub fn get_secret_bytes(&self) -> Result<Vec<u8>, String> {
@@ -66,13 +81,22 @@ impl CryptoEngine {
         Ok(kp.signing_key.sign(data).to_bytes().to_vec())
     }
 
-    /// Hybrid sign : Ed25519 actif + ML-DSA stub (vide jusqu'à activation).
+    /// Signature hybride : Ed25519 + ML-DSA-65 (FIPS 204).
     /// Renvoie `(classical_sig_bytes, quantum_sig_bytes, pq_pk_hex)`.
+    /// Si aucune clé ML-DSA n'est dérivée, la couche quantum est vide et la
+    /// vérification retombe en Ed25519 seul (rétro-compat).
     pub fn sign_hybrid(&self, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, String), String> {
         let kp = self.key_pair.as_ref().ok_or("No active keypair")?;
         let classical = kp.signing_key.sign(data).to_bytes().to_vec();
-        // Quantum + pq_pk seront non vides quand `ml-dsa >= 0.2` sera stable.
-        Ok((classical, Vec::new(), String::new()))
+        match &self.ml_dsa {
+            Some((sk, pk_hex)) => {
+                let sig = sk
+                    .try_sign_with_rng(&mut OsRng, data, &[])
+                    .map_err(|_| "ML-DSA signing failed".to_string())?;
+                Ok((classical, sig.to_vec(), pk_hex.clone()))
+            }
+            None => Ok((classical, Vec::new(), String::new())),
+        }
     }
 
     pub fn verify(pk: &[u8], data: &[u8], sig: &[u8]) -> Result<bool, String> {

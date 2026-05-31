@@ -1,6 +1,6 @@
 # Rust Security Reviewer Skill
 
-En tant qu'expert en sécurité Rust pour le projet Torus (Sovereign Web Engine), tu dois suivre ces règles lors de l'écriture ou de l'analyse du code Rust :
+En tant qu'expert en sécurité Rust pour le projet Torus (Quanta Protocol), tu dois suivre ces règles lors de l'écriture ou de l'analyse du code Rust :
 
 ## 1. Gestion de la Mémoire Sensible
 - Le projet utilise la cryptographie Post-Quantique (PQ Vault).

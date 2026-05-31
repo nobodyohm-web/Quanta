@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Sovereign Web Engine",
-  "version": "0.1.0",
-  "identifier": "com.sovereign.webengine",
+  "productName": "Quanta",
+  "version": "3.3.0",
+  "identifier": "com.quanta.protocol",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "SOVA",
+        "title": "QUANTA",
         "width": 1400,
         "height": 900,
         "minWidth": 1000,
@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; connect-src 'self' https://github.com https://api.github.com"
     }
   },
   "bundle": {
@@ -36,6 +36,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyNDExMzA2QkU5MjBDRTcKUldUbkRKSytCaE5CNGtVUGNTS2hRUFZydWw0OTZzOTFjNTFEdGZOaytjMkJDS1JtcXk1bkhIeUIK",
+      "endpoints": [
+        "https://github.com/nobodyohm-web/Torus/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

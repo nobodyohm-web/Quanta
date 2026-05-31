@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * LiveCounter — Animated numeric value that tweens from old to new.
-   * Used for ATN balances, view counts, trust scores — anywhere a number
+   * Used for QUANTA balances, view counts, trust scores — anywhere a number
    * arrives async and should feel "alive" rather than snapping into place.
    */
   let { value = 0, decimals = 0, duration = 600, prefix = "", suffix = "" }: {

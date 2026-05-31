@@ -1,8 +1,8 @@
-Effectue le refactoring V2 du système économique SOVA :
+Effectue le refactoring V2 du système économique QUANTA :
 
 1. Lis les specs complètes :
-   - .agent/design/sova_v2_vision.md
-   - .agent/design/sova_v2_innovations.md
+   - .agent/design/quanta_v2_vision.md
+   - .agent/design/quanta_v2_innovations.md
    - .agent/design/tech_references.md (section Shapley + BME)
 
 2. Vérifie l'état actuel :
@@ -11,7 +11,7 @@ Effectue le refactoring V2 du système économique SOVA :
    - Le burn rate est-il actif ?
 
 3. Implémente la prochaine étape non-faite dans cette liste :
-   - [ ] Émission fixe 100 SOVA/h (remplacer halving dans reputation.rs)
+   - [ ] Émission fixe 100 QUANTA/h (remplacer halving dans reputation.rs)
    - [ ] Distribution proportionnelle aux watts (remplacer uptime_tick)
    - [ ] Shapley Value basique (énergie + uptime)
    - [ ] Burn rate 1% sur transferts (modifier ledger.rs)

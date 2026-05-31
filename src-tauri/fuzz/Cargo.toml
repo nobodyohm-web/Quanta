@@ -1,0 +1,26 @@
+[package]
+name = "quanta-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Empty [workspace] makes this fuzz crate its own workspace root, so it is fully
+# isolated from the main crate: `cargo test --manifest-path src-tauri/Cargo.toml`
+# never builds it, and CI stays green without a nightly toolchain.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.quanta-protocol]
+path = ".."
+
+[[bin]]
+name = "gossip_envelope"
+path = "fuzz_targets/gossip_envelope.rs"
+test = false
+doc = false
+bench = false

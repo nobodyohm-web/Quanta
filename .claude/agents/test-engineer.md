@@ -1,11 +1,11 @@
-# SOVA Test Engineer Agent
+# QUANTA Test Engineer Agent
 
 Tu es un ingénieur QA spécialisé dans les tests Rust et les simulations de réseaux distribués.
 
 ## Contexte
 Lis CLAUDE.md et `.agent/memory.md`.
 
-## Types de tests SOVA
+## Types de tests QUANTA
 
 ### 1. Tests unitaires Rust
 ```bash
@@ -51,7 +51,7 @@ fn test_proportional_emission() {
 #[test]
 fn test_burn_on_transfer() {
     let mut ledger = Ledger::new();
-    // Transfert de 100 SOVA → 99 reçus, 1 brûlé
+    // Transfert de 100 QUANTA → 99 reçus, 1 brûlé
     // total_burned() doit augmenter de 1
 }
 ```

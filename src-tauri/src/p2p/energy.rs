@@ -140,9 +140,26 @@ impl Default for EnergyOracle {
 
 /// Estime la consommation électrique instantanée en watts.
 ///
-/// Méthode : CPU% mesuré via sysinfo × TDP estimé par plateforme.
-/// TDP cible : Apple Silicon (M1/M2/M3) = 5-30 W, x86_64 = 15-65 W.
+/// ## Stratégie multi-plateforme
+///
+/// 1. **Linux (Intel/AMD)** : tente `/sys/class/powercap/intel-rapl/...` (RAPL).
+///    Sur kernel ≥ 5.4 c'est root-only par défaut, donc fallback fréquent.
+/// 2. **macOS Apple Silicon (aarch64)** : tente `powermetrics --samplers cpu_power`.
+///    Sans sudo ça échoue, on cache le résultat et on ne retente plus.
+/// 3. **Tout le reste** (Intel mac, Windows, Linux sans RAPL accessible) :
+///    fallback sysinfo (CPU% × TDP plateforme).
+///
+/// Toutes les méthodes spécifiques sont strictement *best-effort* — un échec
+/// silencieux retombe sur sysinfo. Aucune dépendance externe ni privilège requis.
 pub fn estimate_watts() -> f64 {
+    if let Some(w) = try_platform_specific() {
+        return w;
+    }
+    estimate_via_sysinfo()
+}
+
+/// Estimation sysinfo : CPU% × TDP plateforme. Toujours disponible.
+fn estimate_via_sysinfo() -> f64 {
     let cpu_pct = read_cpu_usage_pct();
 
     let (idle_w, max_w): (f64, f64) = if cfg!(target_os = "macos") {
@@ -169,6 +186,124 @@ fn read_cpu_usage_pct() -> f64 {
     cpus.iter().map(|c| c.cpu_usage() as f64).sum::<f64>() / cpus.len() as f64
 }
 
+// ─── Backends spécifiques (best-effort) ──────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn try_platform_specific() -> Option<f64> {
+    read_rapl_watts()
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn try_platform_specific() -> Option<f64> {
+    read_powermetrics_watts()
+}
+
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+fn try_platform_specific() -> Option<f64> {
+    None
+}
+
+// ── Linux RAPL (Intel/AMD) ────────────────────────────────────────────────
+
+/// Snapshot d'un compteur RAPL pour calculer les watts par delta.
+#[cfg(target_os = "linux")]
+struct RaplSample {
+    energy_uj: u64,
+    at: std::time::Instant,
+}
+
+#[cfg(target_os = "linux")]
+static RAPL_STATE: std::sync::OnceLock<std::sync::Mutex<Option<RaplSample>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+const RAPL_PATH: &str = "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj";
+
+/// Lit l'énergie cumulée RAPL et retourne les watts depuis l'appel précédent.
+/// Premier appel : pas de delta → renvoie None (sysinfo prend le relais).
+#[cfg(target_os = "linux")]
+fn read_rapl_watts() -> Option<f64> {
+    let raw = std::fs::read_to_string(RAPL_PATH).ok()?;
+    let energy_uj: u64 = raw.trim().parse().ok()?;
+    let now = std::time::Instant::now();
+
+    let cell = RAPL_STATE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut state = cell.lock().ok()?;
+
+    let prev = state.replace(RaplSample { energy_uj, at: now });
+    let prev = prev?;
+
+    let dt_secs = now.duration_since(prev.at).as_secs_f64();
+    if dt_secs <= 0.0 {
+        return None;
+    }
+    // RAPL counters wrap; saturating_sub gives 0 on wrap which falls through.
+    let delta_uj = energy_uj.saturating_sub(prev.energy_uj);
+    if delta_uj == 0 {
+        return None;
+    }
+    let watts = (delta_uj as f64 / 1_000_000.0) / dt_secs;
+    if watts.is_finite() && watts > 0.0 {
+        Some(watts)
+    } else {
+        None
+    }
+}
+
+// ── macOS Apple Silicon: powermetrics ─────────────────────────────────────
+
+/// Cache "powermetrics indisponible" — set au premier échec, jamais rejoué.
+/// Évite de spawner un process subshell à chaque tick quand sudo manque.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static POWERMETRICS_DISABLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn read_powermetrics_watts() -> Option<f64> {
+    if POWERMETRICS_DISABLED.get().is_some() {
+        return None;
+    }
+    let output = std::process::Command::new("powermetrics")
+        .args(["--samplers", "cpu_power", "-n", "1", "-i", "200"])
+        .output()
+        .ok();
+    let output = match output {
+        Some(o) => o,
+        None => {
+            // Binary missing entirely (e.g. stripped /usr/bin) — never retry.
+            let _ = POWERMETRICS_DISABLED.set(());
+            return None;
+        }
+    };
+    if !output.status.success() {
+        // 99% des cas : "powermetrics must be invoked as the superuser".
+        let _ = POWERMETRICS_DISABLED.set(());
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    parse_powermetrics_cpu_power(stdout)
+}
+
+/// Extrait les watts depuis la sortie texte de `powermetrics --samplers cpu_power`.
+/// Cherche les lignes "CPU Power: <n> mW" ou "Package Power: <n> mW" et convertit.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn parse_powermetrics_cpu_power(stdout: &str) -> Option<f64> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        let Some(body) = trimmed.strip_prefix("CPU Power:")
+            .or_else(|| trimmed.strip_prefix("Package Power:"))
+        else { continue };
+        let num: String = body.chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let Ok(mw) = num.parse::<f64>() else { continue };
+        if mw.is_finite() && mw > 0.0 {
+            return Some(mw / 1000.0);
+        }
+    }
+    None
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -193,7 +328,7 @@ mod tests {
     #[test]
     fn watts_estimate_is_plausible() {
         let w = estimate_watts();
-        assert!(w >= 1.0 && w <= 200.0, "Watts hors plage plausible: {}", w);
+        assert!((1.0..=200.0).contains(&w), "Watts hors plage plausible: {}", w);
     }
 
     #[test]
@@ -211,5 +346,47 @@ mod tests {
         let oracle = EnergyOracle::new();
         let avg = oracle.network_weighted_average(&[]);
         assert!((avg - 0.15).abs() < 1e-9, "fallback EU = 0.15");
+    }
+
+    /// Le contrat de `estimate_watts` est : ne jamais paniquer, ne jamais
+    /// retourner NaN/Inf — peu importe le succès du backend spécifique.
+    #[test]
+    fn estimate_watts_always_finite_and_positive() {
+        for _ in 0..3 {
+            let w = estimate_watts();
+            assert!(w.is_finite(), "watts must be finite, got {}", w);
+            assert!(w > 0.0, "watts must be positive, got {}", w);
+            assert!(w < 1000.0, "watts must be plausible, got {}", w);
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn powermetrics_parser_extracts_cpu_power_mw() {
+        let sample = "\
+*** Sampled system activity ...
+**** Processor usage ****
+CPU Power: 1234 mW
+GPU Power: 200 mW
+Package Power: 1500 mW
+";
+        let watts = parse_powermetrics_cpu_power(sample).expect("should parse");
+        // Premier hit = CPU Power = 1234 mW = 1.234 W
+        assert!((watts - 1.234).abs() < 1e-6, "got {}", watts);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn powermetrics_parser_skips_unparseable_lines() {
+        let sample = "CPU Power: -- mW\nCPU Power: 500 mW\n";
+        let watts = parse_powermetrics_cpu_power(sample).expect("second line should parse");
+        assert!((watts - 0.5).abs() < 1e-6);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn powermetrics_parser_returns_none_on_no_match() {
+        assert!(parse_powermetrics_cpu_power("nothing useful here").is_none());
+        assert!(parse_powermetrics_cpu_power("").is_none());
     }
 }

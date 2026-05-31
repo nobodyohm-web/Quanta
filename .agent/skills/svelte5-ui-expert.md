@@ -1,6 +1,6 @@
 # Svelte 5 UI Expert Skill
 
-Torus est conçu pour être esthétiquement "premium" avec une identité visuelle "Titan" et moderne (effets de verre, fondations robustes).
+Torus est conçu pour être esthétiquement "premium" avec une identité visuelle "Quanta" et moderne (effets de verre, fondations robustes).
 
 ## 1. Utilisation de Svelte 5 (Runes)
 - Interdiction absolue d'utiliser la syntaxe Svelte 4 (`export let variable`, `$store`).

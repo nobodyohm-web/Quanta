@@ -2,21 +2,32 @@
   "permissions": {
     "allow": [
       "Bash(npm run *)",
+      "Bash(npx *)",
       "Bash(cargo *)",
-      "Bash(git add *)",
-      "Bash(git commit *)",
-      "Bash(git checkout *)",
-      "Bash(git branch *)",
-      "Bash(git log *)",
-      "Bash(git diff *)",
-      "Bash(git status)",
+      "Bash(git *)",
       "Bash(grep *)",
       "Bash(find *)",
       "Bash(wc *)",
       "Bash(cat *)",
       "Bash(head *)",
       "Bash(tail *)",
-      "Bash(ls *)"
+      "Bash(ls *)",
+      "Bash(echo *)",
+      "Bash(sort *)",
+      "Bash(RUST_LOG=* *)",
+      "Bash(tokio-console *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(touch *)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "MultiEdit(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(sudo *)"
     ]
   },
   "effortLevel": "xhigh"

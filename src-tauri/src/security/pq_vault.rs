@@ -8,7 +8,7 @@ use zeroize::Zeroize;
 
 /// PQ-hardened identity (hybrid: Ed25519 + future ML-DSA-65)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TitanIdentity {
+pub struct QuantaIdentity {
     pub public_key_hex: String,
     pub display_name: String,
     pub created_at: String,
@@ -17,6 +17,10 @@ pub struct TitanIdentity {
     pub pq_algorithm: String,
     /// Security level: "classical", "hybrid", "post-quantum"
     pub security_level: String,
+    /// ML-DSA-65 public key (hex), dérivée de la graine Ed25519. `None` si la
+    /// couche PQ n'a pas pu être dérivée (repli classique).
+    #[serde(default)]
+    pub pq_public_key_hex: Option<String>,
 }
 
 /// S/Kademlia node puzzle result for Sybil resistance
@@ -33,7 +37,7 @@ pub struct PQVault;
 
 /// Bundle returned when creating a new identity:
 /// (public identity, raw public key bytes, encrypted secret key, AES-GCM nonce).
-pub type CreatedIdentity = (TitanIdentity, Vec<u8>, Vec<u8>, Vec<u8>);
+pub type CreatedIdentity = (QuantaIdentity, Vec<u8>, Vec<u8>, Vec<u8>);
 
 impl PQVault {
     /// Create a new sovereign identity with Ed25519 + PQ preparation
@@ -52,15 +56,17 @@ impl PQVault {
         // Encrypt the secret key
         let enc = cipher::encrypt_and_wipe(&mut sk_bytes, &enc_key)?;
         
-        let identity = TitanIdentity {
+        let security_level = if pk.pq_public_key_hex.is_some() { "hybrid" } else { "classical" };
+        let identity = QuantaIdentity {
             public_key_hex: pk.public_key_hex,
             display_name: display_name.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             is_initialized: true,
-            pq_algorithm: "Ed25519 (ML-DSA-65 ready)".to_string(),
-            security_level: "classical".to_string(),
+            pq_algorithm: "Ed25519 + ML-DSA-65 (FIPS 204)".to_string(),
+            security_level: security_level.to_string(),
+            pq_public_key_hex: pk.pq_public_key_hex,
         };
-        
+
         Ok((identity, pk.public_key_bytes, enc.ciphertext, enc.nonce))
     }
 
@@ -73,7 +79,7 @@ impl PQVault {
         password: &str,
         display_name: &str,
         created_at: &str,
-    ) -> Result<TitanIdentity, String> {
+    ) -> Result<QuantaIdentity, String> {
         let salt = CryptoEngine::blake3_hash(hex::encode(public_key).as_bytes());
         let enc_key = cipher::derive_key(password, &salt[..16])?;
         let mut sk_bytes = cipher::decrypt(encrypted_sk, &enc_key, nonce)?;
@@ -84,13 +90,15 @@ impl PQVault {
         // Zeroize decrypted secret key immediately
         sk_bytes.zeroize();
 
-        Ok(TitanIdentity {
+        let security_level = if pk.pq_public_key_hex.is_some() { "hybrid" } else { "classical" };
+        Ok(QuantaIdentity {
             public_key_hex: pk.public_key_hex,
             display_name: display_name.to_string(),
             created_at: created_at.to_string(),
             is_initialized: true,
-            pq_algorithm: "Ed25519 (ML-DSA-65 ready)".to_string(),
-            security_level: "classical".to_string(),
+            pq_algorithm: "Ed25519 + ML-DSA-65 (FIPS 204)".to_string(),
+            security_level: security_level.to_string(),
+            pq_public_key_hex: pk.pq_public_key_hex,
         })
     }
 

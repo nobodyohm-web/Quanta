@@ -131,6 +131,30 @@ impl Database {
         Ok(())
     }
 
+    /// Save several state snapshots in a single SQLite transaction.
+    /// Reduces fsync overhead from N to 1 and gives all-or-nothing semantics.
+    pub async fn save_states(&self, items: &[(&str, &str)]) -> Result<(), String> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute("BEGIN", ()).await
+            .map_err(|e| format!("save_states begin: {}", e))?;
+        for (key, json_data) in items {
+            if let Err(e) = self.conn.execute(
+                "INSERT OR REPLACE INTO state_snapshots (key, data, updated_at) VALUES (?1, ?2, ?3)",
+                libsql::params![*key, *json_data, now.clone()],
+            ).await {
+                // Roll back on any error so we don't leave a half-written batch.
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return Err(format!("save_states({}): {}", key, e));
+            }
+        }
+        self.conn.execute("COMMIT", ()).await
+            .map_err(|e| format!("save_states commit: {}", e))?;
+        Ok(())
+    }
+
     /// Load a JSON snapshot for the given key. Returns None if no snapshot exists.
     pub async fn load_state(&self, key: &str) -> Result<Option<String>, String> {
         let mut rows = self.conn.query(

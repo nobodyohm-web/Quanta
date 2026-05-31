@@ -1,25 +1,57 @@
 #![allow(dead_code)] // Module Phase 3 — pas encore intégré
-//! Module Shapley Value — Distribution équitable des récompenses SOVA
+//! Module Contribution Scoring — Distribution équitable des récompenses QUANTA
 //!
-//! Implémente une approximation linéaire O(n) de la Shapley Value
-//! pour distribuer les 100 SOVA/h entre les nœuds du réseau.
+//! ## Algorithme
 //!
-//! Facteurs de contribution :
-//!   - Énergie (30%) : watts mesurés / total réseau
-//!   - Travail (35%) : tâches exécutées / total tâches
-//!   - Validation (20%) : blocs vérifiés / total blocs
-//!   - Uptime (15%) : heures en ligne / max uptime réseau
+//! Ce module implémente un **scoring linéaire pondéré** O(n) inspiré de la
+//! Shapley Value, mais ce n'est **PAS** un calcul Shapley exact.
+//!
+//! La Shapley Value réelle (Shapley 1953) requiert l'évaluation de toutes les
+//! coalitions possibles (2^n), ce qui est NP-hard. Les approximations Monte
+//! Carlo standard (permutation sampling) convergent en O(n·m) avec m samples.
+//!
+//! Notre approche est un **weighted linear contribution score** qui respecte
+//! les axiomes d'efficience (Σ = 1) et de symétrie (agents identiques → parts
+//! égales), mais ne garantit pas l'axiome de marginalité (un agent ne peut
+//! recevoir plus que sa contribution marginale à toute coalition).
+//!
+//! **Facteurs de contribution v2 (V3 social web)** :
+//!   - Énergie (25%)        : watts mesurés / total réseau
+//!   - Travail compute (25%): tâches exécutées / total tâches
+//!   - Validation (20%)     : blocs vérifiés / total blocs
+//!   - Uptime (15%)         : heures en ligne / max uptime réseau
+//!   - **Utilité sociale (15%)** : likes pondérés reçus / total réseau (V3)
+//!
+//! Le facteur social provient de `SocialState::page_stats`. Il récompense
+//! les créateurs dont le contenu est apprécié par les autres utilisateurs
+//! (vote quadratique → résistance aux fermes de bots).
 //!
 //! Référence : Lloyd S. Shapley, "A Value for n-Person Games", 1953
+//! Note : notre implémentation est une *approximation linéaire*, pas le
+//! calcul combinatoire original.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Poids Shapley — configurables, somme = 1.0
-const W_ENERGY: f64 = 0.30;
-const W_WORK: f64 = 0.35;
+/// Poids Shapley v2 — configurables, somme = 1.0 (CLAUDE.md règle #2)
+const W_ENERGY: f64 = 0.25;
+const W_WORK: f64 = 0.25;
 const W_VALIDATION: f64 = 0.20;
 const W_UPTIME: f64 = 0.15;
+const W_SOCIAL: f64 = 0.15;
+
+/// Mode de contribution du nœud (détection automatique).
+/// Affecte le calcul Shapley quand aucune tâche marketplace n'existe encore :
+///   - Active : le travail est estimé proportionnel à l'énergie (energy ≈ work)
+///   - Research : futur — score max sur le travail (vérifié par ZK)
+///   - Guardian : pas de travail, mais validation + uptime = ~35% de Shapley
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub enum NodeMode {
+    #[default]
+    Active,
+    Research,
+    Guardian,
+}
 
 /// Statistiques d'un nœud pour le calcul Shapley
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -33,6 +65,12 @@ pub struct NodeContribution {
     pub blocks_verified: u64,
     /// Minutes en ligne depuis le dernier reset
     pub uptime_minutes: u64,
+    /// Mode de contribution (Active, Research, Guardian)
+    pub mode: NodeMode,
+    /// V3 — Likes pondérés (Σ √montant_µQTA) reçus par les contenus de ce wallet.
+    /// Source : `SocialState::page_stats(...).weighted_likes` agrégé par auteur.
+    #[serde(default)]
+    pub weighted_likes: f64,
 }
 
 /// Agrégat réseau (totaux de tous les nœuds)
@@ -42,6 +80,8 @@ pub struct NetworkTotals {
     pub total_tasks: u64,
     pub total_blocks_verified: u64,
     pub max_uptime_minutes: u64,
+    /// V3 — Σ likes pondérés sur tous les nœuds (pour normaliser le facteur social).
+    pub total_weighted_likes: f64,
     pub node_count: usize,
 }
 
@@ -52,10 +92,12 @@ impl NetworkTotals {
         let mut total_tasks = 0u64;
         let mut total_blocks_verified = 0u64;
         let mut max_uptime_minutes = 0u64;
+        let mut total_weighted_likes = 0.0_f64;
         for c in contribs.values() {
             total_watts += c.watts;
             total_tasks += c.tasks_completed;
             total_blocks_verified += c.blocks_verified;
+            total_weighted_likes += c.weighted_likes;
             if c.uptime_minutes > max_uptime_minutes {
                 max_uptime_minutes = c.uptime_minutes;
             }
@@ -65,15 +107,17 @@ impl NetworkTotals {
             total_tasks,
             total_blocks_verified,
             max_uptime_minutes,
+            total_weighted_likes,
             node_count: contribs.len(),
         }
     }
 }
 
-/// Calcule le score Shapley d'un nœud (approximation linéaire).
+/// Calcule le score de contribution d'un nœud (weighted linear, inspiré Shapley).
 ///
 /// Retourne un score entre 0.0 et 1.0 représentant la part du nœud
-/// dans l'émission réseau.
+/// dans l'émission réseau. Ce n'est PAS un calcul Shapley exact (NP-hard)
+/// mais un scoring linéaire pondéré qui satisfait l'axiome d'efficience.
 ///
 /// # Invariants
 /// - Si un seul nœud → score = 1.0 (reçoit tout)
@@ -94,11 +138,27 @@ pub fn shapley_score(node: &NodeContribution, network: &NetworkTotals) -> f64 {
         1.0 / network.node_count as f64
     };
 
-    // Facteur travail : ma part relative de tâches complétées
+    // Facteur travail : ma part relative de tâches complétées.
+    // Si aucune tâche marketplace n'existe (Phase 1-2), le mode détermine
+    // le fallback : Active = proportionnel aux watts, Guardian = 0 (il ne "travaille" pas).
     let work = if network.total_tasks > 0 {
         node.tasks_completed as f64 / network.total_tasks as f64
     } else {
-        1.0 / network.node_count as f64 // pas de tâches = distribution uniforme
+        match node.mode {
+            NodeMode::Active | NodeMode::Research => {
+                // Fallback : énergie ≈ travail (même ratio que le facteur énergie)
+                if network.total_watts > 0.0 {
+                    node.watts / network.total_watts
+                } else {
+                    1.0 / network.node_count as f64
+                }
+            }
+            NodeMode::Guardian => {
+                // Le gardien ne produit pas de travail compute — il sécurise.
+                // Son gain vient de validation (20%) + uptime (15%).
+                0.0
+            }
+        }
     };
 
     // Facteur validation : ma part relative de blocs vérifiés
@@ -108,15 +168,28 @@ pub fn shapley_score(node: &NodeContribution, network: &NetworkTotals) -> f64 {
         1.0 / network.node_count as f64
     };
 
-    // Facteur uptime : mon uptime relatif au meilleur
+    // Facteur uptime : ma part relative d'uptime
     let uptime = if network.max_uptime_minutes > 0 {
         node.uptime_minutes as f64 / network.max_uptime_minutes as f64
     } else {
         1.0
     };
 
-    // Score Shapley pondéré
-    W_ENERGY * energy + W_WORK * work + W_VALIDATION * validation + W_UPTIME * uptime
+    // V3 — Facteur utilité sociale : ma part relative de likes pondérés.
+    // Tant que personne n'a reçu de like (réseau pré-V3), on distribue à parts
+    // égales pour ne pas pénaliser les Guardian/Active sans contenu.
+    let social = if network.total_weighted_likes > 0.0 {
+        node.weighted_likes / network.total_weighted_likes
+    } else {
+        1.0 / network.node_count as f64
+    };
+
+    // Score Shapley v2 pondéré (somme des poids = 1.0)
+    W_ENERGY * energy
+        + W_WORK * work
+        + W_VALIDATION * validation
+        + W_UPTIME * uptime
+        + W_SOCIAL * social
 }
 
 /// Calcule les scores Shapley de tous les nœuds et normalise
@@ -146,9 +219,9 @@ pub fn compute_all_shares(
 
 /// Distribue l'émission d'un tick entre les nœuds selon leur Shapley score.
 ///
-/// `emission_per_tick` = 100 SOVA/h / 60 = 1.6667 SOVA/min
+/// `emission_per_tick` = 100 QUANTA/h / 60 = 1.6667 QUANTA/min
 ///
-/// Retourne : node_id → SOVA à créditer
+/// Retourne : node_id → QUANTA à créditer
 pub fn distribute_emission(
     contribs: &HashMap<String, NodeContribution>,
     emission_per_tick: f64,
@@ -169,6 +242,20 @@ mod tests {
         NodeContribution {
             node_id: id.to_string(),
             watts, tasks_completed: tasks, blocks_verified: blocks, uptime_minutes: uptime,
+            mode: NodeMode::Active,
+            weighted_likes: 0.0,
+        }
+    }
+
+    fn make_guardian(id: &str, blocks: u64, uptime: u64) -> NodeContribution {
+        NodeContribution {
+            node_id: id.to_string(),
+            watts: 3.0, // Raspberry Pi level
+            tasks_completed: 0,
+            blocks_verified: blocks,
+            uptime_minutes: uptime,
+            mode: NodeMode::Guardian,
+            weighted_likes: 0.0,
         }
     }
 
@@ -215,19 +302,56 @@ mod tests {
         let mut contribs = HashMap::new();
         contribs.insert("A".into(), make_node("A", 100.0, 10, 5, 60));
         contribs.insert("B".into(), make_node("B", 100.0, 10, 5, 60));
-        let emission = 100.0 / 60.0; // 1.6667 SOVA/min
+        let emission = 100.0 / 60.0; // 1.6667 QUANTA/min
         let dist = distribute_emission(&contribs, emission);
         let total: f64 = dist.values().sum();
         assert!((total - emission).abs() < 1e-6);
     }
 
     #[test]
-    fn test_no_tasks_uniform_work_factor() {
-        // Quand aucune tâche n'a été soumise, le facteur travail est uniforme
+    fn test_no_tasks_active_nodes_get_work_credit() {
+        // Without marketplace tasks, Active nodes get work credit proportional to watts
         let mut contribs = HashMap::new();
-        contribs.insert("A".into(), make_node("A", 100.0, 0, 0, 60));
-        contribs.insert("B".into(), make_node("B", 100.0, 0, 0, 60));
+        contribs.insert("A".into(), make_node("A", 100.0, 0, 5, 60));
+        contribs.insert("B".into(), make_node("B", 100.0, 0, 5, 60));
         let shares = compute_all_shares(&contribs);
+        // Both Active, same watts → equal shares
         assert!((shares["A"] - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_guardian_earns_about_35_percent() {
+        // Guardian (3W, no work) vs Active (100W, no marketplace tasks)
+        // Both have same validation (10 blocks) and uptime (60 min).
+        // Guardian should earn ~35% of total (validation 20% + uptime 15%).
+        // Active gets energy (30%) + work-fallback (35%) + validation (20%) + uptime (15%).
+        let mut contribs = HashMap::new();
+        contribs.insert("Miner".into(), make_node("Miner", 100.0, 0, 10, 60));
+        contribs.insert("Guard".into(), make_guardian("Guard", 10, 60));
+        let shares = compute_all_shares(&contribs);
+
+        let guard_share = shares["Guard"];
+        let miner_share = shares["Miner"];
+
+        // Guardian should get between 20% and 45% of total emission
+        assert!(guard_share > 0.15,
+            "Guardian should earn >15% of emission, got {:.1}%", guard_share * 100.0);
+        assert!(guard_share < 0.45,
+            "Guardian should earn <45% of emission, got {:.1}%", guard_share * 100.0);
+        // Active miner should always earn more than guardian
+        assert!(miner_share > guard_share,
+            "Miner ({:.1}%) should earn more than Guardian ({:.1}%)",
+            miner_share * 100.0, guard_share * 100.0);
+
+        println!("  Guardian: {:.1}% | Miner: {:.1}%", guard_share * 100.0, miner_share * 100.0);
+    }
+
+    #[test]
+    fn test_guardian_still_earns_something() {
+        // Solo guardian still gets full emission (sole node)
+        let mut contribs = HashMap::new();
+        contribs.insert("G".into(), make_guardian("G", 5, 60));
+        let shares = compute_all_shares(&contribs);
+        assert!((shares["G"] - 1.0).abs() < 1e-9, "Solo guardian should get 100%");
     }
 }

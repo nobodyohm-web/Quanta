@@ -1,11 +1,16 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { check } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { getPrefs, setPrefs, applyTheme, type Prefs } from "./prefs";
 
   let prefs = $state<Prefs>(getPrefs());
   let nodeTicket = $state<string>("");
   let ticketCopied = $state(false);
   let economy = $state<any>(null);
+  let peerInput = $state("");
+  let connectStatus = $state<"idle" | "ok" | "error">("idle");
+  let connectMsg = $state("");
 
   $effect(() => {
     setPrefs(prefs);
@@ -28,12 +33,118 @@
     setTimeout(() => ticketCopied = false, 1600);
   }
 
+  async function connectPeer() {
+    if (!peerInput.trim()) return;
+    connectStatus = "idle";
+    connectMsg = "";
+    try {
+      await invoke("connect_peer", { peerId: peerInput.trim() });
+      connectStatus = "ok";
+      connectMsg = "Connecté !";
+      peerInput = "";
+      setTimeout(() => { connectStatus = "idle"; connectMsg = ""; }, 3000);
+    } catch (e: any) {
+      connectStatus = "error";
+      connectMsg = String(e);
+    }
+  }
+
   function setTheme(t: "light" | "dark" | "auto") {
     prefs = { ...prefs, theme: t };
   }
 
   function setLockMinutes(m: number) {
     prefs = { ...prefs, lockMinutes: m };
+  }
+
+  // ── OTA Update ──
+  let updateStatus = $state<"idle" | "checking" | "downloading" | "ready" | "latest" | "error">("idle");
+  let updateVersion = $state("");
+  let updateError = $state("");
+  let downloadProgress = $state(0);
+
+  async function checkForUpdate() {
+    updateStatus = "checking";
+    updateError = "";
+    try {
+      const update = await check();
+      if (update) {
+        updateVersion = update.version;
+        updateStatus = "downloading";
+        let totalBytes = 0;
+        let downloadedBytes = 0;
+        await update.downloadAndInstall((event) => {
+          if ('contentLength' in event && event.contentLength) {
+            totalBytes = event.contentLength as number;
+          }
+          if ('chunkLength' in event && event.chunkLength) {
+            downloadedBytes += event.chunkLength as number;
+            if (totalBytes > 0) {
+              downloadProgress = Math.round((downloadedBytes / totalBytes) * 100);
+            }
+          }
+        });
+        updateStatus = "ready";
+      } else {
+        updateStatus = "latest";
+        setTimeout(() => updateStatus = "idle", 3000);
+      }
+    } catch (e) {
+      updateError = String(e);
+      updateStatus = "error";
+    }
+  }
+
+  async function doRelaunch() {
+    await relaunch();
+  }
+
+  // ── Dev API (Phase 3) ──
+  let devApi = $state<{ enabled: boolean; endpoint: string; token: string } | null>(null);
+  let devTokenVisible = $state(false);
+  let devTokenCopied = $state(false);
+  let devApiBusy = $state(false);
+
+  async function loadDevApi() {
+    try {
+      devApi = await invoke("dev_api_status");
+    } catch {
+      devApi = null;
+    }
+  }
+
+  $effect(() => { loadDevApi(); });
+
+  async function toggleDevApi() {
+    if (!devApi) return;
+    devApiBusy = true;
+    try {
+      const next = !devApi.enabled;
+      const enabled = await invoke<boolean>("dev_api_set_enabled", { enabled: next });
+      devApi = { ...devApi, enabled };
+    } catch (e) {
+      console.warn("dev_api toggle failed", e);
+    } finally {
+      devApiBusy = false;
+    }
+  }
+
+  async function copyDevToken() {
+    if (!devApi?.token) return;
+    await navigator.clipboard.writeText(devApi.token);
+    devTokenCopied = true;
+    setTimeout(() => (devTokenCopied = false), 1600);
+  }
+
+  async function rotateDevToken() {
+    if (!confirm("Régénérer le token ? L'ancien sera invalidé immédiatement.")) return;
+    devApiBusy = true;
+    try {
+      const t = await invoke<string>("dev_api_rotate_token");
+      if (devApi) devApi = { ...devApi, token: t };
+    } finally {
+      devApiBusy = false;
+    }
   }
 </script>
 
@@ -79,7 +190,7 @@
       <span class="set-label">Confirmation pour transferts > </span>
       <input class="input set-input" type="number" min="0" step="1"
         bind:value={prefs.confirmThreshold} placeholder="100" />
-      <span class="set-suffix">ATN</span>
+      <span class="set-suffix">QUANTA</span>
     </div>
   </section>
 
@@ -87,7 +198,7 @@
   <section class="set-card">
     <header class="set-head">
       <h2 class="set-title">Partage de nœud</h2>
-      <p class="set-sub">Donnez ce ticket à un pair pour qu'il vous trouve sur le réseau Iroh.</p>
+      <p class="set-sub">Donnez ce ticket à un pair pour qu'il vous trouve sur le réseau.</p>
     </header>
     <div class="ticket-box">
       <code class="ticket-val">{nodeTicket}</code>
@@ -97,53 +208,133 @@
     </div>
   </section>
 
-  <!-- Économie ATN -->
+  <!-- Connecter un pair -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">Connecter un pair</h2>
+      <p class="set-sub">Collez le ticket d'un autre nœud pour le rejoindre sur le réseau QUANTA.</p>
+    </header>
+    <div class="connect-box">
+      <input class="input connect-input" type="text" bind:value={peerInput}
+        placeholder="Coller le ticket du pair ici..." />
+      <button class="btn btn-accent" onclick={connectPeer} disabled={!peerInput.trim()}>Connecter</button>
+    </div>
+    {#if connectMsg}
+      <div class="connect-msg" class:ok={connectStatus === "ok"} class:err={connectStatus === "error"}>
+        {connectMsg}
+      </div>
+    {/if}
+  </section>
+
+  <!-- Économie QUANTA V2 -->
   {#if economy}
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Économie ATN — temps réel</h2>
-      <p class="set-sub">Halving Bitcoin-like, supply asymptotique 200k ATN.</p>
+      <h2 class="set-title">Économie QUANTA — temps réel</h2>
+      <p class="set-sub">Émission fixe 100 QUANTA/h. Pas de halving. Distribution Shapley.</p>
     </header>
     <div class="econ-grid">
       <div class="econ-cell">
         <span class="ec-lab">Supply circulante</span>
         <span class="ec-val">{economy.circulating?.toFixed(2) ?? "0"}</span>
-        <span class="ec-meta">ATN</span>
+        <span class="ec-meta">QUANTA</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Brûlés</span>
         <span class="ec-val">{economy.total_burned?.toFixed(2) ?? "0"}</span>
-        <span class="ec-meta">ATN — déflationniste</span>
+        <span class="ec-meta">QUANTA — déflationniste</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Halving #{economy.halving_epoch ?? 0}</span>
-        <span class="ec-val">{economy.atn_until_next_halving?.toFixed(0) ?? "0"}</span>
-        <span class="ec-meta">ATN avant le suivant</span>
+        <span class="ec-lab">Émission</span>
+        <span class="ec-val">100</span>
+        <span class="ec-meta">QUANTA/h (fixe, pas de halving)</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Votre taux</span>
         <span class="ec-val">{economy.mining_rate_per_hour?.toFixed(4) ?? "0"}</span>
-        <span class="ec-meta">ATN/h (trust × halving)</span>
+        <span class="ec-meta">QUANTA/h (Shapley × énergie)</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Trust score</span>
         <span class="ec-val">{economy.your_trust_score?.toFixed(0) ?? "0"}</span>
-        <span class="ec-meta">jusqu'à 3× le mining</span>
+        <span class="ec-meta">influence votre part Shapley</span>
       </div>
       <div class="econ-cell">
         <span class="ec-lab">Plancher énergie</span>
         <span class="ec-val">{economy.atn_floor_eur?.toFixed(4) ?? "0"}</span>
-        <span class="ec-meta">EUR par ATN</span>
+        <span class="ec-meta">EUR par QUANTA</span>
       </div>
-    </div>
-    <div class="econ-progress">
-      <div class="ep-bar">
-        <div class="ep-fill" style="width:{Math.min(100, ((economy.total_mined % 100000) / 1000)).toFixed(1)}%"></div>
-      </div>
-      <span class="ep-label">{(economy.total_mined % 100000).toFixed(0)} / 100 000 ATN avant le prochain halving</span>
     </div>
   </section>
   {/if}
+
+  <!-- Mise à jour OTA -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">Mise à jour</h2>
+      <p class="set-sub">Vérifiez et installez les nouvelles versions automatiquement.</p>
+    </header>
+    <div class="update-box">
+      {#if updateStatus === "idle"}
+        <button class="btn btn-accent" onclick={checkForUpdate}>Vérifier les mises à jour</button>
+      {:else if updateStatus === "checking"}
+        <div class="update-info">⏳ Vérification en cours...</div>
+      {:else if updateStatus === "downloading"}
+        <div class="update-info">📦 Téléchargement v{updateVersion}...</div>
+        <div class="ep-bar" style="margin-top:8px">
+          <div class="ep-fill" style="width:{downloadProgress}%"></div>
+        </div>
+        <div class="ep-label">{downloadProgress}%</div>
+      {:else if updateStatus === "ready"}
+        <div class="update-info update-success">✅ v{updateVersion} installée !</div>
+        <button class="btn btn-accent" onclick={doRelaunch}>Relancer l'application</button>
+      {:else if updateStatus === "latest"}
+        <div class="update-info update-success">✅ Vous avez la dernière version.</div>
+      {:else if updateStatus === "error"}
+        <div class="update-info update-err">❌ {updateError}</div>
+        <button class="btn btn-accent" onclick={checkForUpdate}>Réessayer</button>
+      {/if}
+    </div>
+  </section>
+
+  <!-- API Développeur -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">API Développeur</h2>
+      <p class="set-sub">Permet de publier des sites depuis VSCode, un terminal, ou tout outil externe.</p>
+    </header>
+    {#if devApi}
+      <div class="set-row">
+        <span class="set-label">Activer l'API HTTP locale</span>
+        <button
+          class="seg-btn"
+          class:active={devApi.enabled}
+          onclick={toggleDevApi}
+          disabled={devApiBusy}
+        >{devApi.enabled ? "Activée" : "Désactivée"}</button>
+      </div>
+      {#if devApi.enabled}
+        <div class="set-row">
+          <span class="set-label">Endpoint</span>
+          <code class="dev-endpoint">http://{devApi.endpoint}</code>
+        </div>
+        <div class="set-row">
+          <span class="set-label">Token</span>
+          <code class="dev-token">{devTokenVisible ? devApi.token : "•".repeat(64)}</code>
+          <button class="seg-btn" onclick={() => (devTokenVisible = !devTokenVisible)}>
+            {devTokenVisible ? "Masquer" : "Afficher"}
+          </button>
+          <button class="seg-btn" onclick={copyDevToken}>{devTokenCopied ? "✓ Copié" : "Copier"}</button>
+          <button class="seg-btn" onclick={rotateDevToken} disabled={devApiBusy}>Régénérer</button>
+        </div>
+        <div class="dev-hint">
+          Test rapide : <code>curl -H "Authorization: Bearer &lt;token&gt;" http://{devApi.endpoint}/api/status</code>
+        </div>
+      {/if}
+    {:else}
+      <div class="dev-hint muted">Chargement…</div>
+    {/if}
+  </section>
 
   <!-- À propos -->
   <section class="set-card">
@@ -151,8 +342,8 @@
       <h2 class="set-title">À propos</h2>
     </header>
     <div class="about">
-      <span class="about-line"><b>TITAN</b> · Sovereign Web Engine v5</span>
-      <span class="about-line">Tauri 2.0 · Svelte 5 · libSQL · Iroh QUIC · Ed25519 · BLAKE3 · AES-256-GCM · Argon2id</span>
+      <span class="about-line"><b>QUANTA</b> · Torus Protocol v2</span>
+      <span class="about-line">Tauri 2.0 · Svelte 5 · libSQL · Iroh QUIC · Ed25519 · BLAKE3 · AES-256-GCM</span>
       <span class="about-line muted">Vos données ne quittent jamais cet appareil sans votre signature.</span>
     </div>
   </section>
@@ -209,6 +400,32 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
+  .connect-box {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .connect-input {
+    flex: 1;
+    font-family: var(--font-mono); font-size: 11px;
+    padding: 10px 12px;
+    background: var(--color-bg-2); border: 1px solid var(--color-border);
+    border-radius: var(--radius); color: var(--color-text-1);
+  }
+  .connect-input::placeholder { color: var(--color-text-3); }
+  .btn-accent {
+    padding: 8px 16px; font-size: 12px; font-weight: 600;
+    background: var(--color-accent); color: #fff;
+    border: none; border-radius: var(--radius); cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn-accent:hover { opacity: 0.85; }
+  .btn-accent:disabled { opacity: 0.4; cursor: default; }
+  .connect-msg {
+    margin-top: 8px; padding: 6px 10px;
+    border-radius: var(--radius); font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .connect-msg.ok { background: rgba(34,197,94,0.12); color: #22c55e; }
+  .connect-msg.err { background: rgba(239,68,68,0.12); color: #ef4444; }
   .econ-grid {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
     margin-bottom: 12px;
@@ -238,7 +455,43 @@
   .about-line { font-size: 12px; color: var(--color-text-1); line-height: 1.6; }
   .about-line.muted { color: var(--color-text-3); font-size: 11px; }
 
+  .update-box { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .update-info { font-size: 13px; color: var(--color-text-1); }
+  .update-success { color: #22c55e; }
+  .update-err { color: #ef4444; font-size: 11px; font-family: var(--font-mono); }
+
   @media (max-width: 640px) {
     .econ-grid { grid-template-columns: 1fr 1fr; }
   }
+
+  .dev-endpoint, .dev-token {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--color-bg-2);
+    border: 1px solid var(--color-border);
+    padding: 6px 10px;
+    border-radius: 6px;
+    color: var(--color-text-1);
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .dev-token { letter-spacing: 1px; }
+  .dev-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--color-text-2);
+    background: var(--color-bg-2);
+    border-left: 3px solid var(--color-accent);
+    padding: 8px 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .dev-hint code {
+    font-family: var(--font-mono);
+    background: transparent;
+    color: var(--color-text-1);
+  }
+  .dev-hint.muted { color: var(--color-text-3); border-color: var(--color-border); }
 </style>

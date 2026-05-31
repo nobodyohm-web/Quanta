@@ -1,5 +1,5 @@
 ---
-description: Règles Rust pour le backend Tauri SOVA
+description: Règles Rust pour le backend Tauri QUANTA
 paths: ["src-tauri/src/**/*.rs"]
 ---
 
@@ -13,5 +13,5 @@ paths: ["src-tauri/src/**/*.rs"]
 6. **CRDT** : Les compteurs utilisent `crdts` crate — `PNCounter` pour balances, `GCounter` pour métriques
 7. **DAG** : Les nœuds sont content-addressed via BLAKE3(parents + payload + author)
 8. **Gossip** : Messages signés Ed25519, enveloppés dans `GossipEnvelope`, dedupliqués via `seen_messages`
-9. **Émission V2** : 100 SOVA/h fixe — PAS de halving, PAS de cap, PAS de `MAX_ATN`
+9. **Émission V2** : 100 QUANTA/h fixe — PAS de halving, PAS de cap, PAS de `MAX_QUANTA`
 10. **Tests** : `cargo test` doit passer avant tout commit

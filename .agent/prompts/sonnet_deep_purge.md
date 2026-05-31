@@ -152,7 +152,7 @@ cargo check (doit passer)
 
 Le Dashboard référence encore : sites_created, likes_given, likes_received, helps_validated.
 Remplace par des stats V2 :
-- uptime_hours, energy_kwh, sova_mined, connected_peers
+- uptime_hours, energy_kwh, quanta_mined, connected_peers
 
 ---
 

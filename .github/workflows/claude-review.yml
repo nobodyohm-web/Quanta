@@ -27,14 +27,14 @@ jobs:
           # Pour un audit profond, commenter "@claude-opus" dans la PR
           model: ${{ contains(github.event.comment.body, '@claude-opus') && 'claude-opus-4-7' || 'claude-sonnet-4-20250514' }}
           direct_prompt: |
-            You are reviewing the SOVA protocol — a decentralized energy-backed cryptocurrency.
+            You are reviewing the QUANTA protocol — a decentralized energy-backed cryptocurrency.
             Read CLAUDE.md for full project context.
 
             Review this PR and check:
             1. Rust safety: no unwrap() in production, zeroize all secrets, tokio::sync only
             2. Svelte 5: runes only ($state, $derived, $effect, $props)
             3. No social features: NO feed, likes, posts, content creation, notifications
-            4. Economic model: fixed emission (100 SOVA/h), NO halving, NO supply cap
+            4. Economic model: fixed emission (100 QUANTA/h), NO halving, NO supply cap
             5. Security: Ed25519 signatures verified, Argon2id for KDF, opaque errors
             6. Code quality: idiomatic Rust, proper error handling, no dead code
 

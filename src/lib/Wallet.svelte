@@ -25,6 +25,9 @@
     atn_floor_eur: number;
   }
 
+  type Filter = "all" | "out" | "in" | "mining" | "burn";
+  const PAGE_SIZE = 10;
+
   let rep     = $state<Reputation | null>(null);
   let txs     = $state<LedgerTx[]>([]);
   let energy  = $state<EnergyStats | null>(null);
@@ -42,6 +45,15 @@
 
   let feedback = $state<{ ok: boolean; msg: string } | null>(null);
   let pkCopied = $state(false);
+
+  // ── Filter + pagination state ──
+  let filter = $state<Filter>("all");
+  let page   = $state(0);
+
+  function setFilter(f: Filter) {
+    filter = f;
+    page = 0; // tout changement de filtre repart à la page 0
+  }
 
   onMount(() => {
     refresh();
@@ -73,7 +85,7 @@
     sendBusy = true; feedback = null;
     try {
       await invoke("ledger_transfer", { to: toAddress.trim(), amount: amt });
-      feedback = { ok: true, msg: `${amt.toFixed(2)} ATN envoyés` };
+      feedback = { ok: true, msg: `${amt.toFixed(2)} QUANTA envoyés` };
       toAddress = ""; sendAmount = "";
       await refresh();
     } catch (e: unknown) {
@@ -90,7 +102,7 @@
     stakeBusy = true; feedback = null;
     try {
       await invoke("stake_atn", { amount: amt });
-      feedback = { ok: true, msg: `${amt.toFixed(2)} ATN stakés` };
+      feedback = { ok: true, msg: `${amt.toFixed(2)} QUANTA stakés` };
       stakeAmount = "";
       await refresh();
     } catch (e: unknown) {
@@ -130,6 +142,34 @@
   function isIncoming(tx: LedgerTx): boolean {
     return tx.to === myPk && tx.from !== myPk;
   }
+
+  function isOutgoing(tx: LedgerTx): boolean {
+    return tx.from === myPk && tx.to !== myPk;
+  }
+
+  /// Le ledger applique 1 % de burn-and-mint sur chaque transfert.
+  /// Le montant affiché sur la tx Transfer est le NET (99 %), donc
+  /// burn implicite = montant_net / 99. Affiché uniquement sur les
+  /// transferts sortants (l'expéditeur est celui qui paie le burn).
+  function impliedBurn(tx: LedgerTx): number | null {
+    if (tx.tx_type !== "Transfer" || !isOutgoing(tx)) return null;
+    return tx.amount / 99;
+  }
+
+  // ── Derived: filtered list + pagination slice ──
+  let filtered = $derived(txs.filter((tx) => {
+    switch (filter) {
+      case "all":    return true;
+      case "out":    return tx.tx_type === "Transfer" && isOutgoing(tx);
+      case "in":     return tx.tx_type === "Transfer" && isIncoming(tx);
+      case "mining": return tx.tx_type === "Mining";
+      case "burn":   return tx.tx_type === "Burn";
+    }
+  }));
+  let totalPages = $derived(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
+  // Garde la page dans l'intervalle valide après filtrage / nouvelle data.
+  let safePage  = $derived(Math.min(page, totalPages - 1));
+  let pageItems = $derived(filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE));
 </script>
 
 <div class="page">
@@ -141,7 +181,7 @@
       <div class="skeleton sk-unit"></div>
     {:else}
       <div class="w-balance mono">{(rep?.atn_balance ?? 0).toFixed(2)}</div>
-      <div class="w-unit">ATN</div>
+      <div class="w-unit">QUANTA</div>
       <div class="w-meta">
         <span class="w-pos">+{(rep?.atn_earned ?? 0).toFixed(2)} gagnés</span>
         <span class="w-sep">·</span>
@@ -195,7 +235,7 @@
             placeholder="64 caractères hex…" bind:value={toAddress} />
         </div>
         <div class="w-field">
-          <label for="w-amt">Montant (ATN)</label>
+          <label for="w-amt">Montant (QUANTA)</label>
           <input id="w-amt" class="input" type="number"
             min="0.01" step="0.01" placeholder="0.00" bind:value={sendAmount}
             onkeydown={(e) => e.key === "Enter" && send()} />
@@ -217,7 +257,7 @@
           {pkCopied ? "Copié !" : "Copier"}
         </button>
       </div>
-      <p class="w-hint">Partagez cette clé pour recevoir des ATN.</p>
+      <p class="w-hint">Partagez cette clé pour recevoir des QUANTA.</p>
     </div>
   {/if}
 
@@ -227,11 +267,11 @@
       <div class="section-label">STAKING</div>
       <div class="w-staked-row">
         <span>Actuellement stakés</span>
-        <span class="mono">{(rep?.atn_staked ?? 0).toFixed(2)} ATN</span>
+        <span class="mono">{(rep?.atn_staked ?? 0).toFixed(2)} QUANTA</span>
       </div>
       <div class="w-form">
         <div class="w-field">
-          <label for="w-stake-amt">Montant à verrouiller (ATN)</label>
+          <label for="w-stake-amt">Montant à verrouiller (QUANTA)</label>
           <input id="w-stake-amt" class="input" type="number"
             min="0.01" step="0.01" placeholder="0.00" bind:value={stakeAmount}
             onkeydown={(e) => e.key === "Enter" && stake()} />
@@ -257,7 +297,7 @@
           <span class="mono">{(energy?.kwh_consumed ?? 0).toFixed(3)} kWh</span>
         </div>
         <div class="w-info-row">
-          <span>ATN minés</span>
+          <span>QUANTA minés</span>
           <span class="mono w-pos">+{(energy?.atn_mined ?? rep?.atn_earned ?? 0).toFixed(3)}</span>
         </div>
         <div class="w-info-row">
@@ -266,7 +306,7 @@
         </div>
         {#if (energy?.atn_floor_eur ?? 0) > 0}
           <div class="w-info-row">
-            <span>Plancher 1 ATN</span>
+            <span>Plancher 1 QUANTA</span>
             <span class="mono">{(energy?.atn_floor_eur ?? 0).toFixed(5)} EUR</span>
           </div>
         {/if}
@@ -277,16 +317,30 @@
   <!-- ── Activité ─────────────────────────────── -->
   <div class="w-section">
     <div class="section-label">ACTIVITÉ</div>
+
+    <!-- Filtres -->
+    <div class="w-filters" role="tablist" aria-label="Filtrer les transactions">
+      <button class="w-pill" class:w-pill-on={filter === "all"}    onclick={() => setFilter("all")}    role="tab" aria-selected={filter === "all"}>Tout</button>
+      <button class="w-pill" class:w-pill-on={filter === "out"}    onclick={() => setFilter("out")}    role="tab" aria-selected={filter === "out"}>Envoyé</button>
+      <button class="w-pill" class:w-pill-on={filter === "in"}     onclick={() => setFilter("in")}     role="tab" aria-selected={filter === "in"}>Reçu</button>
+      <button class="w-pill" class:w-pill-on={filter === "mining"} onclick={() => setFilter("mining")} role="tab" aria-selected={filter === "mining"}>Mining</button>
+      <button class="w-pill" class:w-pill-on={filter === "burn"}   onclick={() => setFilter("burn")}   role="tab" aria-selected={filter === "burn"}>Brûlé</button>
+    </div>
+
     <div class="w-tx-list">
       {#if loading}
         <div class="skeleton sk-row"></div>
         <div class="skeleton sk-row"></div>
         <div class="skeleton sk-row"></div>
-      {:else if txs.length === 0}
-        <p class="w-empty">Le mining démarre automatiquement.</p>
+      {:else if filtered.length === 0}
+        <p class="w-empty">
+          {#if filter === "all"}Le mining démarre automatiquement.
+          {:else}Aucune transaction dans cette catégorie.{/if}
+        </p>
       {:else}
-        {#each txs.slice(0, 20) as tx (tx.id)}
+        {#each pageItems as tx (tx.id)}
           {@const inc = isIncoming(tx)}
+          {@const burn = impliedBurn(tx)}
           <div class="w-tx-row">
             <div class="w-tx-left">
               <span class="w-tx-label">{txLabel(tx.tx_type)}</span>
@@ -298,10 +352,33 @@
               <span class="w-tx-amt mono" class:tx-in={inc} class:tx-out={!inc}>
                 {inc ? "+" : "−"}{tx.amount.toFixed(2)}
               </span>
-              <span class="w-tx-time">{timeAgo(tx.timestamp)}</span>
+              {#if burn !== null}
+                <span class="w-tx-burn mono">−{burn.toFixed(2)} brûlés</span>
+              {:else}
+                <span class="w-tx-time">{timeAgo(tx.timestamp)}</span>
+              {/if}
             </div>
           </div>
         {/each}
+
+        <!-- Pagination -->
+        {#if totalPages > 1}
+          <div class="w-pager">
+            <button class="w-pager-btn"
+              onclick={() => page = Math.max(0, safePage - 1)}
+              disabled={safePage === 0}
+              aria-label="Page précédente">
+              Précédent
+            </button>
+            <span class="w-pager-info mono">{safePage + 1} / {totalPages}</span>
+            <button class="w-pager-btn"
+              onclick={() => page = Math.min(totalPages - 1, safePage + 1)}
+              disabled={safePage >= totalPages - 1}
+              aria-label="Page suivante">
+              Suivant
+            </button>
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -316,19 +393,19 @@
   }
   .w-balance {
     font-size: 48px; font-weight: 700; letter-spacing: -0.03em; line-height: 1;
-    color: var(--sova-text-0);
+    color: var(--quanta-text-0);
   }
   .w-unit {
     font-size: 14px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
-    color: var(--sova-text-2); margin-top: var(--space-1);
+    color: var(--quanta-text-2); margin-top: var(--space-1);
   }
   .w-meta {
     display: flex; align-items: center; gap: var(--space-2);
-    font-size: 13px; color: var(--sova-text-2); margin-top: var(--space-3);
+    font-size: 13px; color: var(--quanta-text-2); margin-top: var(--space-3);
   }
   .w-sep { opacity: 0.5; }
-  .w-pos { color: var(--sova-accent); }
-  .w-floor { font-size: 12px; color: var(--sova-text-2); margin-top: var(--space-1); }
+  .w-pos { color: var(--quanta-accent); }
+  .w-floor { font-size: 12px; color: var(--quanta-text-2); margin-top: var(--space-1); }
 
   .sk-bal  { width: 180px; height: 54px; border-radius: var(--radius-sm); }
   .sk-unit { width: 48px; height: 18px; border-radius: 4px; margin-top: 8px; }
@@ -342,15 +419,15 @@
   .w-btn {
     flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;
     padding: var(--space-3) var(--space-2); min-height: 44px;
-    background: var(--sova-bg-elevated);
-    border: 1px solid var(--sova-border); border-radius: var(--radius);
-    color: var(--sova-text-1);
+    background: var(--quanta-bg-elevated);
+    border: 1px solid var(--quanta-border); border-radius: var(--radius);
+    color: var(--quanta-text-1);
     font-family: inherit; font-size: 12px; font-weight: 500;
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
-  .w-btn:hover { background: var(--sova-bg-2); border-color: var(--sova-border-h); color: var(--sova-text-0); }
-  .w-active   { border-color: var(--sova-accent) !important; color: var(--sova-text-0) !important; }
+  .w-btn:hover { background: var(--quanta-bg-2); border-color: var(--quanta-border-h); color: var(--quanta-text-0); }
+  .w-active   { border-color: var(--quanta-accent) !important; color: var(--quanta-text-0) !important; }
 
   /* Feedback */
   .w-fb {
@@ -358,71 +435,141 @@
     padding: 10px 14px; border-radius: var(--radius-sm);
     font-size: 13px; animation: fadeIn 0.15s ease-out;
   }
-  .w-fb-ok  { background: var(--sova-accent-dim); color: var(--sova-accent); border: 1px solid rgba(0,220,130,0.15); }
-  .w-fb-err { background: rgba(255,68,68,0.06);   color: var(--sova-negative); border: 1px solid rgba(255,68,68,0.15); }
+  .w-fb-ok  { background: var(--quanta-accent-dim); color: var(--quanta-accent); border: 1px solid rgba(0,220,130,0.15); }
+  .w-fb-err { background: rgba(255,68,68,0.06);   color: var(--quanta-negative); border: 1px solid rgba(255,68,68,0.15); }
 
   /* Panels */
   .w-panel {
     margin: 0 var(--space-5) var(--space-6);
     padding: var(--space-5);
-    background: var(--sova-bg-1); border: 1px solid var(--sova-border);
+    background: var(--quanta-bg-1); border: 1px solid var(--quanta-border);
     border-radius: var(--radius); animation: fadeIn 0.15s ease-out;
   }
   .w-panel .section-label { margin-bottom: var(--space-4); }
 
   .w-form  { display: flex; flex-direction: column; gap: var(--space-4); }
   .w-field { display: flex; flex-direction: column; gap: 6px; }
-  .w-field label { font-size: 12px; font-weight: 500; color: var(--sova-text-1); }
+  .w-field label { font-size: 12px; font-weight: 500; color: var(--quanta-text-1); }
 
   .w-pk-box {
     display: flex; align-items: flex-start; gap: var(--space-3);
-    padding: var(--space-4); background: var(--sova-bg-2);
+    padding: var(--space-4); background: var(--quanta-bg-2);
     border-radius: var(--radius-sm); margin-top: var(--space-3);
   }
-  .w-pk { flex: 1; font-size: 12px; line-height: 1.7; color: var(--sova-text-0); word-break: break-all; }
+  .w-pk { flex: 1; font-size: 12px; line-height: 1.7; color: var(--quanta-text-0); word-break: break-all; }
   .w-copy {
     flex-shrink: 0; padding: 8px 16px; min-height: 44px;
-    background: transparent; border: 1px solid var(--sova-border);
-    border-radius: var(--radius-sm); color: var(--sova-text-0);
+    background: transparent; border: 1px solid var(--quanta-border);
+    border-radius: var(--radius-sm); color: var(--quanta-text-0);
     font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease;
   }
-  .w-copy:hover    { background: var(--sova-bg-3); border-color: var(--sova-border-h); }
+  .w-copy:hover    { background: var(--quanta-bg-3); border-color: var(--quanta-border-h); }
   .w-copy:disabled { opacity: 0.4; cursor: not-allowed; }
-  .w-hint          { font-size: 12px; color: var(--sova-text-2); margin-top: var(--space-2); }
+  .w-hint          { font-size: 12px; color: var(--quanta-text-2); margin-top: var(--space-2); }
 
   .w-staked-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: var(--space-3) 0; border-bottom: 1px solid var(--sova-border);
-    font-size: 14px; color: var(--sova-text-1); margin-bottom: var(--space-2);
+    padding: var(--space-3) 0; border-bottom: 1px solid var(--quanta-border);
+    font-size: 14px; color: var(--quanta-text-1); margin-bottom: var(--space-2);
   }
-  .w-staked-row .mono { color: var(--sova-text-0); font-weight: 500; }
+  .w-staked-row .mono { color: var(--quanta-text-0); font-weight: 500; }
 
   /* Sections */
   .w-section { padding: 0 var(--space-5); margin-bottom: var(--space-8); }
 
   .w-info-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 0; border-bottom: 1px solid var(--sova-border); font-size: 14px;
+    padding: 14px 0; border-bottom: 1px solid var(--quanta-border); font-size: 14px;
   }
   .w-info-row:last-child { border-bottom: none; }
-  .w-info-row > span:first-child { color: var(--sova-text-1); }
-  .w-info-row .mono { color: var(--sova-text-0); font-weight: 500; }
+  .w-info-row > span:first-child { color: var(--quanta-text-1); }
+  .w-info-row .mono { color: var(--quanta-text-0); font-weight: 500; }
 
   /* Transactions */
   .w-tx-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 0; border-bottom: 1px solid var(--sova-border);
+    padding: 14px 0; border-bottom: 1px solid var(--quanta-border);
   }
   .w-tx-row:last-child { border-bottom: none; }
   .w-tx-left  { display: flex; flex-direction: column; gap: 2px; }
   .w-tx-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-  .w-tx-label { font-size: 14px; font-weight: 500; color: var(--sova-text-0); }
-  .w-tx-sub   { font-size: 12px; color: var(--sova-text-2); }
-  .w-tx-time  { font-size: 12px; color: var(--sova-text-2); }
+  .w-tx-label { font-size: 14px; font-weight: 500; color: var(--quanta-text-0); }
+  .w-tx-sub   { font-size: 12px; color: var(--quanta-text-2); }
+  .w-tx-time  { font-size: 12px; color: var(--quanta-text-2); }
   .w-tx-amt   { font-size: 14px; font-weight: 600; }
-  .tx-in      { color: var(--sova-accent); }
-  .tx-out     { color: var(--sova-text-1); }
+  .tx-in      { color: var(--quanta-accent); }
+  .tx-out     { color: var(--quanta-text-1); }
 
-  .w-empty { padding: var(--space-6) 0; font-size: 13px; color: var(--sova-text-2); text-align: center; }
+  .w-empty { padding: var(--space-6) 0; font-size: 13px; color: var(--quanta-text-2); text-align: center; }
+
+  /* Filtres — pills sobres, accent discret quand actif. Inspiration Apple Settings. */
+  .w-filters {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-bottom: var(--space-4);
+  }
+  .w-pill {
+    padding: 6px 12px;
+    background: var(--quanta-bg-1);
+    border: 1px solid var(--quanta-border);
+    border-radius: 999px;
+    color: var(--quanta-text-1);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 200ms ease, border-color 200ms ease, color 200ms ease;
+  }
+  .w-pill:hover {
+    background: var(--quanta-bg-2);
+    color: var(--quanta-text-0);
+  }
+  .w-pill-on {
+    background: var(--quanta-bg-3);
+    border-color: var(--quanta-border-h);
+    color: var(--quanta-text-0);
+  }
+
+  /* Burn ligne sous le montant — typographie discrète, même couleur que les méta. */
+  .w-tx-burn {
+    font-size: 11px;
+    color: var(--quanta-text-2);
+    font-weight: 400;
+  }
+
+  /* Pagination — minimaliste, Précédent · X/Y · Suivant. */
+  .w-pager {
+    display: flex; align-items: center; justify-content: center;
+    gap: var(--space-4);
+    padding: var(--space-5) 0 var(--space-2);
+    border-top: 1px solid var(--quanta-border);
+    margin-top: var(--space-2);
+  }
+  .w-pager-btn {
+    padding: 8px 14px; min-height: 36px;
+    background: transparent;
+    border: 1px solid var(--quanta-border);
+    border-radius: var(--radius-sm);
+    color: var(--quanta-text-1);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 200ms ease, color 200ms ease, border-color 200ms ease;
+  }
+  .w-pager-btn:hover:not(:disabled) {
+    background: var(--quanta-bg-2);
+    border-color: var(--quanta-border-h);
+    color: var(--quanta-text-0);
+  }
+  .w-pager-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .w-pager-info {
+    font-size: 13px;
+    color: var(--quanta-text-1);
+    min-width: 48px;
+    text-align: center;
+  }
 </style>

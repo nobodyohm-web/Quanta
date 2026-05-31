@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    sovereign_web_engine_lib::run()
+    quanta_lib::run()
 }
