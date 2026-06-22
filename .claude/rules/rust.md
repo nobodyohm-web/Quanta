@@ -13,5 +13,10 @@ paths: ["src-tauri/src/**/*.rs"]
 6. **CRDT** : Les compteurs utilisent `crdts` crate — `PNCounter` pour balances, `GCounter` pour métriques
 7. **DAG** : Les nœuds sont content-addressed via BLAKE3(parents + payload + author)
 8. **Gossip** : Messages signés Ed25519, enveloppés dans `GossipEnvelope`, dedupliqués via `seen_messages`
-9. **Émission V2** : 100 QUANTA/h fixe — PAS de halving, PAS de cap, PAS de `MAX_QUANTA`
+9. **Émission V3 (tokenomics rareté)** : plafond DUR `MAX_SUPPLY_MICRO = 100M QUANTA`,
+   émission **décroissante front-loaded** `emission_for_tick = (MAX − total_mined) / EMISSION_DIVISOR`
+   (rythme réaliste, ~4 QUANTA/bloc à la genèse). **Zéro premine, zéro autorité de mint.**
+   Le plafond ET la borne par bloc sont **vérifiés au consensus** (`validate_block_emission`)
+   pour qu'un pair malveillant ne puisse ni dépasser 100M ni rafler l'émission d'un coup.
+   NE PAS revenir à un modèle « non plafonné / fixe » : la rareté est le cœur du projet.
 10. **Tests** : `cargo test` doit passer avant tout commit

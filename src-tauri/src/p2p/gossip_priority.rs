@@ -2,8 +2,8 @@
 //!
 //! The outgoing gossip queue is split into four logical lanes (Critical, High,
 //! Medium, Low) so consensus-critical traffic (Hello, RequestChain,
-//! ChainSegment, NewBlock) drains ahead of bulk traffic (transactions, pages,
-//! social actions) and noise (Ping/Pong, ReportPeer, juror commits).
+//! ChainSegment, NewBlock) drains ahead of bulk traffic (transactions) and
+//! noise (Ping/Pong, ReportPeer).
 //!
 //! Wire format does not change — only the local egress order does. Receiving
 //! peers are agnostic to priority; this is purely a local scheduling concern.
@@ -29,13 +29,11 @@ use tokio::sync::mpsc;
 pub enum Priority {
     /// Consensus + presence: Hello, RequestChain, ChainSegment, NewBlock.
     Critical = 0,
-    /// User payload: BroadcastTx, PublishPage, PublishSiteManifest.
+    /// User payload: BroadcastTx.
     High = 1,
-    /// Discovery + metadata: WantNodes, HaveNodes, RequestPage, domains, search,
-    /// social actions, forum nodes.
+    /// Identity metadata: PublishUsername.
     Medium = 2,
-    /// Liveness + moderation noise: Ping, Pong, ReportPeer, broadcast reports,
-    /// juror commit/reveal.
+    /// Liveness noise: Ping, Pong, ReportPeer.
     Low = 3,
 }
 
@@ -54,25 +52,13 @@ pub fn priority_for(payload: &GossipMessage) -> Priority {
         | GossipMessage::ChainSegment { .. }
         | GossipMessage::NewBlock { .. } => Priority::Critical,
 
-        GossipMessage::BroadcastTx { .. }
-        | GossipMessage::PublishPage { .. }
-        | GossipMessage::PublishSiteManifest { .. } => Priority::High,
+        GossipMessage::BroadcastTx { .. } => Priority::High,
 
-        GossipMessage::WantNodes { .. }
-        | GossipMessage::HaveNodes { .. }
-        | GossipMessage::RequestPage { .. }
-        | GossipMessage::PublishDomain { .. }
-        | GossipMessage::PublishSubdomain { .. }
-        | GossipMessage::PublishSite { .. }
-        | GossipMessage::BroadcastSocialAction { .. }
-        | GossipMessage::PublishForumNode { .. } => Priority::Medium,
+        GossipMessage::PublishUsername { .. } => Priority::Medium,
 
         GossipMessage::Ping { .. }
         | GossipMessage::Pong { .. }
-        | GossipMessage::ReportPeer { .. }
-        | GossipMessage::BroadcastReport { .. }
-        | GossipMessage::BroadcastJurorCommit { .. }
-        | GossipMessage::BroadcastJurorReveal { .. } => Priority::Low,
+        | GossipMessage::ReportPeer { .. } => Priority::Low,
     }
 }
 
@@ -256,30 +242,10 @@ mod tests {
             priority_for(&GossipMessage::BroadcastTx { tx_json: "{}".into() }),
             Priority::High
         );
-        assert_eq!(
-            priority_for(&GossipMessage::PublishPage { page_json: "{}".into() }),
-            Priority::High
-        );
-        assert_eq!(
-            priority_for(&GossipMessage::PublishSiteManifest { manifest_json: "{}".into() }),
-            Priority::High
-        );
 
         // Medium
         assert_eq!(
-            priority_for(&GossipMessage::WantNodes { ids: vec![] }),
-            Priority::Medium
-        );
-        assert_eq!(
-            priority_for(&GossipMessage::HaveNodes { nodes: vec![] }),
-            Priority::Medium
-        );
-        assert_eq!(
-            priority_for(&GossipMessage::RequestPage { author_pk: "p".into() }),
-            Priority::Medium
-        );
-        assert_eq!(
-            priority_for(&GossipMessage::BroadcastSocialAction { action_json: "{}".into() }),
+            priority_for(&GossipMessage::PublishUsername { record_json: "{}".into() }),
             Priority::Medium
         );
 
@@ -287,7 +253,10 @@ mod tests {
         assert_eq!(priority_for(&GossipMessage::Ping { nonce: 1 }), Priority::Low);
         assert_eq!(priority_for(&GossipMessage::Pong { nonce: 1 }), Priority::Low);
         assert_eq!(
-            priority_for(&GossipMessage::BroadcastJurorCommit { commit_json: "{}".into() }),
+            priority_for(&GossipMessage::ReportPeer {
+                peer_id: "p".into(),
+                reason: crate::p2p::gossip::ReportReason::MalformedMessage,
+            }),
             Priority::Low
         );
     }
@@ -306,7 +275,7 @@ mod tests {
         // Push a low, then medium, then high, then critical — reverse priority
         // order. Drain MUST come out in priority order regardless of insertion.
         tx.send(env(GossipMessage::Ping { nonce: 1 })).unwrap();
-        tx.send(env(GossipMessage::WantNodes { ids: vec!["x".into()] })).unwrap();
+        tx.send(env(GossipMessage::PublishUsername { record_json: "{}".into() })).unwrap();
         tx.send(env(GossipMessage::BroadcastTx { tx_json: "{}".into() })).unwrap();
         tx.send(env(GossipMessage::NewBlock { block_json: "{}".into() })).unwrap();
 

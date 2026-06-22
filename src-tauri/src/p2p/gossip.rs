@@ -3,13 +3,11 @@
 //! Les messages gossip sont transportés via Iroh QUIC (existant).
 //! Ce module définit les types de messages et la sérialisation.
 //!
-//! Flux de synchronisation (delta sync) :
-//!   1. A → B : `Hello { heads: [...] }`
-//!   2. B → A : `WantNodes { missing: [...] }` (nœuds que B ne connaît pas)
-//!   3. A → B : `HaveNodes { nodes: [...] }` (les nœuds demandés)
-//!   4. B insère les nœuds dans son DAG local
+//! Flux de synchronisation de la chaîne :
+//!   1. A → B : `Hello { chain_height }`
+//!   2. B compare sa hauteur → `RequestChain { from_height }`
+//!   3. A → B : `ChainSegment { blocks }` (max 50 blocs)
 
-use crate::p2p::merkle_dag::DagNode;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -88,14 +86,6 @@ pub enum GossipMessage {
         #[serde(default)]
         display_name: Option<String>,
     },
-    /// "Donne-moi les nœuds avec ces IDs".
-    WantNodes {
-        ids: Vec<String>,
-    },
-    /// "Voici les nœuds que tu m'as demandés".
-    HaveNodes {
-        nodes: Vec<DagNode>,
-    },
     /// Diffusion d'une nouvelle transaction ATN.
     BroadcastTx {
         tx_json: String,
@@ -144,54 +134,12 @@ pub enum GossipMessage {
         #[serde(default)]
         blocks_compressed: Option<Vec<u8>>,
     },
-    /// Publication/mise à jour d'une page web P2P.
-    PublishPage {
-        page_json: String,
-    },
-    /// Requête de la page d'un wallet par clé publique.
-    RequestPage {
-        author_pk: String,
-    },
-    // ─── V3 Social Web ─────────────────────────────────────────────────
-    /// V3 — Publication/mise à jour d'un enregistrement de domaine `*.torus`.
-    /// Le receveur valide la signature du record avant insertion.
-    PublishDomain {
+    /// Identité — revendication signée d'un pseudo unique `@handle`.
+    /// `record_json` = `UsernameRecord` sérialisé. Le receveur applique via
+    /// `username::UsernameRegistry::apply()` (vérifie la signature + résolution
+    /// de conflit déterministe).
+    PublishUsername {
         record_json: String,
-    },
-    /// V3 — Délégation d'un sous-domaine (signée par le parent).
-    PublishSubdomain {
-        grant_json: String,
-    },
-    /// V3 — Diffusion d'un site indexé (envoyé au moteur de recherche local).
-    /// `doc_json` = `IndexedDoc` sérialisé (tokens déjà calculés côté émetteur).
-    PublishSite {
-        doc_json: String,
-    },
-    /// V3 — Action sociale signée (Vote / Follow / Tip / Boost).
-    BroadcastSocialAction {
-        action_json: String,
-    },
-    /// V3 — Signalement d'un contenu (cumulé jusqu'au seuil de jury).
-    BroadcastReport {
-        report_json: String,
-    },
-    /// V3 — Vote scellé d'un juré (commit phase).
-    BroadcastJurorCommit {
-        commit_json: String,
-    },
-    /// V3 — Révélation d'un vote de juré (reveal phase).
-    BroadcastJurorReveal {
-        reveal_json: String,
-    },
-    /// V3 — Diffusion d'un nœud forum (Forum / Thread / Comment) tagué par `kind`.
-    PublishForumNode {
-        kind: String, // "forum" | "thread" | "comment"
-        node_json: String,
-    },
-    /// V3.3 — Diffusion d'un manifest de site multi-page (signé par l'auteur).
-    /// Reçu → `page_store.publish_site()`. Vérifie sig + version + contraintes.
-    PublishSiteManifest {
-        manifest_json: String,
     },
 }
 
@@ -297,28 +245,6 @@ pub struct GossipStats {
     pub dropped_rate_limit: u64,
     /// Messages dropped due to nonce replay
     pub dropped_nonce: u64,
-    /// P2P pages received from network
-    pub pages_received: u64,
-    /// P2P pages published locally
-    pub pages_published: u64,
-    /// V3 — Domaines publiés ou mis à jour via gossip
-    #[serde(default)]
-    pub domains_published: u64,
-    /// V3 — Sites indexés reçus depuis le réseau
-    #[serde(default)]
-    pub sites_indexed: u64,
-    /// V3 — Actions sociales (like/follow/tip/boost) appliquées
-    #[serde(default)]
-    pub social_actions_applied: u64,
-    /// V3 — Reports modération acceptés
-    #[serde(default)]
-    pub reports_received: u64,
-    /// V3 — Nœuds forum (forum/thread/comment) acceptés
-    #[serde(default)]
-    pub forum_nodes_received: u64,
-    /// V3.3 — Manifests de site multi-page acceptés
-    #[serde(default)]
-    pub site_manifests_received: u64,
 }
 
 /// MOD-2: Maximum number of message IDs retained for deduplication.
@@ -376,10 +302,19 @@ impl GossipRouter {
     /// Tightened from ±5min to reduce replay attack window
     /// while tolerating reasonable clock drift.
     pub fn is_fresh(timestamp: &str) -> bool {
+        Self::is_fresh_at(timestamp, chrono::Utc::now().timestamp())
+    }
+
+    /// Freshness check against an **injected** wall-clock value (`now_secs`,
+    /// Unix seconds): the timestamp must be within the ±90 s anti-replay window.
+    /// Pure — no clock read — so the deterministic core validates inbound
+    /// messages reproducibly (Phase 0, Constitution §3). [`Self::is_fresh`] is
+    /// the production wrapper that reads the real clock at the boundary.
+    pub fn is_fresh_at(timestamp: &str, now_secs: i64) -> bool {
         let Ok(ts) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
             return false;
         };
-        let drift = (chrono::Utc::now().timestamp() - ts.timestamp()).unsigned_abs();
+        let drift = (now_secs - ts.timestamp()).unsigned_abs();
         drift <= 90
     }
 
@@ -579,6 +514,22 @@ mod tests {
             !GossipRouter::is_fresh(old_ts),
             "Vieux timestamp doit être refusé"
         );
+    }
+
+    #[test]
+    fn is_fresh_at_is_injected_time_driven() {
+        // Phase 0 (T0.1): freshness is a pure function of the INJECTED clock.
+        let ts = "2026-03-01T12:00:00+00:00";
+        let t0 = chrono::DateTime::parse_from_rfc3339(ts).unwrap().timestamp();
+        // Inside the ±90 s window (either side) → fresh.
+        assert!(GossipRouter::is_fresh_at(ts, t0));
+        assert!(GossipRouter::is_fresh_at(ts, t0 + 90));
+        assert!(GossipRouter::is_fresh_at(ts, t0 - 90));
+        // Outside the window → stale.
+        assert!(!GossipRouter::is_fresh_at(ts, t0 + 91));
+        assert!(!GossipRouter::is_fresh_at(ts, t0 - 91));
+        // Unparseable timestamp → never fresh.
+        assert!(!GossipRouter::is_fresh_at("not-a-date", t0));
     }
 
     #[test]

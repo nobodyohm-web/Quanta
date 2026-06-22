@@ -64,11 +64,27 @@ impl TrustStatus {
 
 /// Watts mesurés si sysinfo indisponible
 const WATTS_IDLE_FALLBACK: f64 = 15.0;
-/// V2 — Émission fixe : 100 QUANTA/h en µQTA. STRUCT-2: integer arithmetic only.
-pub const NETWORK_EMISSION_PER_HOUR: u64 = 100 * MICRO;
-/// MIN-2: Single source of truth for emission per tick (≈ 1.6667 QUANTA/min in µQTA)
-/// = 100_000_000 / 60 = 1_666_666 µQTA (40 µQTA/h discarded by integer truncation)
-pub const EMISSION_PER_TICK: u64 = NETWORK_EMISSION_PER_HOUR / 60;
+// ─── TOKENOMICS — rareté : émission décroissante vers un plafond dur ──────────
+
+/// Plafond DUR prouvable de l'offre : **100 000 000 QUANTA** (en µQTA).
+/// L'émission ne peut JAMAIS porter l'offre minée au-dessus de ce plafond.
+pub const MAX_SUPPLY_MICRO: u64 = 100_000_000 * MICRO;
+
+/// Chaque tick émet `1/EMISSION_DIVISOR` de l'offre **restante** (plafond −
+/// déjà miné). Décroissance géométrique front-loaded convergeant vers le plafond.
+/// RYTHME RÉALISTE (pas un « flood ») : à 1 tick/minute, émission de genèse
+/// ≈ 2 QUANTA/tick ⇒ ≈ 4 QUANTA/bloc (seal toutes les 2 min) ⇒ ≈ 120 QUANTA/h,
+/// puis décroît. Longue traîne crédible (rareté réelle), façon Bitcoin — chaque
+/// QUANTA se mérite. (Avant : 1_000_000 ⇒ ~6000 QUANTA/h, irréaliste.)
+pub const EMISSION_DIVISOR: u64 = 50_000_000;
+
+/// Émission TOTALE du réseau pour ce tick, fonction de l'offre déjà minée :
+/// `floor((MAX_SUPPLY − total_mined) / EMISSION_DIVISOR)`.
+/// On n'émet qu'une fraction du restant ⇒ `total_mined` reste **strictement
+/// borné par MAX_SUPPLY** (rareté prouvable, dépassement impossible).
+pub fn emission_for_tick(total_mined_micro: u64) -> u64 {
+    MAX_SUPPLY_MICRO.saturating_sub(total_mined_micro) / EMISSION_DIVISOR
+}
 
 /// V2 trust score basé uniquement sur énergie + uptime + stake (pas d'actions sociales).
 /// `atn_staked` est en µQTA — converti en QUANTA pour le score.
@@ -104,6 +120,7 @@ impl ReputationEngine {
         &mut self,
         pk: &str,
         blocks_verified: u64,
+        emission_this_tick: u64,
         peer_contribs: &HashMap<String, shapley::NodeContribution>,
     ) -> (u64, f64) {
         let watts = estimate_watts();
@@ -131,17 +148,16 @@ impl ReputationEngine {
             blocks_verified, // CRIT-B: real counter from WillowNode
             uptime_minutes: user.uptime_minutes,
             mode,
-            weighted_likes: 0.0, // V3 — wired by mining_loop from SocialState
         };
         let my_share: u64 = if peer_contribs.is_empty() {
-            // Solo: receive the full emission.
-            EMISSION_PER_TICK
+            // Solo: receive the full (decaying) emission of this tick.
+            emission_this_tick
         } else {
             let mut all_contribs = peer_contribs.clone();
             all_contribs.insert(pk.to_string(), my_contrib);
             let shares = shapley::compute_all_shares(&all_contribs);
             let share = shares.get(pk).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-            (share * EMISSION_PER_TICK as f64) as u64
+            (share * emission_this_tick as f64) as u64
         };
 
         let poc = SybilGuard::poc_score(user);
@@ -157,14 +173,6 @@ impl ReputationEngine {
         user.status = TrustStatus::from_score(score);
 
         (qta, kwh_per_min)
-    }
-
-    /// V2 — Taux de mining avec proportionnalité réseau (en µQTA).
-    pub fn mining_rate_proportional(my_watts: f64, total_network_watts: f64, poc_score: f64) -> u64 {
-        if total_network_watts <= 0.0 { return EMISSION_PER_TICK; }
-        let share = (my_watts / total_network_watts).clamp(0.0, 1.0);
-        let multiplier = SybilGuard::mining_multiplier(poc_score).clamp(0.0, 1.0);
-        (share * EMISSION_PER_TICK as f64 * multiplier) as u64
     }
 
     /// Plancher ATN en EUR basé sur le prix réel de l'électricité du pays détecté.
@@ -268,7 +276,7 @@ mod tests {
         let mut rep = ReputationEngine::new();
         let pk = "a".repeat(64);
         let peers = HashMap::new();
-        let (atn, kwh) = rep.uptime_tick(&pk, 0, &peers);
+        let (atn, kwh) = rep.uptime_tick(&pk, 0, emission_for_tick(0), &peers);
         assert!(kwh > 0.0, "kwh doit être positif (watts mesurés > 0)");
         assert!(kwh < 0.01, "kwh par minute doit rester < 10Wh, got {}", kwh);
         assert!(atn > 0, "µQUANTA minés doit être positif");
@@ -279,8 +287,8 @@ mod tests {
         let mut rep = ReputationEngine::new();
         let pk = "b".repeat(64);
         let peers = HashMap::new();
-        let (_, k1) = rep.uptime_tick(&pk, 0, &peers);
-        let (_, k2) = rep.uptime_tick(&pk, 0, &peers);
+        let (_, k1) = rep.uptime_tick(&pk, 0, emission_for_tick(0), &peers);
+        let (_, k2) = rep.uptime_tick(&pk, 0, emission_for_tick(0), &peers);
         let total = rep.get_user(&pk).unwrap().energy_kwh;
         assert!((total - (k1 + k2)).abs() < 1e-9, "energy_kwh accumulé = somme des ticks");
     }
@@ -311,21 +319,12 @@ mod tests {
         let pk = "solo".repeat(16);
         // solo (peer_contribs vide) → reçoit 100% de l'émission
         let peers = HashMap::new();
-        let (qta, _kwh) = rep.uptime_tick(&pk, 0, &peers);
+        let (qta, _kwh) = rep.uptime_tick(&pk, 0, emission_for_tick(0), &peers);
         assert!(qta > 0, "solo doit miner > 0");
-        // EMISSION_PER_TICK is u64; allow small slack from mining_multiplier rounding
-        let cap = (EMISSION_PER_TICK as f64 * 1.1) as u64;
+        // v2 : ne doit pas dépasser l'émission décroissante de ce tick.
+        let cap = emission_for_tick(0);
         assert!(qta <= cap,
-            "solo ne doit pas dépasser ~EMISSION_PER_TICK, got {} > {}", qta, cap);
-    }
-
-    #[test]
-    fn test_emission_proportional() {
-        // 2 nœuds : 100W et 50W — nœud A doit miner 2× plus que nœud B
-        let rate_a = ReputationEngine::mining_rate_proportional(100.0, 150.0, 1.0);
-        let rate_b = ReputationEngine::mining_rate_proportional(50.0, 150.0, 1.0);
-        let ratio = rate_a as f64 / rate_b as f64;
-        assert!((ratio - 2.0).abs() < 0.01, "ratio attendu 2.0, got {:.4}", ratio);
+            "solo ne doit pas dépasser emission_for_tick(0), got {} > {}", qta, cap);
     }
 
     #[test]
@@ -333,10 +332,40 @@ mod tests {
         let mut rep = ReputationEngine::new();
         let pk = "uptime_test".repeat(6);
         let peers = HashMap::new();
-        rep.uptime_tick(&pk, 0, &peers);
+        rep.uptime_tick(&pk, 0, emission_for_tick(0), &peers);
         let score1 = rep.get_user(&pk).unwrap().trust_score;
-        for _ in 0..60 { rep.uptime_tick(&pk, 0, &peers); }
+        for _ in 0..60 { rep.uptime_tick(&pk, 0, emission_for_tick(0), &peers); }
         let score2 = rep.get_user(&pk).unwrap().trust_score;
         assert!(score2 > score1, "trust_score doit augmenter avec l'uptime: {} → {}", score1, score2);
+    }
+
+    /// TOKENOMICS v2 — invariant de RARETÉ : l'émission décroît avec l'offre et
+    /// `total_mined` ne peut JAMAIS franchir le plafond dur (dépassement
+    /// mathématiquement impossible), tout en restant fortement front-loaded.
+    #[test]
+    fn v2_emission_decays_and_respects_hard_cap() {
+        assert!(
+            emission_for_tick(0) > emission_for_tick(MAX_SUPPLY_MICRO / 2),
+            "l'émission doit décroître quand l'offre augmente"
+        );
+        assert_eq!(emission_for_tick(MAX_SUPPLY_MICRO), 0, "émission nulle au plafond");
+        assert_eq!(emission_for_tick(MAX_SUPPLY_MICRO + 1), 0, "jamais sous le plafond");
+
+        // En accumulant tick après tick, total_mined reste STRICTEMENT borné.
+        let mut total: u64 = 0;
+        for _ in 0..200_000 {
+            let e = emission_for_tick(total);
+            total = total.saturating_add(e);
+            assert!(total <= MAX_SUPPLY_MICRO, "total_mined a dépassé le plafond !");
+            if e == 0 {
+                break;
+            }
+        }
+        assert!(total <= MAX_SUPPLY_MICRO);
+        // Front-loaded mais RÉALISTE : sur 200 000 ticks (~139 j à 1/min) on émet
+        // une part non négligeable (~0.4 %) — du vrai, pas un flood. (Avant le
+        // ralentissement réaliste : >1 %.) L'aspect front-loaded est déjà prouvé
+        // par emission_for_tick(0) > emission_for_tick(MAX/2) plus haut.
+        assert!(total > MAX_SUPPLY_MICRO / 1000, "émission front-loaded mais réaliste");
     }
 }

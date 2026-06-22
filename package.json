@@ -1,7 +1,7 @@
 {
   "name": "quanta",
   "version": "3.3.0",
-  "description": "Sovereign peer-to-peer web and value network — no server, no cloud, no intermediary. Native coin: QUANTA.",
+  "description": "Sovereign peer-to-peer value network — no server, no cloud, no intermediary. Native coin: QUANTA.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -26,22 +26,16 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
-    "@types/dompurify": "^3.0.5",
-    "dompurify": "^3.4.1",
-    "lucide-svelte": "^1.0.1",
-    "marked": "^18.0.2"
+    "@tauri-apps/plugin-updater": "^2.10.1"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.9.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
-    "@tailwindcss/vite": "^4.2.4",
     "@tauri-apps/cli": "^2",
     "@types/node": "^25.6.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
-    "tailwindcss": "^4.2.4",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"
   }

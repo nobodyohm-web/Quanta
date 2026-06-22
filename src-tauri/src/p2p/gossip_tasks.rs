@@ -236,8 +236,9 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
     *state.node.peer_country_reports.write().await
         .entry(country.to_string()).or_insert(0) += 1;
 
-    let heads = state.node.dag.read().await.heads();
-    let tasks_completed = state.node.marketplace.read().await.completed_by(&pk);
+    // Crypto-core: no DAG / marketplace — heads stay empty and tasks_completed 0.
+    let heads: Vec<String> = Vec::new();
+    let tasks_completed = 0u64;
     let uptime_min = state.node.reputation.read().await
         .get_user(&pk).map(|u| u.uptime_minutes).unwrap_or(0);
     let chain_height = state.node.ledger.read().await.chain_height();

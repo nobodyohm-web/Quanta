@@ -3,9 +3,8 @@
 //! Runs every 60 seconds:
 //!   1. Collect peer contributions for Shapley distribution
 //!   2. Mine QTA proportional to energy + contribution
-//!   3. Record in Merkle-DAG
-//!   4. Broadcast to peers via gossip
-//!   5. Periodically seal blocks
+//!   3. Broadcast to peers via gossip
+//!   4. Periodically seal blocks
 //!
 //! ## Lock ordering
 //!
@@ -13,7 +12,7 @@
 //! never overlap with subsequent readers:
 //!
 //!   crypto (lock) → peer_info (read) → reputation (write)
-//!     → ledger (write) → consensus (write) → dag (write)
+//!     → ledger (write) → consensus (write)
 //!     → gossip (write) → crypto (lock for sign)
 //!
 //! Breaking the order would risk deadlock with the dispatcher path
@@ -27,14 +26,6 @@ use std::time::Instant;
 /// Mining interval (one tick per minute).
 const MINE_INTERVAL_SECS: u64 = 60;
 
-/// Wall-clock secs depuis l'epoch — utilisé pour les fenêtres glissantes
-/// (anti-troll 30j, expiration des grants). On l'isole dans un helper testable.
-fn tick_start_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 /// How many ticks between forced block seals (2 min = 2 ticks × 60s).
 const SEAL_EVERY_N_TICKS: u32 = 2;
 /// Threshold above which we log a slow-tick warning (lock contention indicator).
@@ -77,25 +68,15 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
         .load(std::sync::atomic::Ordering::Relaxed);
 
     // ── 2. Compute mining reward via Shapley (reputation write) ──
+    // TOKENOMICS v2 — émission décroissante : fraction de l'offre RESTANTE vers
+    // le plafond dur (100M QUANTA). Lue depuis le ledger (consensus), donc tous
+    // les nœuds calculent la même émission pour ce tick.
+    let total_mined = state.node.ledger.read().await.stats().total_mined;
+    let emission_this_tick = p2p::reputation::emission_for_tick(total_mined);
+    // Garde-fou : ne jamais dépasser l'émission décroissante de ce tick.
     let (raw_uqta, kwh) = state.node.reputation.write().await
-        .uptime_tick(&pk, blocks_verified, &peer_contribs);
-
-    // ── 2b. V3.3 — Anti-troll : multiplie par le facteur dérivé du compteur de
-    //         reports modération validés sur 30j. Auteur clean → 1.0 ; troll → 0.0.
-    let anti_troll = {
-        let mod_engine = state.node.moderation.read().await;
-        let n_reports = mod_engine.validated_count_30d(&pk, tick_start_secs());
-        p2p::moderation::anti_troll_mining_factor(n_reports)
-    };
-    let after_troll = (raw_uqta as f64 * anti_troll) as u64;
-    let uqta_mined = after_troll.min(p2p::reputation::EMISSION_PER_TICK);
-    if anti_troll < 1.0 {
-        log::warn!(
-            "◈ [Anti-troll] mining réduit ×{:.2} ({} reports validés/30j)",
-            anti_troll,
-            state.node.moderation.read().await.validated_count_30d(&pk, tick_start_secs())
-        );
-    }
+        .uptime_tick(&pk, blocks_verified, emission_this_tick, &peer_contribs);
+    let uqta_mined = raw_uqta.min(emission_this_tick);
 
     // ── 3. Apply to ledger AND capture the freshly-built tx in one scope ──
     let mining_tx = state.node.ledger.write().await.mine_tx(&pk, uqta_mined, kwh);
@@ -106,29 +87,12 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
             .ledger.credit("network", &pk, uqta_mined);
     }
 
-    // ── 5. Record in Merkle-DAG (single write scope, parents read inline) ──
-    let payload = serde_json::to_vec(&serde_json::json!({
-        "type": "mining",
-        "pk": &pk,
-        "atn": uqta_mined as f64 / p2p::ledger::MICRO as f64,
-        "uqta": uqta_mined,
-        "kwh": kwh,
-        "model": "fixed_100h",
-    })).unwrap_or_default();
-    {
-        let mut dag = state.node.dag.write().await;
-        let parents = dag.heads();
-        let parents = if parents.is_empty() { vec!["genesis".into()] } else { parents };
-        let dag_node = p2p::merkle_dag::DagNode::new(parents, payload, pk.clone());
-        let _ = dag.insert(dag_node);
-    }
-
-    // ── 6. Broadcast mining TX (uses captured tx, no ledger re-read) ──
+    // ── 5. Broadcast mining TX (uses captured tx, no ledger re-read) ──
     broadcast_mining_tx(state, &pk, &mining_tx).await;
 
     *tick = tick.wrapping_add(1);
 
-    // ── 7. PoS: Seal blocks only if we're the elected leader ────
+    // ── 6. PoS: Seal blocks only if we're the elected leader ────
     // Mining TXs accumulate in pending for ALL nodes, but only the
     // PoS-elected leader for this slot actually seals them into a block.
     if tick.is_multiple_of(SEAL_EVERY_N_TICKS) {
@@ -153,19 +117,10 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
 async fn collect_peer_contributions(
     state: &AppState,
 ) -> std::collections::HashMap<String, p2p::shapley::NodeContribution> {
-    // V3 — snapshot social pour Shapley v2 social_utility (15%).
-    let social = state.node.social.read().await.snapshot();
     let peers = state.node.peer_info.read().await;
     peers.iter()
         .filter(|(_, info)| info.elapsed() < std::time::Duration::from_secs(300))
         .map(|(pk, info)| {
-            // V3.3 — vrais Σ √(amount) accumulés sur tous les votes positifs reçus
-            // par cet auteur. Net = likes - dislikes, clampé à 0 (pas de score négatif).
-            let weighted_likes = social
-                .creators
-                .get(pk)
-                .map(|c| (c.weighted_likes_received - c.weighted_dislikes_received).max(0.0))
-                .unwrap_or(0.0);
             (pk.clone(), p2p::shapley::NodeContribution {
                 node_id: pk.clone(),
                 watts: info.watts,
@@ -173,7 +128,6 @@ async fn collect_peer_contributions(
                 blocks_verified: info.blocks_verified,
                 uptime_minutes: info.uptime_minutes,
                 mode: p2p::shapley::NodeMode::Active,
-                weighted_likes,
             })
         })
         .collect()

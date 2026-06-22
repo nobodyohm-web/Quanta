@@ -10,8 +10,8 @@ globs: ["src-tauri/src/p2p/ledger.rs", "src-tauri/src/p2p/ledger_types.rs", "src
 ### Monetary System
 - **1 QUANTA = 1_000_000 µQTA** (`pub const MICRO: u64 = 1_000_000`)
 - ALL amounts in `u64` µQTA — NEVER f64 for balances
-- Emission: 100 QUANTA/hour, fixed forever
-- Burn: 1% on transfers, 2% on compute tasks
+- Emission: **decaying toward a 100M hard cap** — `(MAX_SUPPLY − minted) / 50_000_000` per tick (≈120 QUANTA/h at genesis, falls toward the cap); zero premine, zero mint authority
+- Burn: 1% on transfers
 
 ### Balance Cache (PERF-1)
 ```rust

@@ -207,6 +207,29 @@ pub(crate) fn derive_ml_dsa(seed32: &[u8; 32]) -> Option<(ml_dsa_65::PrivateKey,
     }
 }
 
+/// Deterministic ML-DSA-65 signature for the **simulation / DST harness only**.
+///
+/// ML-DSA's hedged signing draws `rnd` from `OsRng` (fault-attack resistance),
+/// which makes a signature — and therefore any block whose Merkle root binds it
+/// — non-reproducible. Here `rnd` is replaced by a BLAKE3-derived stream over
+/// the message, so a given (key, message) always yields the **same** signature,
+/// making seeded sweeps byte-reproducible (T0.8-HARDEN Phase 1).
+///
+/// Production signing is **untouched**: [`HybridIdentity::sign`] /
+/// `CryptoEngine::sign_hybrid` keep `OsRng`. The sim runs on test keys with no
+/// secrets at risk, so trading hedged entropy for determinism here never
+/// weakens production.
+///
+/// SIGN-DET-VERIFY: gated `#[cfg(test)]` so the deterministic primitive is
+/// **physically absent from release builds** — no production path can reach it,
+/// even by accident, so the post-quantum hardness cannot silently downgrade.
+#[cfg(test)]
+pub(crate) fn ml_dsa_sign_deterministic(sk: &ml_dsa_65::PrivateKey, msg: &[u8]) -> Option<Vec<u8>> {
+    let seed: [u8; 32] = *blake3::hash(msg).as_bytes();
+    let mut rng = Blake3Rng::from_seed(&seed);
+    sk.try_sign_with_rng(&mut rng, msg, &[]).ok().map(|s| s.to_vec())
+}
+
 // ─── Fonctions de vérification internes ───────────────────────────────────────
 
 fn verify_ed25519(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {

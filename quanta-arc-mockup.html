@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>QUANTA — direction « Espaces Arc »</title>
+<style>
+  :root{
+    --accent:#0BA5A0; --accent-deep:#087F8C; --accent-bright:#14C8B8;
+    --ink:#1c1d22; --ink-2:#54565f; --ink-3:#8a8d97;
+    --paper:#ffffff;
+    --r-card:18px; --r-xl:26px; --r-pill:999px;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+    --mono:'JetBrains Mono','SF Mono',ui-monospace,monospace;
+    --sh-sm:0 1px 2px rgba(40,40,60,.05);
+    --sh:0 10px 30px rgba(45,45,70,.08),0 2px 6px rgba(45,45,70,.05);
+    --sh-lg:0 30px 70px rgba(40,40,70,.16),0 8px 20px rgba(40,40,70,.06);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:var(--font); color:var(--ink);
+    -webkit-font-smoothing:antialiased; height:100vh; overflow:hidden;
+    /* L'« espace » Arc : dégradé pastel teal→indigo→violet, façon crayon */
+    background:
+      radial-gradient(80% 60% at 12% 8%, rgba(20,200,184,.28), transparent 60%),
+      radial-gradient(70% 70% at 92% 18%, rgba(124,58,237,.22), transparent 60%),
+      radial-gradient(90% 80% at 70% 100%, rgba(61,111,224,.20), transparent 60%),
+      linear-gradient(160deg,#eaf7f5 0%,#eef0fb 48%,#f4edf9 100%);
+  }
+  .num{font-variant-numeric:tabular-nums lining-nums;font-feature-settings:'tnum','zero'}
+  /* Grain papier global */
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:80;
+    opacity:.05;mix-blend-mode:multiply;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+  .app{display:flex;height:100vh;padding:14px;gap:6px}
+
+  /* ── Barre latérale = un « espace » teinté (transparente sur le fond) ── */
+  .side{width:212px;flex-shrink:0;display:flex;flex-direction:column;padding:10px 12px}
+  .brand{display:flex;align-items:center;gap:11px;padding:10px 10px 18px}
+  .logo{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+    color:#fff;font-weight:800;font-size:16px;
+    background:linear-gradient(135deg,#14C8B8,#0BA5A0 45%,#3D6FE0);box-shadow:0 4px 12px rgba(11,165,160,.35)}
+  .wordmark{font-weight:800;letter-spacing:.13em;font-size:15px}
+  .nav{display:flex;flex-direction:column;gap:3px;margin-top:4px}
+  .nav a{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:12px;
+    color:var(--ink-2);font-size:13.5px;font-weight:600;text-decoration:none;cursor:pointer;transition:.15s}
+  .nav a .ic{width:16px;height:16px;opacity:.7}
+  .nav a:hover{background:rgba(255,255,255,.45);color:var(--ink)}
+  /* item actif = pastille blanche « frosted » */
+  .nav a.on{background:rgba(255,255,255,.92);color:var(--ink);box-shadow:var(--sh-sm);backdrop-filter:blur(8px)}
+  .nav a.on .ic{opacity:1;color:var(--accent)}
+  .side-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding:8px}
+  .me{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;color:var(--accent-deep)}
+  .me .av{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#14C8B8,#3D6FE0 60%,#7C3AED)}
+  .node{display:flex;align-items:center;gap:9px;background:rgba(255,255,255,.55);border-radius:12px;padding:9px 11px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 4px rgba(22,163,74,.16)}
+  .node small{display:block;color:var(--ink-3);font-size:10px}
+  .node b{font-size:12px;color:#16a34a}
+
+  /* ── Panneau de contenu blanc qui flotte (la signature Arc) ── */
+  .panel{flex:1;background:var(--paper);border-radius:var(--r-xl);box-shadow:var(--sh-lg);
+    position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.7)}
+  .panel::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.4;mix-blend-mode:multiply;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+  .scroll{height:100%;overflow:auto;padding:30px 40px 40px}
+  .ph{font-size:22px;font-weight:800;letter-spacing:-.02em}
+  .psub{font-size:13px;color:var(--ink-2);margin-top:3px}
+
+  /* ── Héros solde + constellation quantique en fond ── */
+  .hero{position:relative;margin:26px 0 22px;display:flex;flex-direction:column;align-items:center;
+    padding:26px 0 8px}
+  .hero svg.q{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .coin{width:70px;height:70px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    color:#fff;font-weight:800;font-size:30px;position:relative;z-index:1;margin-bottom:14px;
+    background:
+      radial-gradient(115% 115% at 30% 22%, rgba(255,255,255,.55), transparent 44%),
+      conic-gradient(from 215deg,#14C8B8,#0BA5A0 28%,#3D6FE0 58%,#7C3AED 80%,#14C8B8);
+    box-shadow:0 14px 34px rgba(11,90,120,.32),inset 0 2px 8px rgba(255,255,255,.4)}
+  .bal{position:relative;z-index:1;font-size:54px;font-weight:800;letter-spacing:-.03em;line-height:1}
+  .unit{position:relative;z-index:1;font-size:13px;font-weight:700;letter-spacing:.14em;color:var(--ink-2);margin-top:7px}
+  .meta{position:relative;z-index:1;font-size:13px;color:var(--ink-2);margin-top:12px}
+  .meta b{color:var(--accent-deep)}
+
+  /* ── Actions = pilules frosted ── */
+  .acts{display:flex;gap:12px;justify-content:center;margin:22px auto 0;max-width:620px}
+  .act{flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;padding:16px;
+    background:rgba(255,255,255,.7);border:1px solid rgba(40,40,70,.07);border-radius:var(--r-card);
+    box-shadow:var(--sh-sm);cursor:pointer;font-size:13px;font-weight:600;backdrop-filter:blur(6px)}
+  .act .ic{color:var(--accent)}
+
+  /* ── Cartes « crayon » (tons pastels mats) ── */
+  .lab{font-size:11px;font-weight:700;letter-spacing:.07em;color:var(--ink-3);text-transform:uppercase;margin:28px 0 12px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:13px}
+  .card{border-radius:var(--r-card);padding:16px 17px;border:1px solid rgba(40,40,70,.06);box-shadow:var(--sh-sm)}
+  .card .k{font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;opacity:.62}
+  .card .v{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:6px 0 3px;font-family:var(--mono)}
+  .card .s{font-size:11px;opacity:.66}
+  .c-mint{background:#eaf7f1} .c-mint .k,.c-mint .s{color:#0b6b5e} .c-mint .v{color:#0e9e86}
+  .c-lav{background:#f0edfb} .c-lav .k,.c-lav .s{color:#5b46a8} .c-lav .v{color:#7c3aed}
+  .c-sky{background:#e9f1fb} .c-sky .k,.c-sky .s{color:#2f5bb0} .c-sky .v{color:#3D6FE0}
+  .c-peach{background:#fbf1e8} .c-peach .k,.c-peach .s{color:#b06a1e} .c-peach .v{color:#e8810c}
+
+  .foot{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink-3);margin-top:14px}
+  .foot .d{width:7px;height:7px;border-radius:50%;background:#16a34a}
+
+  /* ── Activité ── */
+  .act-row{display:flex;justify-content:space-between;align-items:center;padding:14px 2px;border-bottom:1px solid rgba(40,40,70,.06)}
+  .act-row:last-child{border-bottom:0}
+  .ar-l b{font-size:14px} .ar-l small{display:block;color:var(--ink-3);font-size:12px;font-family:var(--mono)}
+  .ar-r{text-align:right;font-family:var(--mono)}
+  .ar-r b{font-size:14px} .ar-r small{display:block;color:var(--ink-3);font-size:11px}
+  .pills{display:flex;gap:7px;margin:14px 0 6px}
+  .pill{padding:6px 13px;border-radius:var(--r-pill);font-size:12px;font-weight:600;background:rgba(40,40,70,.05);color:var(--ink-2)}
+  .pill.on{background:var(--accent);color:#fff}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Barre latérale teintée (espace Arc) -->
+  <aside class="side">
+    <div class="brand"><div class="logo">Q</div><div class="wordmark">QUANTA</div></div>
+    <nav class="nav">
+      <a class="on"><span class="ic">▭</span> Portefeuille</a>
+      <a><span class="ic">◇</span> Proches</a>
+      <a><span class="ic">▦</span> Tableau de bord</a>
+      <a><span class="ic">⌗</span> Réseau</a>
+      <a><span class="ic">◎</span> Explorateur</a>
+      <a><span class="ic">○</span> Profil</a>
+    </nav>
+    <div class="side-foot">
+      <div class="me"><span class="av"></span> @alex</div>
+      <div class="node"><span class="dot"></span><div><small>Nœud</small><b>Actif</b></div></div>
+    </div>
+  </aside>
+
+  <!-- Panneau blanc flottant -->
+  <main class="panel">
+    <div class="scroll">
+      <div class="ph">Portefeuille</div>
+      <div class="psub">Ta monnaie souveraine — forgée, possédée, inaltérable.</div>
+
+      <!-- Héros + constellation quantique -->
+      <div class="hero">
+        <svg class="q" viewBox="0 0 800 320" preserveAspectRatio="none">
+          <g stroke="rgba(11,165,160,.18)" stroke-width="1">
+            <line x1="120" y1="60" x2="250" y2="120"/><line x1="250" y1="120" x2="180" y2="220"/>
+            <line x1="250" y1="120" x2="400" y2="80"/><line x1="400" y1="80" x2="560" y2="130"/>
+            <line x1="560" y1="130" x2="680" y2="70"/><line x1="560" y1="130" x2="620" y2="240"/>
+            <line x1="400" y1="80" x2="380" y2="250"/><line x1="180" y1="220" x2="380" y2="250"/>
+            <line x1="620" y1="240" x2="380" y2="250"/>
+          </g>
+          <g fill="rgba(11,165,160,.42)">
+            <circle cx="120" cy="60" r="3"/><circle cx="250" cy="120" r="4"/><circle cx="180" cy="220" r="2.5"/>
+            <circle cx="400" cy="80" r="3.5"/><circle cx="560" cy="130" r="4"/><circle cx="680" cy="70" r="2.5"/>
+            <circle cx="620" cy="240" r="3"/><circle cx="380" cy="250" r="3.5"/>
+          </g>
+          <g fill="rgba(124,58,237,.34)"><circle cx="700" cy="180" r="2.5"/><circle cx="90" cy="170" r="2.5"/><circle cx="470" cy="210" r="2"/></g>
+        </svg>
+        <div class="coin">Q</div>
+        <div class="bal num">128.40</div>
+        <div class="unit">QUANTA</div>
+        <div class="meta"><b>+8.20 forgés</b> · 2.00 stakés</div>
+      </div>
+
+      <div class="acts">
+        <div class="act"><span class="ic">↗</span> Envoyer</div>
+        <div class="act"><span class="ic">↓</span> Recevoir</div>
+        <div class="act"><span class="ic">◈</span> Staker</div>
+      </div>
+
+      <div class="lab">Ton argent</div>
+      <div class="cards">
+        <div class="card c-mint"><div class="k">Disponible</div><div class="v">126.40</div><div class="s">dépensables</div></div>
+        <div class="card c-lav"><div class="k">En staking</div><div class="v">2.00</div><div class="s">sécurise le réseau</div></div>
+        <div class="card c-sky"><div class="k">Total forgé</div><div class="v">+8.20</div><div class="s">par ton minage</div></div>
+        <div class="card c-peach"><div class="k">Part du réseau</div><div class="v">0.54%</div><div class="s">du QUANTA en circulation</div></div>
+      </div>
+      <div class="foot"><span class="d"></span> connecté · 5 pairs · ⚡ 0.334 kWh</div>
+
+      <div class="lab">Activité</div>
+      <div class="pills"><span class="pill on">Tout</span><span class="pill">Envoyé</span><span class="pill">Reçu</span><span class="pill">Minage</span><span class="pill">Brûlé</span></div>
+      <div class="act-row"><div class="ar-l"><b>Transfert</b><small>→ b3f9…a21c</small></div><div class="ar-r"><b style="color:#e5484d">−5.00</b><small>−0.05 brûlés</small></div></div>
+      <div class="act-row"><div class="ar-l"><b>Minage · aujourd'hui</b><small>312 récompenses · automatique</small></div><div class="ar-r"><b style="color:#0e9e86">+3.90</b><small>il y a 1 min</small></div></div>
+      <div class="act-row"><div class="ar-l"><b>Reçu</b><small>de @maman</small></div><div class="ar-r"><b style="color:#0e9e86">+12.00</b><small>il y a 2 h</small></div></div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

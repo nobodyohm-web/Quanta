@@ -38,7 +38,10 @@ iroh-gossip = "0.98"
 blake3 = "1.8"
 
 # ─── Classical Crypto (Ed25519) ───
-ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+# C6: `zeroize` wipes the Ed25519 SigningKey's secret scalar on drop (FIPS-204
+# ML-DSA keys already zeroize by default), so the signing secret held by
+# CryptoEngine / sm::Node is erased from memory when dropped (Constitution §3).
+ed25519-dalek = { version = "2.2", features = ["rand_core", "zeroize"] }
 
 # ─── Symmetric Encryption (AES-256-GCM) ───
 aes-gcm = "0.10"

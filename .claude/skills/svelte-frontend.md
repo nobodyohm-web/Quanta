@@ -82,8 +82,9 @@ $effect(() => {
 - No gradients, glassmorphism, or glow effects
 - No external HTTP requests (all data via Tauri IPC)
 - No Tailwind CSS
-- User content in iframes with `sandbox="allow-same-origin"` (no scripts by default)
 
 ## Components (src/lib/)
-Dashboard, Wallet, PageBuilder, Browser, Network, Explorer,
-Forums, Profile, Settings, Sidebar, Welcome, CommandPalette
+Wallet, Contacts, Dashboard, Network (+ Network3D globe), Explorer, Profile,
+Settings, Sidebar, Welcome, CommandPalette, HelpModal — plus design helpers
+(Aurora, QuantumField, EmptyState, LanguageSelect, Identicon, ChainHistory).
+i18n via `t('clé')`, 6 langues (`i18n.svelte.ts` + `i18n.generated.ts`).

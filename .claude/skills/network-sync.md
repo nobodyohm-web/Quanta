@@ -49,14 +49,10 @@ NeighborUp event
 
 ALL tasks use `CancellationToken` for graceful shutdown.
 
-## State Stores (17 total)
-All wrapped in `Arc<RwLock<T>>`, snapshotted to SQLite every 30s:
-```
-reputation, ledger, consensus, dag, gossip,
-energy_oracle, peer_country_reports, peer_info,
-nonce_tracker, marketplace, page_store, domains,
-search, social, moderation, forums, follow_graph
-```
+## State Stores (crypto-only)
+All wrapped in `Arc<RwLock<T>>`. Persisted to SQLite every 30s:
+`ledger, reputation, consensus, gossip, usernames`.
+In-memory only: `energy_oracle, peer_country_reports, peer_info, nonce_tracker`.
 
 ## Iroh QUIC Setup
 ```rust

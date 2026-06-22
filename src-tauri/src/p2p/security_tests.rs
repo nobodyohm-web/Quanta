@@ -10,7 +10,6 @@
 //! - S7: Shapley efficiency axiom (shares sum to 1.0)
 //! - S8: Self-transfer rejection
 //! - S9: Negative/zero amount rejection
-//! - S10: Marketplace task without sufficient balance
 
 #[cfg(test)]
 #[allow(clippy::module_inception)] // Le nom du fichier reflète son contenu (security_tests.rs).
@@ -19,7 +18,6 @@ mod security_tests {
     use crate::p2p::gossip::{GossipEnvelope, GossipMessage, GossipRouter};
     use crate::p2p::shapley::{self, NodeContribution, NodeMode};
     use crate::p2p::dispatcher;
-    use crate::p2p::marketplace::{Marketplace, TaskType};
     use crate::security::CryptoEngine;
     use std::collections::HashMap;
 
@@ -252,19 +250,23 @@ mod security_tests {
 
     #[test]
     fn s6_emission_never_exceeds_cap() {
-        let emission_cap = crate::p2p::reputation::EMISSION_PER_TICK;
+        use crate::p2p::reputation::{emission_for_tick, MAX_SUPPLY_MICRO};
 
         let mut rep = crate::p2p::reputation::ReputationEngine::new();
         let pk = "a".repeat(64);
         let peers: HashMap<String, NodeContribution> = HashMap::new();
 
-        // Test 100 mining ticks — none should exceed the cap
+        // TOKENOMICS v2 : aucun tick ne dépasse l'émission décroissante de ce
+        // tick, et l'offre cumulée ne franchit JAMAIS le plafond dur.
+        let mut total: u64 = 0;
         for i in 0..100u64 {
-            let (qta, _kwh) = rep.uptime_tick(&pk, i * emission_cap, &peers);
-            // Apply the B4 hard cap (as done in lib.rs)
-            let capped = qta.min(emission_cap);
-            assert!(capped <= emission_cap,
-                "Emission tick {} exceeded cap: {} > {}", i, capped, emission_cap);
+            let emission = emission_for_tick(total);
+            let (qta, _kwh) = rep.uptime_tick(&pk, 0, emission, &peers);
+            assert!(qta <= emission,
+                "tick {} a dépassé l'émission du tick: {} > {}", i, qta, emission);
+            total = total.saturating_add(qta);
+            assert!(total <= MAX_SUPPLY_MICRO,
+                "offre cumulée a franchi le plafond dur au tick {}", i);
         }
     }
 
@@ -276,17 +278,14 @@ mod security_tests {
         contribs.insert("A".into(), NodeContribution {
             node_id: "A".into(), watts: 200.0,
             tasks_completed: 20, blocks_verified: 10, uptime_minutes: 120, mode: NodeMode::default(),
-            weighted_likes: 0.0,
         });
         contribs.insert("B".into(), NodeContribution {
             node_id: "B".into(), watts: 50.0,
             tasks_completed: 5, blocks_verified: 2, uptime_minutes: 60, mode: NodeMode::default(),
-            weighted_likes: 0.0,
         });
         contribs.insert("C".into(), NodeContribution {
             node_id: "C".into(), watts: 100.0,
             tasks_completed: 10, blocks_verified: 5, uptime_minutes: 90, mode: NodeMode::default(),
-            weighted_likes: 0.0,
         });
 
         let shares = shapley::compute_all_shares(&contribs);
@@ -305,7 +304,6 @@ mod security_tests {
                 tasks_completed: i as u64,
                 blocks_verified: i as u64 * 2,
                 uptime_minutes: (i as u64 + 1) * 30, mode: NodeMode::default(),
-                weighted_likes: 0.0,
             });
         }
 
@@ -350,54 +348,6 @@ mod security_tests {
         // u64 amounts cannot be negative — only zero is rejected at the type level.
         assert!(ledger.transfer_tx(pk, &to, 0, &crypto).is_err(),
             "Zero transfer must be rejected");
-    }
-
-    // ─── S10: Marketplace task without balance ──────────────────────────────
-
-    #[test]
-    fn s10_marketplace_insufficient_funds() {
-        let mut mp = Marketplace::new();
-        let mut ledger = Ledger::new();
-        let submitter = "s".repeat(64);
-
-        // Give only 1 QUANTA = MICRO µQTA
-        ledger.mine_tx(&submitter, MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
-
-        let result = mp.submit_task_with_escrow(
-            &mut ledger,
-            &submitter,
-            TaskType::Scientific { program_hash: "test".into() },
-            1000 * MICRO, // Needs 1000 + 20 (2% burn) = 1020 QUANTA, only have 1
-            "2030-01-01T00:00:00Z",
-            100.0,
-        );
-
-        assert!(result.is_err(),
-            "Task submission without sufficient funds must fail. Got: {:?}", result);
-    }
-
-    #[test]
-    fn s10_marketplace_sufficient_funds() {
-        let mut mp = Marketplace::new();
-        let mut ledger = Ledger::new();
-        let submitter = "s".repeat(64);
-
-        // Give enough QUANTA (200 QUANTA covers 100 + 2% burn)
-        ledger.mine_tx(&submitter, 200 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
-
-        let result = mp.submit_task_with_escrow(
-            &mut ledger,
-            &submitter,
-            TaskType::GenericWasm { wasm_hash: "test_wasm".into() },
-            100 * MICRO,
-            "2030-01-01T00:00:00Z",
-            500.0,
-        );
-
-        assert!(result.is_ok(),
-            "Task submission with sufficient funds should succeed. Err: {:?}", result);
     }
 
     // ─── S11: Total supply conservation ─────────────────────────────────────
@@ -642,7 +592,6 @@ mod property_tests {
                     tasks_completed: (i * 3) as u64,
                     blocks_verified: (i * 2) as u64,
                     uptime_minutes: ((i + 1) * 30) as u64, mode: NodeMode::default(),
-                    weighted_likes: 0.0,
                 });
             }
 
@@ -688,8 +637,8 @@ mod property_tests {
 
     #[test]
     fn p4_emission_distribution_conserves_total() {
-        // EMISSION_PER_TICK is u64 µQTA; shapley::distribute_emission uses f64.
-        let emission_per_tick_f = crate::p2p::reputation::EMISSION_PER_TICK as f64;
+        // Genesis-tick emission (µQTA); shapley::distribute_emission uses f64.
+        let emission_per_tick_f = crate::p2p::reputation::emission_for_tick(0) as f64;
 
         for n in 1..=10 {
             let mut contribs = HashMap::new();
@@ -700,7 +649,6 @@ mod property_tests {
                     tasks_completed: (i * 5) as u64,
                     blocks_verified: (i * 3) as u64,
                     uptime_minutes: ((i + 1) * 60) as u64, mode: NodeMode::default(),
-                    weighted_likes: 0.0,
                 });
             }
 
@@ -950,7 +898,6 @@ mod property_tests {
                     blocks_verified: b,
                     uptime_minutes: u,
                     mode: m,
-                    weighted_likes: 0.0,
                 })
             }).collect()
         })

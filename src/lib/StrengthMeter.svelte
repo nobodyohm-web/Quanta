@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from "./i18n.svelte";
+
   let { password = "" }: { password: string } = $props();
 
   const score = $derived.by(() => {
@@ -15,10 +17,10 @@
 
   const label = $derived(
     score === 0 ? "" :
-    score <= 1 ? "Très faible" :
-    score === 2 ? "Faible" :
-    score === 3 ? "Correct" :
-    score === 4 ? "Fort" : "Excellent"
+    score <= 1 ? t('pw.veryWeak') :
+    score === 2 ? t('pw.weak') :
+    score === 3 ? t('pw.ok') :
+    score === 4 ? t('pw.strong') : t('pw.excellent')
   );
 
   const colorVar = $derived(

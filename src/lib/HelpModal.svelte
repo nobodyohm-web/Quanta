@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { t } from "./i18n.svelte";
 
   let { isOpen, onClose }: { isOpen: boolean; onClose: () => void } = $props();
   let tab = $state<"start" | "economy" | "security" | "shortcuts">("start");
@@ -24,7 +25,7 @@
   onkeydown={(e) => e.key === 'Escape' && onClose()}
   role="button"
   tabindex="-1"
-  aria-label="Fermer l'aide"
+  aria-label={t('help.overlay_aria')}
 >
   <div
     class="help-modal card"
@@ -36,88 +37,89 @@
     tabindex="-1"
   >
     <div class="help-head">
-      <h2 class="help-title" id="help-title">Aide & sécurité</h2>
-      <button class="help-close" onclick={onClose} aria-label="Fermer">×</button>
+      <h2 class="help-title" id="help-title">{t('help.title')}</h2>
+      <button class="help-close" onclick={onClose} aria-label={t('help.close_aria')}>×</button>
     </div>
 
     <div class="help-tabs">
-      <button class="help-tab" class:active={tab === "start"} onclick={() => tab = "start"}>Démarrage</button>
-      <button class="help-tab" class:active={tab === "economy"} onclick={() => tab = "economy"}>Économie QUANTA</button>
-      <button class="help-tab" class:active={tab === "security"} onclick={() => tab = "security"}>Sécurité</button>
-      <button class="help-tab" class:active={tab === "shortcuts"} onclick={() => tab = "shortcuts"}>Raccourcis</button>
+      <button class="help-tab" class:active={tab === "start"} onclick={() => tab = "start"}>{t('help.tab_start')}</button>
+      <button class="help-tab" class:active={tab === "economy"} onclick={() => tab = "economy"}>{t('help.tab_economy')}</button>
+      <button class="help-tab" class:active={tab === "security"} onclick={() => tab = "security"}>{t('help.tab_security')}</button>
+      <button class="help-tab" class:active={tab === "shortcuts"} onclick={() => tab = "shortcuts"}>{t('help.tab_shortcuts')}</button>
     </div>
 
     <div class="help-body">
       {#if tab === "start"}
-        <h3 class="help-h3">Premiers pas</h3>
+        <h3 class="help-h3">{t('help.start_h3')}</h3>
         <ol class="help-ol">
-          <li><b>Créez du contenu</b> — chaque site publié génère du QUANTA et booste votre confiance.</li>
-          <li><b>Publiez en P2P</b> — un clic, et votre site devient un subspace synchronisé via Iroh QUIC.</li>
-          <li><b>Restez connecté</b> — le simple fait d'être en ligne mine du QUANTA (énergie réelle convertie, Shapley).</li>
-          <li><b>Recevez des interactions</b> — chaque action est une transaction signée sur votre chaîne QUANTA.</li>
+          <li>{@html t('help.start_li1')}</li>
+          <li>{@html t('help.start_li2')}</li>
+          <li>{@html t('help.start_li3')}</li>
+          <li>{@html t('help.start_li4')}</li>
         </ol>
-        <p class="help-tip">Astuce : utilisez ⌘+K pour naviguer instantanément entre les vues.</p>
+        <p class="help-tip">{t('help.start_tip')}</p>
 
       {:else if tab === "economy"}
-        <h3 class="help-h3">Comment le QUANTA prend de la valeur</h3>
-        <p class="help-p">Chaque QUANTA est adossé à une dépense énergétique réelle. Le prix de l'énergie de votre pays fixe une valeur plancher. Au-delà, c'est l'utilité du réseau qui détermine le prix.</p>
+        <h3 class="help-h3">{t('help.eco_h3')}</h3>
+        <p class="help-p">{@html t('help.eco_intro')}</p>
 
         <table class="help-table">
-          <thead><tr><th>Mécanisme</th><th>Détail</th></tr></thead>
+          <thead><tr><th>{t('help.eco_th_mechanism')}</th><th>{t('help.eco_th_detail')}</th></tr></thead>
           <tbody>
-            <tr><td>Émission</td><td>100 QUANTA/h (fixe, pas de halving)</td></tr>
-            <tr><td>Distribution</td><td>Shapley Value (énergie 30% + travail 35% + validation 20% + uptime 15%)</td></tr>
-            <tr><td>Burn</td><td>1% de chaque transfert détruit (déflationniste)</td></tr>
-            <tr><td>Plancher</td><td>Indexé sur le coût énergie réel du réseau</td></tr>
+            <tr><td>{t('help.eco_cap_label')}</td><td>{t('help.eco_cap_detail')}</td></tr>
+            <tr><td>{t('help.eco_emission_label')}</td><td>{@html t('help.eco_emission_detail')}</td></tr>
+            <tr><td>{t('help.eco_distribution_label')}</td><td>{t('help.eco_distribution_detail')}</td></tr>
+            <tr><td>{t('help.eco_burn_label')}</td><td>{t('help.eco_burn_detail')}</td></tr>
+            <tr><td>{t('help.eco_cost_label')}</td><td>{@html t('help.eco_cost_detail')}</td></tr>
           </tbody>
         </table>
 
-        <p class="help-p">Toutes les transactions sont scellées dans des blocs immuables et propagées via gossip.</p>
+        <p class="help-p">{t('help.eco_outro')}</p>
 
       {:else if tab === "security"}
-        <h3 class="help-h3">Garanties cryptographiques</h3>
-        <p class="help-p">QUANTA n'utilise que des primitives cryptographiques auditées. Aucun protocole maison.</p>
+        <h3 class="help-h3">{t('help.sec_h3')}</h3>
+        <p class="help-p">{t('help.sec_intro')}</p>
         {#if audit}
           <div class="help-grid">
             <div class="help-cell">
-              <div class="hc-label">Signature</div>
+              <div class="hc-label">{t('help.sec_signature')}</div>
               <div class="hc-value">{audit.signing?.name}</div>
               <div class="hc-meta">{audit.signing?.standard}</div>
             </div>
             <div class="help-cell">
-              <div class="hc-label">Chiffrement</div>
+              <div class="hc-label">{t('help.sec_encryption')}</div>
               <div class="hc-value">{audit.symmetric?.name}</div>
               <div class="hc-meta">{audit.symmetric?.standard}</div>
             </div>
             <div class="help-cell">
-              <div class="hc-label">Dérivation</div>
+              <div class="hc-label">{t('help.sec_derivation')}</div>
               <div class="hc-value">{audit.kdf?.name}</div>
               <div class="hc-meta">{audit.kdf?.standard}</div>
             </div>
             <div class="help-cell">
-              <div class="hc-label">Hashing</div>
+              <div class="hc-label">{t('help.sec_hashing')}</div>
               <div class="hc-value">{audit.hashing?.name}</div>
               <div class="hc-meta">{audit.hashing?.standard}</div>
             </div>
           </div>
           <div class="help-grade">
-            <span class="hg-label">Grade global :</span>
+            <span class="hg-label">{t('help.sec_grade')}</span>
             <span class="hg-value">{audit.grade}</span>
           </div>
         {/if}
         <p class="help-tip">
-          Votre clé privée ne quitte jamais cet appareil. Elle est chiffrée au repos avec une clé dérivée de votre mot de passe via Argon2id (64 Mo de mémoire, 3 itérations). En mémoire vive, les secrets sont effacés via <code>zeroize</code>.
+          {@html t('help.sec_tip')}
         </p>
 
       {:else if tab === "shortcuts"}
-        <h3 class="help-h3">Raccourcis clavier</h3>
+        <h3 class="help-h3">{t('help.sc_h3')}</h3>
         <div class="help-keys">
-          <div class="hk-row"><kbd>⌘</kbd> <kbd>K</kbd> <span>Ouvrir la palette</span></div>
-          <div class="hk-row"><kbd>⌘</kbd> <kbd>/</kbd> <span>Cette aide</span></div>
-          <div class="hk-row"><kbd>Esc</kbd> <span>Fermer une fenêtre</span></div>
-          <div class="hk-row"><kbd>↵</kbd> <span>Valider un formulaire</span></div>
+          <div class="hk-row"><kbd>⌘</kbd> <kbd>K</kbd> <span>{t('help.sc_palette')}</span></div>
+          <div class="hk-row"><kbd>⌘</kbd> <kbd>/</kbd> <span>{t('help.sc_help')}</span></div>
+          <div class="hk-row"><kbd>Esc</kbd> <span>{t('help.sc_close')}</span></div>
+          <div class="hk-row"><kbd>↵</kbd> <span>{t('help.sc_submit')}</span></div>
         </div>
-        <p class="help-tip">Vous pouvez glisser-déposer du Markdown depuis n'importe où dans l'éditeur.</p>
+        <p class="help-tip">{t('help.sc_tip')}</p>
       {/if}
     </div>
   </div>

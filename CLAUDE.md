@@ -3,30 +3,31 @@
 > **Marque** : **Quanta** (réseau + app + pièce). Les identifiants techniques/wire hérités
 > — TLD `.torus`, `TORUS_PROTOCOL_VERSION`, events Tauri `torus://…` — sont **conservés tels
 > quels** pour la compatibilité réseau ; ne pas les renommer sans changement de protocole.
-> **Version** : v3.3 (Site Engine) | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
+> **Version** : v3.3 (crypto-only) | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
 > **Licence** : Apache-2.0
 > **Status** : ✅ P2P vérifié entre 2 machines physiques (06/05/2026) · ⚠️ alpha, non audité par un tiers
 > **Repo** : [github.com/nobodyohm-web/Torus](https://github.com/nobodyohm-web/Torus)
 
 ---
 
-## Mission V2 — Network Perfection
+## Mission — Monnaie souveraine P2P
 
-**Quanta est un Web P2P souverain — sans serveur, sans cloud, sans intermédiaire.**
+**Quanta est une monnaie souveraine P2P — une cryptomonnaie sans serveur, sans cloud, sans intermédiaire.**
 
-La V1 est fonctionnelle. La V2 vise la **perfection réseau** :
+La mission vise la **perfection réseau** au service d'une seule chose : une monnaie saine,
+rare et vérifiable.
 
-### Objectifs V2
+### Objectifs
 1. **Protocole Torus** : Un protocole P2P natif qui remplace les couches ad-hoc par un protocole unifié, versionné, extensible
 2. **Échanges parfaits** : Synchronisation deterministe, 0 perte de données, convergence garantie ≤5s
 3. **Réseau robuste** : Reconnexion automatique, multi-peer discovery, NAT traversal fiable
 4. **Blockchain production** : Consensus PoS stable, fork resolution déterministe, chain sync rapide
-5. **Web P2P** : Sites publiés accessibles par tous les peers, résolution `.torus` fonctionnelle
+5. **Monnaie vérifiable** : plafond dur 100M gravé dans le code, zéro premine, zéro autorité d'émission
 
 ### Trois capacités :
-1. **Créer** : publiez un site HTML/CSS/JS en 1 clic, hébergé par le réseau P2P
-2. **Miner** : gagnez des QUANTA automatiquement en contribuant au réseau
-3. **Échanger** : transférez des QUANTA entre wallets avec signatures Ed25519
+1. **Miner** : gagnez des QUANTA automatiquement en contribuant au réseau (énergie mesurée)
+2. **Garder** : votre identité est une clé que vous seul détenez ; on vous joint par un court **`@pseudo`**
+3. **Échanger** : transférez des QUANTA entre wallets par `@pseudo`, signés **Ed25519 + ML-DSA-65** (post-quantique), burn 1 %
 
 ---
 
@@ -50,7 +51,6 @@ La V1 est fonctionnelle. La V2 vise la **perfection réseau** :
 ```
 src-tauri/src/
 ├── lib.rs                 ← Commandes Tauri (40+ commandes)
-├── commands_v3.rs         ← Commandes V3 (social, domains, forums)
 ├── p2p/
 │   ├── mod.rs             ← PeerInfo, exports
 │   ├── pos_consensus.rs   ← ⭐ PoS leader election VRF (BLAKE3)
@@ -59,23 +59,15 @@ src-tauri/src/
 │   ├── ledger_types.rs    ← Block, Transaction, TxType
 │   ├── shapley.rs         ← Distribution Shapley (énergie + utilité)
 │   ├── consensus.rs       ← CRDT PN-Counters (convergent merge)
-│   ├── gossip.rs          ← ⭐ Protocol gossip (Hello, Tx, Block, Page, Chain sync)
+│   ├── gossip.rs          ← ⭐ Protocol gossip (Hello, Tx, Block, Chain sync, Username)
 │   ├── gossip_tasks.rs    ← Background tasks (Hello broadcast 60s, trigger_hello_now)
 │   ├── dispatcher.rs      ← ⭐ Message handler (verify → process → dispatch)
 │   ├── mining_loop.rs     ← Mine tick 60s + PoS leader seal
 │   ├── willow_node.rs     ← ⭐ Iroh endpoint + stores + gossip topic
-│   ├── state_persistence.rs ← SQLite snapshot every 30s (12 stores)
-│   ├── page_store.rs      ← Sites P2P (publish + gossip broadcast)
-│   ├── domains.rs         ← Registre noms .torus (Harberger tax)
-│   ├── search.rs          ← BM25 ranking + QuantaRank
-│   ├── social.rs          ← Likes (quadratic), follows, tips
-│   ├── moderation.rs      ← Reports + jury VRF + slashing
-│   ├── forums.rs          ← Threads DAG + commentaires
-│   ├── trust_graph.rs     ← Web of Trust (PageRank personnalisé)
+│   ├── state_persistence.rs ← SQLite snapshot every 30s
+│   ├── username.rs        ← Registre d'identité @pseudo
 │   ├── energy.rs          ← Oracle énergie (33 pays)
-│   ├── sybil.rs           ← Anti-sybil PoC
-│   ├── marketplace.rs     ← Tâches compute distribuées
-│   └── merkle_dag.rs      ← DAG content-addressed (BLAKE3)
+│   └── sybil.rs           ← Anti-sybil PoC
 ├── security/
 │   ├── mod.rs             ← CryptoEngine (Ed25519)
 │   ├── pq_vault.rs        ← Identity vault (Argon2id + AES-256-GCM)
@@ -90,9 +82,9 @@ src-tauri/src/
 ### Couches du protocole
 ```
 ┌──────────────────────────────────┐
-│    Application Layer             │ ← Sites, Wallet, Social, Forums
+│    Application Layer             │ ← Wallet, Identité @pseudo, Staking
 ├──────────────────────────────────┤
-│    Protocol Layer                │ ← GossipMessage (22 variants)
+│    Protocol Layer                │ ← GossipMessage (9 variants)
 ├──────────────────────────────────┤
 │    Security Layer                │ ← GossipEnvelope (Ed25519 + nonce + timestamp)
 ├──────────────────────────────────┤
@@ -111,22 +103,10 @@ src-tauri/src/
 | `ChainSegment` | Response | Réponse sync (max 50 blocs) | CRITICAL |
 | `NewBlock` | Broadcast | Bloc scellé par le leader PoS | CRITICAL |
 | `BroadcastTx` | Broadcast | Transaction signée (mining, transfer, burn) | HIGH |
-| `PublishPage` | Broadcast | Page web P2P single-page | HIGH |
-| `PublishSiteManifest` | Broadcast | Manifest site multi-page | HIGH |
-| `RequestPage` | Request | Requête page par author_pk | MEDIUM |
-| `WantNodes` | Request | Demande nœuds DAG manquants | MEDIUM |
-| `HaveNodes` | Response | Nœuds DAG demandés | MEDIUM |
+| `PublishUsername` | Broadcast | Enregistrement d'identité @pseudo | MEDIUM |
 | `Ping` | Request | Liveness check | LOW |
 | `Pong` | Response | Réponse liveness | LOW |
 | `ReportPeer` | Broadcast | Signalement pair malveillant | LOW |
-| `PublishDomain` | Broadcast | Enregistrement domaine .torus | MEDIUM |
-| `PublishSubdomain` | Broadcast | Délégation sous-domaine | MEDIUM |
-| `PublishSite` | Broadcast | Site indexé pour recherche | MEDIUM |
-| `BroadcastSocialAction` | Broadcast | Vote/Follow/Tip/Boost | MEDIUM |
-| `BroadcastReport` | Broadcast | Signalement contenu | LOW |
-| `BroadcastJurorCommit` | Broadcast | Vote juré (commit phase) | LOW |
-| `BroadcastJurorReveal` | Broadcast | Révélation vote juré | LOW |
-| `PublishForumNode` | Broadcast | Forum/Thread/Comment | MEDIUM |
 
 ### Pipeline de sécurité (dispatch_incoming)
 ```
@@ -146,12 +126,13 @@ Processed
 
 ---
 
-## Consensus — Proof-of-Stake avec VRF
+## Consensus — Proof-of-Stake, élection vérifiable pondérée par le stake
 
 ```
 Slot N (= chain height)
 │
-├─ VRF seed = BLAKE3(prev_block_hash || slot)
+├─ beacon = BLAKE3(domaine ‖ bloc_enterré_hash ‖ slot)   (enterré = LOOKBACK slots derrière le tip)
+├─ seed   = BLAKE3(domaine ‖ beacon ‖ slot ‖ round)
 ├─ seed % total_weighted_stake → leader déterministe
 │
 ├─ Poids = stake + (reputation × 10_000)
@@ -159,6 +140,12 @@ Slot N (= chain height)
 ├─ Fallback = 30s timeout → next-in-line
 └─ Bootstrap = permissionless si personne n'a staké
 ```
+
+> **Nommage honnête** : élection *déterministe et publiquement vérifiable*, **pas** un VRF
+> cryptographique (aucune clé secrète → leader publiquement prévisible). Le beacon enterré
+> bloque l'auto-grinding immédiat ; un vrai VRF (imprévisibilité) + un VDF (anti-grinding)
+> + le **slashing** de l'équivocation (absent aujourd'hui) sont au roadmap. Les identifiants
+> internes `vrf` sont des noms legacy gardés pour la compat de domaine/wire.
 
 **Fichier** : `pos_consensus.rs` (9 tests)
 
@@ -190,7 +177,7 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 - **NET-4** : Hello 120s + Ping 15s léger pour la liveness
 - **NET-5** : `TORUS_PROTOCOL_VERSION = 2` ; peers incompatibles loggués
 - **NET-6** : chain sync parallèle (fanout = 4 fenêtres × 50 blocs)
-- **NET-7** : DAG sync incrémental — skip WantNodes si heads inchangées
+- **NET-7** : ~~DAG sync incrémental~~ — retiré avec les modules web (le DAG de contenu social n'existe plus ; sans rapport avec le futur consensus DAG-BFT)
 - **NET-8** : ChainSegment gzip optionnel (50 MB inflate cap)
 - **NET-9** : RTT (EWMA), bytes_in/messages_in par peer
 - **NET-10** : score qualité 0-100 (latency 50pts + loss 30pts + uptime 20pts)
@@ -248,7 +235,7 @@ const MAX_RAW_ENVELOPE_BYTES: usize = 10MB; // DoS guard
 1. `tokio::sync` (JAMAIS `std::sync` avec `.await`)
 2. Zéro `unwrap()` — `Result<T,E>` + `?` partout
 3. `zeroize()` tous les secrets cryptographiques
-4. Ed25519 sur chaque tx et action sociale
+4. Ed25519 sur chaque tx et message gossip
 5. Lock ordering strict pour éviter deadlocks
 6. Tous les montants en `u64` µQTA (jamais f64 pour les balances)
 
@@ -266,7 +253,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 # Production build (Apple Silicon)
 npx tauri build
-# → src-tauri/target/release/bundle/dmg/Quanta_0.1.0_aarch64.dmg
+# → src-tauri/target/release/bundle/dmg/Quanta_3.3.0_aarch64.dmg
 
 # Installation
 # 1. Ouvrir le DMG
@@ -280,19 +267,15 @@ npx tauri build
 ## Tests
 
 ```
-243 tests, 0 failures
+174 tests, 0 failures
 ├── pos_consensus (9 tests) — leader election, fairness, fallback
 ├── security_tests (80+ tests) — signatures, replay, nonce, rate limit
 ├── ledger (20+ tests) — balance, fork, merkle, burn, AUDIT-TX/BLK
 ├── consensus CRDT (3 tests) — merge idempotent
 ├── integration_tests — paginated chain sync, AUDIT-SYNC compression
-├── page_store (16 tests) — single-page + multi-page, AUDIT-PAGE
-├── domains — claim, overbid, harberger, AUDIT-DOM round-trip
-├── social — quadratic likes, follow tiers, boost cap, AUDIT-SOC
-├── forums — forum/thread/comment hierarchy, AUDIT-FORUM round-trip
-├── moderation (12 tests) — report/commit/reveal, AUDIT-MOD restart
-├── search — TF-IDF + social signals, AUDIT-SEARCH author binding
-├── trust_graph (8 tests) — personalised PageRank, AUDIT-TRUST
+├── shapley — distribution énergie/travail/validation/uptime (somme = 1.0)
+├── reputation — mining engine + trust score
+├── username — registre d'identité @pseudo
 └── autres modules
 ```
 
@@ -311,21 +294,6 @@ npx tauri build
   désormais `Option<burn_tx>` (signé) et `ledger_transfer` diffuse les deux
   branches. Le contrôle de nonce strict du dispatcher est aussi relâché en
   monotonic-non-regression pour ne pas perdre les arrivées hors-ordre.
-- **AUDIT-PAGE-1** : `page_store::publish()` acceptait `signature == "unsigned"`
-  ou vide. Atteignable via gossip — n'importe quel pair pouvait imposer
-  du contenu pour le wallet d'une victime. Corrigé : exigence d'une
-  signature Ed25519 valide ; helper `publish_local_unsigned` relégué à
-  `#[cfg(test)]`.
-- **AUDIT-SOC-1** : toutes les commandes V3 (`social_vote`, `social_tip`,
-  `social_boost`, `claim_domain`, `pay_domain_rent`, `overbid_domain`,
-  `submit_moderation_report`) mutaient le ledger sans diffuser le tx
-  sous-jacent — divergence systématique des soldes. Helper
-  `broadcast_ledger_txs()` capture les txs fraîchement créés et envoie
-  chacune comme `BroadcastTx`.
-- **AUDIT-SEARCH-1** : `handle_publish_site` ne liait pas `IndexedDoc.author_pk`
-  au `sender` de l'enveloppe. Un pair pouvait polluer l'index avec des docs
-  spoofés. Maintenant on rejette tout doc dont l'`author_pk` ne correspond
-  pas à l'expéditeur signé.
 
 ### HIGH bugs corrigés
 - **AUDIT-BLK-1** : la résolution de fork perdait silencieusement les txs
@@ -336,10 +304,6 @@ npx tauri build
 - **AUDIT-BLK-2** : la résolution de fork popait le tip AVANT validation —
   un bloc malformé tronquait la chaîne d'un cran à jamais. Validation
   extraite en `validate_block_against_prev` et exécutée pre-mutation.
-- **AUDIT-MOD-1** : `pending_reports` (queue de reports sous le seuil de 5)
-  n'était pas snapshotée. Un redémarrage effaçait tous les reports en
-  cours d'accumulation. `ModerationSnapshot` les persiste désormais avec
-  `#[serde(default)]`.
 
 ### MEDIUM bugs corrigés
 - **AUDIT-TX-3** : `transfer_with_burn` ne pré-vérifiait que le NET. Si
@@ -351,13 +315,6 @@ npx tauri build
 
 ### Tests de régression ajoutés
 - ledger : audit_tx1/3/blk1/2/cross_ledger_convergence/out_of_order
-- page_store : audit_page1_*
-- domains : audit_dom_*
-- social : audit_soc_*
-- forums : audit_forum_*
-- moderation : audit_mod1_pending_reports_persist
-- search : audit_search_*
-- trust_graph : audit_trust_*
 - integration_tests : audit_sync_*
 
 ---
@@ -376,66 +333,4 @@ npx tauri build
 | 2026-05-07 | **🛡️ Audit P2P complet — 5 critiques + 3 high + 2 medium corrigés (243 tests)** |
 | 2026-05-07 | **🧱 Site Engine v3.3 — smart tags, no-code builder, dev HTTP API (256 tests)** |
 | 2026-05-31 | **🔐 Post-quantique hybride ACTIF (ML-DSA-65/FIPS 204, dérivé de la graine Ed25519) + invariants formels (proptest) + aléa d'élection non-grindable (beacon enterré) — 265 tests** |
-
----
-
-## Site Engine v3.3 — Smart Tags · No-Code Builder · Dev API
-
-### Phase 1 — Smart Tags + auto-indexation (`p2p/search.rs`, `lib.rs`)
-- Champ `tags: Vec<String>` (`#[serde(default)]`) sur `IndexedDoc`,
-  `PublishedPage`, `SiteManifest`. Rétro-compat des snapshots existants.
-- `auto_extract_tags(html, title)` : strip HTML → tokenize → top-5 tokens
-  (bonus ×3 sur les mots du titre). `sanitize_tag/sanitize_tags`
-  normalisent (lowercase, alphanum + tirets, max 30 chars, max 10 tags,
-  dédup).
-- `SearchIndex::search` : multiplicateur `TAG_BOOST=2.0` quand un tag du
-  doc matche un token de la query, et nouveau filtre exact
-  `SearchFilters.tag`.
-- **Bug critique corrigé** : `publish_page` (lib.rs) auto-indexe désormais
-  le site dans le `SearchIndex` local et broadcast `PublishSite` vers les
-  pairs. Avant ce fix, les sites publiés via PageBuilder n'étaient
-  **jamais** trouvables via la recherche réseau.
-- `index_my_page` et `publish_site` (commands_v3) acceptent un paramètre
-  `tags: Option<Vec<String>>` ; auto-extraction si absent.
-- `search_pages` accepte un filtre `tag: Option<String>`.
-- 8 nouveaux tests unitaires (`auto_extract`, `sanitize`, `tag_boost`,
-  `tag_filter`, `strip_html`, sérialisation legacy).
-
-### Phase 2 — No-Code Block Builder (`src/lib/PageBuilder.svelte`)
-- Réécriture complète en builder visuel à blocs (style Notion/Wix).
-  Svelte 5 runes (`$state`/`$derived`/`$effect`), vanilla CSS,
-  **zéro dépendance externe**, drag-drop HTML5 natif.
-- 20 types de blocs : heading (H1-H3), paragraph, quote, list, code,
-  image (file picker → base64), gallery, video, columns (2/3),
-  spacer (S/M/L), divider, hero, cards (2-6), feature, faq, callout,
-  navbar, footer, button, embed (HTML brut sanitisé).
-- 5 thèmes (Minimal, Dark Pro, Ocean, Warm, Glass) — variables CSS
-  injectées dans l'iframe sandboxée.
-- 5 templates pré-remplis (Landing, Blog, Portfolio, Boutique, Page perso),
-  contenu placeholder en français.
-- Top bar : titre, domaine `.torus`, pill-tags (Entrée/×, max 10),
-  suggestions auto-générées via TF du contenu, sélecteur de thème,
-  popup Méta (langue/cat/desc), toggle Code, Publier.
-- Édition inline (contenteditable), toolbar de bloc au hover, handle
-  drag `⋮⋮`, bouton `+` entre chaque bloc avec modal catégorisé.
-- Bouton Publier appelle `invoke("publish_page", { title, content, tags })`
-  avec tags manuels ou suggérés (intégration Phase 1).
-
-### Phase 3 — Dev HTTP API (`src-tauri/src/dev_api.rs`)
-- Serveur HTTP local `127.0.0.1:7654` (loopback only, double-check),
-  parser HTTP minimal sur `tokio::net::TcpListener` — **0 nouvelle dep**.
-- Auth Bearer obligatoire ; token 32 bytes hex persisté dans
-  `~/.torus/dev-api-token` (régénérable depuis Settings).
-- Désactivé par défaut. Toggle dans **Réglages → API Développeur**
-  (fichier sentinel `~/.torus/dev-api-enabled`). Quand off, toutes les
-  routes (sauf `/api/health`) renvoient `503`.
-- Endpoints :
-  - `GET /api/health` (sans auth) — ping disponibilité.
-  - `GET /api/status` — `{ pk, balance_qta, sites_count, search_docs }`.
-  - `POST /api/publish` — signe + store + broadcast + auto-index.
-    Champs : `title`, `html`, `tags?`, `lang?`, `kind?`, `domain?`.
-  - `GET /api/search?q=&lang=&tag=&limit=` — recherche P2P.
-  - `DELETE /api/site` — dépublie le site courant.
-- Doc complète + workflow VSCode dans [`DEV_API.md`](DEV_API.md).
-- 5 nouveaux tests (token roundtrip, parse_query, url_decode,
-  http_response format, find_header_end).
+| 2026-06-20 | **₿ Refonte crypto-only — suppression des modules web/social (sites, domaines, recherche, social, forums, modération, marketplace, DAG) ; Shapley sans terme social (énergie 30 / travail 30 / validation 25 / uptime 15) — 174 tests** |

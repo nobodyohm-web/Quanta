@@ -36,13 +36,13 @@ let bytes = serde_json::to_vec(&msg); // ❌ NEVER
 ⑨ Payload → handler
 ```
 
-### Message Types (22 total)
+### Message Types (9 total — crypto-only)
 | Priority | Messages |
 |----------|----------|
 | CRITICAL | Hello, RequestChain, ChainSegment, NewBlock |
-| HIGH | BroadcastTx, PublishPage, PublishSiteManifest |
-| MEDIUM | WantNodes, HaveNodes, RequestPage, PublishDomain, PublishSubdomain, PublishSite, BroadcastSocialAction, PublishForumNode |
-| LOW | Ping, Pong, ReportPeer, BroadcastReport, BroadcastJurorCommit, BroadcastJurorReveal |
+| HIGH | BroadcastTx |
+| MEDIUM | PublishUsername |
+| LOW | Ping, Pong, ReportPeer |
 
 ### Adding a New Message Type — Template
 ```rust

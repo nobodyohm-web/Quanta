@@ -15,16 +15,11 @@
 //! égales), mais ne garantit pas l'axiome de marginalité (un agent ne peut
 //! recevoir plus que sa contribution marginale à toute coalition).
 //!
-//! **Facteurs de contribution v2 (V3 social web)** :
-//!   - Énergie (25%)        : watts mesurés / total réseau
-//!   - Travail compute (25%): tâches exécutées / total tâches
-//!   - Validation (20%)     : blocs vérifiés / total blocs
+//! **Facteurs de contribution (crypto-core)** :
+//!   - Énergie (30%)        : watts mesurés / total réseau
+//!   - Travail compute (30%): tâches exécutées / total tâches
+//!   - Validation (25%)     : blocs vérifiés / total blocs
 //!   - Uptime (15%)         : heures en ligne / max uptime réseau
-//!   - **Utilité sociale (15%)** : likes pondérés reçus / total réseau (V3)
-//!
-//! Le facteur social provient de `SocialState::page_stats`. Il récompense
-//! les créateurs dont le contenu est apprécié par les autres utilisateurs
-//! (vote quadratique → résistance aux fermes de bots).
 //!
 //! Référence : Lloyd S. Shapley, "A Value for n-Person Games", 1953
 //! Note : notre implémentation est une *approximation linéaire*, pas le
@@ -33,18 +28,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Poids Shapley v2 — configurables, somme = 1.0 (CLAUDE.md règle #2)
-const W_ENERGY: f64 = 0.25;
-const W_WORK: f64 = 0.25;
-const W_VALIDATION: f64 = 0.20;
+/// Poids Shapley — configurables, somme = 1.0 (CLAUDE.md règle #2)
+const W_ENERGY: f64 = 0.30;
+const W_WORK: f64 = 0.30;
+const W_VALIDATION: f64 = 0.25;
 const W_UPTIME: f64 = 0.15;
-const W_SOCIAL: f64 = 0.15;
 
 /// Mode de contribution du nœud (détection automatique).
 /// Affecte le calcul Shapley quand aucune tâche marketplace n'existe encore :
 ///   - Active : le travail est estimé proportionnel à l'énergie (energy ≈ work)
 ///   - Research : futur — score max sur le travail (vérifié par ZK)
-///   - Guardian : pas de travail, mais validation + uptime = ~35% de Shapley
+///   - Guardian : pas de travail, mais validation + uptime = ~40% de Shapley
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
 pub enum NodeMode {
     #[default]
@@ -67,10 +61,6 @@ pub struct NodeContribution {
     pub uptime_minutes: u64,
     /// Mode de contribution (Active, Research, Guardian)
     pub mode: NodeMode,
-    /// V3 — Likes pondérés (Σ √montant_µQTA) reçus par les contenus de ce wallet.
-    /// Source : `SocialState::page_stats(...).weighted_likes` agrégé par auteur.
-    #[serde(default)]
-    pub weighted_likes: f64,
 }
 
 /// Agrégat réseau (totaux de tous les nœuds)
@@ -80,8 +70,6 @@ pub struct NetworkTotals {
     pub total_tasks: u64,
     pub total_blocks_verified: u64,
     pub max_uptime_minutes: u64,
-    /// V3 — Σ likes pondérés sur tous les nœuds (pour normaliser le facteur social).
-    pub total_weighted_likes: f64,
     pub node_count: usize,
 }
 
@@ -92,12 +80,10 @@ impl NetworkTotals {
         let mut total_tasks = 0u64;
         let mut total_blocks_verified = 0u64;
         let mut max_uptime_minutes = 0u64;
-        let mut total_weighted_likes = 0.0_f64;
         for c in contribs.values() {
             total_watts += c.watts;
             total_tasks += c.tasks_completed;
             total_blocks_verified += c.blocks_verified;
-            total_weighted_likes += c.weighted_likes;
             if c.uptime_minutes > max_uptime_minutes {
                 max_uptime_minutes = c.uptime_minutes;
             }
@@ -107,7 +93,6 @@ impl NetworkTotals {
             total_tasks,
             total_blocks_verified,
             max_uptime_minutes,
-            total_weighted_likes,
             node_count: contribs.len(),
         }
     }
@@ -155,7 +140,7 @@ pub fn shapley_score(node: &NodeContribution, network: &NetworkTotals) -> f64 {
             }
             NodeMode::Guardian => {
                 // Le gardien ne produit pas de travail compute — il sécurise.
-                // Son gain vient de validation (20%) + uptime (15%).
+                // Son gain vient de validation (25%) + uptime (15%).
                 0.0
             }
         }
@@ -175,21 +160,11 @@ pub fn shapley_score(node: &NodeContribution, network: &NetworkTotals) -> f64 {
         1.0
     };
 
-    // V3 — Facteur utilité sociale : ma part relative de likes pondérés.
-    // Tant que personne n'a reçu de like (réseau pré-V3), on distribue à parts
-    // égales pour ne pas pénaliser les Guardian/Active sans contenu.
-    let social = if network.total_weighted_likes > 0.0 {
-        node.weighted_likes / network.total_weighted_likes
-    } else {
-        1.0 / network.node_count as f64
-    };
-
-    // Score Shapley v2 pondéré (somme des poids = 1.0)
+    // Score Shapley pondéré (somme des poids = 1.0)
     W_ENERGY * energy
         + W_WORK * work
         + W_VALIDATION * validation
         + W_UPTIME * uptime
-        + W_SOCIAL * social
 }
 
 /// Calcule les scores Shapley de tous les nœuds et normalise
@@ -243,7 +218,6 @@ mod tests {
             node_id: id.to_string(),
             watts, tasks_completed: tasks, blocks_verified: blocks, uptime_minutes: uptime,
             mode: NodeMode::Active,
-            weighted_likes: 0.0,
         }
     }
 
@@ -255,7 +229,6 @@ mod tests {
             blocks_verified: blocks,
             uptime_minutes: uptime,
             mode: NodeMode::Guardian,
-            weighted_likes: 0.0,
         }
     }
 
@@ -320,11 +293,11 @@ mod tests {
     }
 
     #[test]
-    fn test_guardian_earns_about_35_percent() {
+    fn test_guardian_earns_about_40_percent() {
         // Guardian (3W, no work) vs Active (100W, no marketplace tasks)
         // Both have same validation (10 blocks) and uptime (60 min).
-        // Guardian should earn ~35% of total (validation 20% + uptime 15%).
-        // Active gets energy (30%) + work-fallback (35%) + validation (20%) + uptime (15%).
+        // Guardian's raw score comes from validation (25%) + uptime (15%) = 40%.
+        // Active gets energy (30%) + work-fallback (30%) + validation (25%) + uptime (15%).
         let mut contribs = HashMap::new();
         contribs.insert("Miner".into(), make_node("Miner", 100.0, 0, 10, 60));
         contribs.insert("Guard".into(), make_guardian("Guard", 10, 60));
@@ -333,7 +306,7 @@ mod tests {
         let guard_share = shares["Guard"];
         let miner_share = shares["Miner"];
 
-        // Guardian should get between 20% and 45% of total emission
+        // Guardian should get between 15% and 45% of total emission
         assert!(guard_share > 0.15,
             "Guardian should earn >15% of emission, got {:.1}%", guard_share * 100.0);
         assert!(guard_share < 0.45,

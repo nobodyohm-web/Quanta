@@ -1,7 +1,7 @@
-# Quanta — Le Web P2P souverain
+# Quanta — Monnaie souveraine pair-à-pair
 
-> **A sovereign peer-to-peer web and value network. No server, no cloud, no intermediary.**
-> Créez un site, minez la monnaie du réseau, échangez de la valeur — entre pairs, sans tiers de confiance.
+> **A sovereign peer-to-peer currency. No server, no bank, no mint authority.**
+> Minez la monnaie du réseau, gardez-la avec vos clés, échangez de la valeur — entre pairs, sans tiers de confiance.
 
 <p>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
@@ -13,8 +13,9 @@
 
 **Quanta** est une application de bureau (macOS · Windows · Linux) qui fait tourner un nœud
 d'un réseau pair-à-pair souverain. La pièce native est **QUANTA** (plus petite unité :
-**µQTA**, 1 QUANTA = 1 000 000 µQTA). Tout est local et chiffré : votre identité, votre
-wallet, vos sites. Le réseau remplace le serveur.
+**µQTA**, 1 QUANTA = 1 000 000 µQTA) — **rare** (plafond dur 100M, émission décroissante) et
+**post-quantique**. Tout est local et chiffré : votre identité, votre wallet, vos clés. Le
+réseau remplace la banque.
 
 ---
 
@@ -24,12 +25,12 @@ Quanta est un **logiciel alpha de recherche**. Il est honnête de le dire claire
 
 | ✅ Réel et testé | 🧪 Expérimental | ❌ Pas encore |
 |---|---|---|
-| Identité Ed25519 + vault chiffré (Argon2id + AES-256-GCM) | Marketplace de calcul distribué | Audit de sécurité tiers |
-| Ledger µQTA déterministe (burn-and-mint, fork reorg) | Oracle d'énergie (estimation watts) | Notarisation / signature OS officielle |
-| Consensus Proof-of-Stake + VRF (BLAKE3) | Web-of-Trust (PageRank personnalisé) | Valeur monétaire réelle (ne pas spéculer) |
-| Transport Iroh QUIC + gossip signé (22 messages) | Modération par jury VRF + slashing | Signatures post-quantiques **actives** |
-| PageBuilder no-code + publication P2P | NAT traversal multi-pairs à grande échelle | Réseau public ouvert à grande échelle |
-| 265 tests automatisés, 0 `unsafe` | | |
+| Identité Ed25519 + vault chiffré (Argon2id + AES-256-GCM) | Oracle d'énergie (estimation watts) | Audit de sécurité tiers |
+| Ledger µQTA déterministe (burn-and-mint, fork reorg, **plafond 100M**) | Anti-sybil (PoC : réputation + poids de stake) | Notarisation / signature OS officielle |
+| Consensus Proof-of-Stake + VRF (BLAKE3) | NAT traversal multi-pairs à grande échelle | Réseau public ouvert à grande échelle |
+| Transport Iroh QUIC + gossip signé (9 messages) | | Valeur / prix de marché (QUANTA n'est pas coté) |
+| **Signatures post-quantiques actives** (Ed25519 + ML-DSA-65, FIPS 204) | | |
+| 174 tests automatisés, 0 `unsafe` | | |
 
 - **P2P vérifié** entre deux machines physiques (mai 2026), pas (encore) à l'échelle.
 - **Cryptographie expérimentale** : ne stockez aucune valeur réelle dessus.
@@ -42,13 +43,14 @@ Quanta est un **logiciel alpha de recherche**. Il est honnête de le dire claire
 
 ## Trois capacités
 
-1. **Créer** — Publiez un site HTML/CSS via un **builder no-code à blocs** (ou en HTML brut).
-   Le site est *content-addressed* (BLAKE3) et diffusé aux pairs ; il reste accessible tant
-   qu'au moins un pair le réplique. Réservez un nom `*.torus` (registre Harberger).
-2. **Miner** — Gagnez des QUANTA en contribuant au réseau (uptime + énergie estimée).
-   Émission fixe **100 QUANTA/heure** répartie entre les pairs actifs (distribution Shapley).
-3. **Échanger** — Transférez des QUANTA entre wallets, signés Ed25519, avec un burn de 1 %.
-   Likez (vote quadratique), abonnez-vous, tippez des créateurs, modérez via jury.
+1. **Miner** — Gardez un nœud en ligne et gagnez des QUANTA selon votre **contribution réelle**
+   (énergie mesurée + uptime + validation, pondération inspirée de Shapley). Émission **décroissante** vers
+   un **plafond dur de 100M** (~120 QUANTA/h à la genèse), **zéro premine, zéro autorité d'émission**.
+2. **Garder** — Votre identité est une paire de clés ; on vous joint par un court **`@pseudo`**.
+   La clé privée ne quitte jamais l'appareil (vault Argon2id + AES-256-GCM) ; une clé de
+   récupération restaure le compte. Aucun KYC, aucun tiers.
+3. **Échanger** — Transférez des QUANTA entre wallets, signés **Ed25519 + ML-DSA-65** (post-quantique),
+   avec un **burn de 1 %** à chaque transfert. Stakez pour sécuriser le réseau (PoS + VRF).
 
 ---
 
@@ -59,9 +61,8 @@ Quanta est un **logiciel alpha de recherche**. Il est honnête de le dire claire
 │                     Application Tauri 2                    │
 │  ┌───────────────────────┐   ┌──────────────────────────┐ │
 │  │   Frontend Svelte 5   │ ↔ │   Backend Rust (tokio)   │ │
-│  │  Browser · Builder    │IPC│  P2P · Ledger · Consensus │ │
-│  │  Search · Forums      │   │  Search · Social · Mod    │ │
-│  │  Wallet · Network      │   │  Domains · Mining         │ │
+│  │  Wallet · Network      │IPC│  P2P · Ledger · Consensus │ │
+│  │  Profile · Settings   │   │  Mining · Staking         │ │
 │  └───────────────────────┘   └────────────┬─────────────┘ │
 └───────────────────────────────────────────┼───────────────┘
                                              │ Iroh QUIC + iroh-gossip (pub/sub signé)
@@ -69,12 +70,12 @@ Quanta est un **logiciel alpha de recherche**. Il est honnête de le dire claire
         ▼                                    ▼                                    ▼
  ┌──────────────┐                    ┌──────────────┐                    ┌──────────────┐
  │   Pair A     │                    │   Pair B     │                    │   Pair C     │
- │ Ledger · DAG │ ◄── convergence ──►│ Ledger · DAG │ ◄── convergence ──►│ Ledger · DAG │
- │ Index · Pages│   (CRDT + chaîne)  │ Index · Pages│   (CRDT + chaîne)  │ Index · Pages│
+ │    Ledger    │ ◄── convergence ──►│    Ledger    │ ◄── convergence ──►│    Ledger    │
+ │  (chaîne)    │   (CRDT + chaîne)  │  (chaîne)    │   (CRDT + chaîne)  │  (chaîne)    │
  └──────────────┘                    └──────────────┘                    └──────────────┘
 ```
 
-**Couches du protocole** : Application → Protocole (`GossipMessage`, 22 variants) →
+**Couches du protocole** : Application → Protocole (`GossipMessage`, 9 variants) →
 Sécurité (`GossipEnvelope` : Ed25519 + nonce monotone + timestamp ±90 s) → Transport
 (Iroh QUIC + gossip) → Réseau (NAT traversal + relais).
 
@@ -132,15 +133,23 @@ dédup (LRU 100 K) → fraîcheur timestamp (±90 s) → rate-limit adaptatif �
 
 | Paramètre | Valeur |
 |---|---|
-| Émission | **100 QUANTA / heure**, fixe, à perpétuité (pas de halving, pas de cap) |
+| Plafond | **100 000 000 QUANTA**, dur, vérifié au consensus — jamais dépassable |
+| Émission | **décroissante** : `(plafond − miné) / 50 000 000` µQTA par minute (~120 QUANTA/h à la genèse, baisse vers le plafond) |
+| Premine / autorité d'émission | **aucun** |
 | Unité | 1 QUANTA = 1 000 000 µQTA — arithmétique `u64`, zéro flottant sur les soldes |
-| Distribution | Shapley : énergie · travail compute · validation · uptime · utilité sociale |
-| Burn | 1 % par transfert (burn-and-mint), + frais sur boosts et slashing modération |
+| Distribution | pondération de contribution (inspirée de Shapley, **pas** un calcul exact) : énergie 30 · travail 30 · validation 25 · uptime 15 |
+| Burn | **1 % détruit par transfert** (burn-and-mint ; *net*-déflationniste seulement au-delà d'un seuil de volume) |
 | Anti-replay ledger | nonce monotone par compte + `seen_tx_hashes` |
 | Forks | reorg déterministe : revert cache → re-queue des tx exclusives → push gagnant |
 
-L'inflation **nominale** est fixe ; l'inflation **réelle** tend vers zéro quand l'usage
-(donc le burn) augmente — sans privilégier les early-adopters.
+Le **rythme** d'émission est front-loaded mais borné : chaque tick libère une fraction fixe de
+l'offre **restante**, donc le rythme baisse à l'approche du plafond et le total tend vers — sans
+jamais atteindre — 100M. Mais les **montants absolus** prennent des siècles (≈1 % à l'an 1,
+moitié du plafond vers ~66 ans) — voir le calendrier dans le [whitepaper](WHITEPAPER_FR.md#3).
+Le terme *travail* suit l'énergie (pas de marché de calcul en crypto-only). La rareté est
+**gravée dans le code et vérifiée au consensus** (borne par bloc + plafond global). Miner coûte
+de l'électricité réelle, mais **un coût de production n'est pas un prix** : QUANTA n'est coté
+nulle part et l'app n'affiche aucune valeur fiat inventée.
 
 ---
 
@@ -154,7 +163,7 @@ dépendances système).
 npm install
 npm run tauri dev
 
-# Tests backend (256 tests)
+# Tests backend (174 tests)
 cargo test --manifest-path src-tauri/Cargo.toml
 
 # Lint (zéro warning toléré)
@@ -175,26 +184,22 @@ puis clic droit → Ouvrir. La notarisation officielle est sur la feuille de rou
 ```
 src-tauri/src/
 ├── lib.rs                 ← Commandes Tauri (IPC frontend ↔ backend)
-├── commands_v3.rs         ← Commandes V3 (social, domaines, forums)
-├── dev_api.rs             ← API HTTP dev loopback (127.0.0.1:7654, désactivée par défaut)
 ├── p2p/
 │   ├── pos_consensus.rs   ← Élection de leader PoS (VRF BLAKE3)
 │   ├── ledger.rs          ← Blockchain (seal, validate, fork reorg, cache O(1))
-│   ├── gossip.rs          ← Protocole gossip (22 messages)
+│   ├── gossip.rs          ← Protocole gossip (9 messages)
 │   ├── dispatcher.rs      ← Pipeline de réception (verify → process → dispatch)
 │   ├── willow_node.rs     ← Endpoint Iroh + stores + topic gossip
-│   ├── search.rs          ← BM25 + QuantaRank (boost signaux sociaux)
-│   ├── domains.rs         ← Registre de noms *.torus (taxe Harberger)
-│   ├── social.rs          ← Likes (quadratique), follows, tips
-│   ├── moderation.rs      ← Signalements + jury VRF + slashing
-│   ├── trust_graph.rs     ← Web-of-Trust (PageRank personnalisé)
-│   └── …                  ← consensus CRDT, reputation, energy, sybil, marketplace, merkle_dag
+│   ├── reputation.rs      ← Moteur de minage + trust score
+│   ├── shapley.rs         ← Pondération de contribution, inspirée de Shapley (énergie/validation/uptime)
+│   ├── username.rs        ← Registre d'identité @pseudo
+│   └── …                  ← consensus CRDT, mining_loop, energy, sybil, state_persistence
 └── security/
     ├── mod.rs             ← CryptoEngine (Ed25519)
     ├── pq_vault.rs        ← Vault d'identité (Argon2id + AES-256-GCM)
     └── hybrid_crypto.rs   ← Signatures hybrides Ed25519 + ML-DSA-65 (FIPS 204, actif)
 
-src/                       ← Frontend Svelte 5 (Browser, PageBuilder, Wallet, Network, …)
+src/                       ← Frontend Svelte 5 (Wallet, Network, Profile, Settings, …)
 ```
 
 ---
@@ -207,9 +212,10 @@ La feuille de route détaillée (priorisée par impact × effort) vit dans l'**a
 - **Crédibilité** : doc fidèle au code, licence, marque unifiée *(en cours)*.
 - **Sécurité/robustesse** : fuzzing du parseur d'enveloppes, durcissement, tests multi-nœuds.
 - **Réseau** : convergence et résilience aux partitions testées en chaos (2+ nœuds).
-- **Produit** : i18n (FR/EN), refactor du PageBuilder, parcours d'onboarding.
+- **Produit** : i18n (FR/EN), parcours d'onboarding, ergonomie du wallet.
 - **Production** : pipeline de release signé + notarisation macOS.
-- **Vision** : finalité BFT sous-seconde (design [DAG-BFT](docs/DESIGN-CONSENSUS-DAG-BFT.md)),
+- **Vision** : finalité BFT sous-seconde (design [DAG-BFT](docs/DESIGN-CONSENSUS-DAG-BFT.md) —
+  un DAG de *consensus*, sans rapport avec le DAG de contenu social retiré),
   aléa d'élection durci par VDF, bascule réseau « PQ obligatoire » (`REQUIRE_PQ`).
 
 ---
@@ -218,7 +224,6 @@ La feuille de route détaillée (priorisée par impact × effort) vit dans l'**a
 
 - [`WHITEPAPER.md`](WHITEPAPER.md) — whitepaper (EN).
 - [`WHITEPAPER_FR.md`](WHITEPAPER_FR.md) — whitepaper (FR).
-- [`DEV_API.md`](DEV_API.md) — API HTTP développeur (publication externe).
 - [`CLAUDE.md`](CLAUDE.md) — référence technique interne (architecture, invariants).
 - [`audit/Torus-Audit-360.html`](audit/Torus-Audit-360.html) — audit 360° + roadmap.
 

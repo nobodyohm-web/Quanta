@@ -52,9 +52,25 @@ mod integration_tests {
         );
 
         // ── Phase 3: Node B mines more and seals block #2 ──
-        node_b.mine_tx(&pk_b, 50 * MICRO, 0.1);
+        // B's pending holds TWO of its own mining rewards (phase-1 80 + phase-3
+        // 20 — no longer falsely dropped since BLK-HASH-1). EMIT-1 (Option A —
+        // one reward per block): `seal_block` COALESCES them into a single
+        // NETWORK→B reward (Σ = 100), so block #2 carries exactly ONE mining tx
+        // and passes the "≤1 reward/block" rule peers now enforce. Σ stays under
+        // the per-block emission cap (this test checks convergence; the cap is
+        // covered by the trust_* tests).
+        node_b.mine_tx(&pk_b, 20 * MICRO, 0.1);
         let block_b = node_b.seal_block(&pk_b, 0.1);
         assert_eq!(block_b.index, 2);
+        let mining_in_b2 = block_b
+            .transactions
+            .iter()
+            .filter(|t| t.tx_type == crate::p2p::ledger::TxType::Mining)
+            .count();
+        assert_eq!(
+            mining_in_b2, 1,
+            "EMIT-1: B's two rewards coalesce into a single per-block reward"
+        );
 
         // A and C integrate B's block
         assert!(node_a.integrate_remote_block(block_b.clone()).unwrap());
@@ -117,21 +133,25 @@ mod integration_tests {
 
         let mut ledger = Ledger::new();
 
-        // Mining
+        // Mining — EMIT-1 (one reward per block): each miner earns its own
+        // reward in its OWN block, sealed by that miner (the reward credits the
+        // block's miner). The multiple holders the cache must track then come
+        // from those rewards + the transfers below.
         ledger.mine_tx(&pk_a, 1000 * MICRO, 0.5);
+        ledger.seal_block(&pk_a, 0.5);
         ledger.mine_tx(&pk_b, 500 * MICRO, 0.3);
+        ledger.seal_block(&pk_b, 0.3);
         ledger.mine_tx(&pk_c, 200 * MICRO, 0.1);
+        ledger.seal_block(&pk_c, 0.1);
 
-        // Transfers
+        // Transfers (sealed in a reward-free block).
         let _ = ledger.transfer_tx(&pk_a, &pk_b, 100 * MICRO, &crypto);
         let _ = ledger.transfer_with_burn(&pk_a, &pk_c, 50 * MICRO, &crypto);
-
-        // Seal all pending so full_scan can see everything
-        ledger.seal_block("miner", 0.1);
+        ledger.seal_block(&pk_a, 0.1);
 
         // More mining + seal
         ledger.mine_tx(&pk_b, 30 * MICRO, 0.01);
-        ledger.seal_block("miner", 0.01);
+        ledger.seal_block(&pk_b, 0.01);
 
         // Now pending is empty — full chain scan matches cache exactly
         assert_eq!(ledger.pending_count(), 0, "all pending should be sealed");
@@ -196,7 +216,10 @@ mod integration_tests {
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 500 * MICRO, 0.1);
         ledger.mine_tx(&pk, 300 * MICRO, 0.2);
-        ledger.seal_block("miner", 0.1);
+        // EMIT-1 (one reward per block): the miner seals its own reward, so the
+        // two ticks coalesce into a single NETWORK→pk reward (Σ = 800) and the
+        // rebuilt cache credits pk exactly — consistent across snapshot/restore.
+        ledger.seal_block(&pk, 0.1);
 
         let bal_before = ledger.balance_of(&pk);
 
@@ -359,99 +382,5 @@ mod integration_tests {
         assert_eq!(received.sender, env.sender);
         assert_eq!(received.nonce, env.nonce);
         assert_eq!(received.id, env.id);
-    }
-
-    // ─── INT-4: Social + Search cross-module ────────────────────────────
-
-    /// A document indexed in SearchIndex, liked via SocialState, must have
-    /// its social signals correctly reflected in search ranking.
-    #[test]
-    fn int4_social_signals_flow_to_search() {
-        use crate::p2p::search::{SearchIndex, IndexedDoc, DocKind, SocialSignals, SearchFilters, tokenize, term_freq};
-        use crate::p2p::social::{SocialState, SocialAction, SignedAction, FollowTier, LIKE_BASE_COST_MICRO_QTA};
-
-        let author_sk = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
-        let voter_sk = ed25519_dalek::SigningKey::from_bytes(&[2; 32]);
-        let author_pk = hex::encode(author_sk.verifying_key().as_bytes());
-        let _voter_pk = hex::encode(voter_sk.verifying_key().as_bytes());
-
-        // 1. Index a document
-        let mut search = SearchIndex::new();
-        let text = "Cuisine vegan biologique";
-        let toks = tokenize(text);
-        search.upsert(IndexedDoc {
-            cid: "cid_cuisine".into(),
-            title: "Cuisine Vegan".into(),
-            snippet: text.into(),
-            author_pk: author_pk.clone(),
-            kind: DocKind::Site,
-            lang: "fr".into(),
-            updated_at: 1000,
-            term_freq: term_freq(&toks),
-            torus_domain: Some("chef.torus".into()),
-            tags: Vec::new(),
-        });
-
-        // 2. Like the document via SocialState
-        let mut social = SocialState::new();
-        let mut action = SignedAction {
-            action: SocialAction::Vote {
-                target_cid: "cid_cuisine".into(),
-                target_author_pk: author_pk.clone(),
-                amount_micro_qta: 10 * LIKE_BASE_COST_MICRO_QTA,
-                weight: 1,
-            },
-            author_pk: String::new(),
-            timestamp: 1001,
-            nonce: 1,
-            signature: String::new(),
-        };
-        crate::p2p::social::sign_action(&voter_sk, &mut action);
-        social.apply(&action, 1001).unwrap();
-
-        // 3. Follow the author
-        let mut follow_action = SignedAction {
-            action: SocialAction::Follow {
-                followee_pk: author_pk.clone(),
-                tier: FollowTier::Supporter,
-                active: true,
-            },
-            author_pk: String::new(),
-            timestamp: 1002,
-            nonce: 2,
-            signature: String::new(),
-        };
-        crate::p2p::social::sign_action(&voter_sk, &mut follow_action);
-        social.apply(&follow_action, 1002).unwrap();
-
-        // 4. Search with real social signals
-        let hits = search.search(
-            "cuisine vegan",
-            &SearchFilters::default(),
-            2000,
-            10,
-            |cid| {
-                let (likes, followers) = social.signals_for(cid, &author_pk);
-                SocialSignals {
-                    weighted_likes: likes,
-                    follower_count: followers,
-                    creator_reputation: 0.9,
-                    moderation_malus: 0.0,
-                }
-            },
-        );
-
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].cid, "cid_cuisine");
-        assert!(hits[0].score > 0.0, "Score must be positive with real social signals");
-
-        // Verify social state is consistent
-        let page = social.page_stats("cid_cuisine").unwrap();
-        assert_eq!(page.like_count, 1);
-        assert!(page.weighted_likes > 0.0);
-
-        let creator = social.creator_stats(&author_pk).unwrap();
-        assert_eq!(creator.follower_count, 1);
-        assert!(creator.weighted_likes_received > 0.0);
     }
 }

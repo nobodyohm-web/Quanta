@@ -1,6 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
+  import Aurora from "./Aurora.svelte";
+  import Identicon from "./Identicon.svelte";
+  import Network3D from "./Network3D.svelte";
+  import EmptyState from "./EmptyState.svelte";
+  import { t, type TKey } from "./i18n.svelte";
 
   interface Reputation {
     public_key: string;
@@ -22,7 +27,6 @@
     kwh_consumed: number;
     atn_mined: number;
     uptime_minutes: number;
-    atn_floor_eur: number;
   }
 
   type Filter = "all" | "out" | "in" | "mining" | "burn";
@@ -32,13 +36,33 @@
   let txs     = $state<LedgerTx[]>([]);
   let energy  = $state<EnergyStats | null>(null);
   let myPk    = $state("");
+  let myUsername = $state<string | null>(null);
+  let unameCopied = $state(false);
+  let connectionCode = $state("");
+  let codeCopied = $state(false);
   let loading = $state(true);
+
+  // Infos réseau + rareté (pertinentes et concrètes pour l'utilisateur).
+  let nodeStatus = $state<any>(null);
+  let chain = $state<any>(null);
+  // Infos PROPRES au portefeuille (pas de doublon avec la page Réseau).
+  const avail = $derived(Math.max(0, (rep?.atn_balance ?? 0) - (rep?.atn_staked ?? 0)));
+  // Part RÉELLE de l'offre en circulation détenue par ce portefeuille (0 si chaîne vide).
+  // AUCUNE conversion en euros : QUANTA n'est coté sur aucun marché — tout prix € serait inventé.
+  const circulating = $derived(chain?.total_supply_qta ?? 0);
+  const supplyShare = $derived(circulating > 0 ? ((rep?.atn_balance ?? 0) / circulating) * 100 : 0);
+  const peers = $derived(nodeStatus?.peer_count ?? 0);
+  const online = $derived(nodeStatus?.is_online ?? false);
+  const txCount = $derived(txs?.length ?? 0);
 
   let panel = $state<"send" | "receive" | "stake" | null>(null);
 
   let toAddress  = $state("");
   let sendAmount = $state("");
   let sendBusy   = $state(false);
+  // Aperçu décodé avant signature (anti-signature aveugle + moment de confiance).
+  let preview = $state<null | { toLabel: string; to: string; amount: number; net: number; burn: number; balanceAfter: number }>(null);
+  let preparing = $state(false);
 
   let stakeAmount = $state("");
   let stakeBusy   = $state(false);
@@ -68,7 +92,18 @@
     } catch { /* ignore */ }
     try { energy = await invoke<EnergyStats>("get_energy_stats"); } catch { /* optional */ }
     try { myPk   = await invoke<string>("get_public_key"); }       catch { /* ignore */ }
+    try { myUsername = await invoke<string | null>("get_my_username"); } catch { /* ignore */ }
+    try { connectionCode = await invoke<string>("get_my_connection_code"); } catch { /* ignore */ }
+    try { nodeStatus = await invoke<any>("get_node_status"); } catch { /* ignore */ }
+    try { chain = await invoke<any>("get_chain_overview", { limit: 1 }); } catch { /* ignore */ }
     loading = false;
+  }
+
+  function copyCode() {
+    if (!connectionCode) return;
+    navigator.clipboard?.writeText(connectionCode);
+    codeCopied = true;
+    setTimeout(() => (codeCopied = false), 1500);
   }
 
   function togglePanel(p: "send" | "receive" | "stake") {
@@ -76,33 +111,78 @@
     feedback = null;
   }
 
-  async function send() {
+  // Étape 1 — décoder l'envoi : résoudre le destinataire et calculer la
+  // ventilation EXACTE (mêmes maths que le ledger : µQTA, burn = floor(amount/100)).
+  // On ne signe RIEN ici : l'utilisateur voit d'abord ce qu'il va signer.
+  async function prepareSend() {
     const amt = parseFloat(sendAmount);
-    if (!toAddress.trim() || !isFinite(amt) || amt <= 0) {
-      feedback = { ok: false, msg: "Adresse et montant requis" };
+    const raw = toAddress.trim();
+    if (!raw || !isFinite(amt) || amt <= 0) {
+      feedback = { ok: false, msg: t("wallet.err.addrAmountRequired") };
       return;
     }
+    preparing = true; feedback = null;
+    try {
+      let to = raw;
+      let label = shortPk(raw);
+      const looksLikeKey = /^[0-9a-fA-F]{64}$/.test(raw);
+      if (!looksLikeKey) {
+        const uname = raw.replace(/^@/, "");
+        const resolved = await invoke<string | null>("resolve_username", { username: uname });
+        if (!resolved) {
+          feedback = { ok: false, msg: t("wallet.err.usernameNotFound") + " : @" + uname };
+          preparing = false;
+          return;
+        }
+        to = resolved; label = "@" + uname;
+      }
+      // Maths identiques au backend : burn = floor(montant_µQTA / 100), net = montant - burn.
+      const amtMicro = Math.round(amt * 1_000_000);
+      const burnMicro = Math.floor(amtMicro / 100);
+      const burn = burnMicro / 1_000_000;
+      const net = (amtMicro - burnMicro) / 1_000_000;
+      const bal = rep?.atn_balance ?? 0;
+      if (amt > bal) {
+        feedback = { ok: false, msg: t("wallet.err.insufficientBalance") };
+        preparing = false;
+        return;
+      }
+      preview = { toLabel: label, to, amount: amt, net, burn, balanceAfter: bal - amt };
+    } catch (e: unknown) {
+      feedback = { ok: false, msg: e instanceof Error ? e.message : String(e) };
+    } finally { preparing = false; }
+  }
+
+  // Étape 2 — confirmer : c'est SEULEMENT ici qu'on signe et qu'on diffuse.
+  async function confirmSend() {
+    if (!preview) return;
     sendBusy = true; feedback = null;
     try {
-      await invoke("ledger_transfer", { to: toAddress.trim(), amount: amt });
-      feedback = { ok: true, msg: `${amt.toFixed(2)} QUANTA envoyés` };
-      toAddress = ""; sendAmount = "";
+      await invoke("ledger_transfer", { to: preview.to, amount: preview.amount });
+      feedback = { ok: true, msg: preview.amount.toFixed(2) + " QUANTA " + t("wallet.ok.sentTo") + " " + preview.toLabel };
+      toAddress = ""; sendAmount = ""; preview = null; panel = null;
       await refresh();
     } catch (e: unknown) {
       feedback = { ok: false, msg: e instanceof Error ? e.message : String(e) };
     } finally { sendBusy = false; }
   }
 
+  function cancelPreview() { preview = null; }
+
+  function fmtQ(n: number): string {
+    return n.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  }
+
   async function stake() {
     const amt = parseFloat(stakeAmount);
     if (!isFinite(amt) || amt <= 0) {
-      feedback = { ok: false, msg: "Montant invalide" };
+      feedback = { ok: false, msg: t("wallet.err.invalidAmount") };
       return;
     }
     stakeBusy = true; feedback = null;
     try {
       await invoke("stake_atn", { amount: amt });
-      feedback = { ok: true, msg: `${amt.toFixed(2)} QUANTA stakés` };
+      feedback = { ok: true, msg: amt.toFixed(2) + " QUANTA " + t("wallet.ok.staked") };
       stakeAmount = "";
       await refresh();
     } catch (e: unknown) {
@@ -117,26 +197,29 @@
     setTimeout(() => { pkCopied = false; }, 2000);
   }
 
+  async function copyUsername() {
+    if (!myUsername) return;
+    await navigator.clipboard.writeText("@" + myUsername);
+    unameCopied = true;
+    setTimeout(() => { unameCopied = false; }, 2000);
+  }
+
   function timeAgo(ts: string): string {
     const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
     if (!isFinite(diff) || diff < 0) return "";
-    if (diff < 60) return "à l'instant";
-    if (diff < 3600) return Math.floor(diff / 60) + " min";
-    if (diff < 86400) return Math.floor(diff / 3600) + " h";
-    return Math.floor(diff / 86400) + " j";
+    if (diff < 60) return t("time.now");
+    if (diff < 3600) return Math.floor(diff / 60) + " " + t("time.min");
+    if (diff < 86400) return Math.floor(diff / 3600) + " " + t("time.h");
+    return Math.floor(diff / 86400) + " " + t("time.d");
   }
 
   function shortPk(s: string): string {
     return s.length > 14 ? s.slice(0, 6) + "…" + s.slice(-4) : s;
   }
 
+  const TX_KNOWN: Record<string, true> = { Transfer: true, Mining: true, Burn: true, Stake: true, Unstake: true };
   function txLabel(type: string): string {
-    const m: Record<string, string> = {
-      Mining: "Mining", Transfer: "Transfert", Like: "Like",
-      Help: "Aide", Create: "Création", View: "Vue",
-      Stake: "Stake", Unstake: "Unstake",
-    };
-    return m[type] ?? type;
+    return TX_KNOWN[type] ? t(("tx." + type) as TKey) : type;
   }
 
   function isIncoming(tx: LedgerTx): boolean {
@@ -156,20 +239,59 @@
     return tx.amount / 99;
   }
 
-  // ── Derived: filtered list + pagination slice ──
-  let filtered = $derived(txs.filter((tx) => {
-    switch (filter) {
-      case "all":    return true;
-      case "out":    return tx.tx_type === "Transfer" && isOutgoing(tx);
-      case "in":     return tx.tx_type === "Transfer" && isIncoming(tx);
-      case "mining": return tx.tx_type === "Mining";
-      case "burn":   return tx.tx_type === "Burn";
+  // ── Feed d'activité : mouvements RÉELS + minage agrégé par jour ──
+  // Le minage frappe une récompense/minute → afficher chaque ligne est du bruit
+  // redondant (déjà résumé par la carte « Total forgé »). On le regroupe par jour.
+  type FeedRow =
+    | { kind: "tx"; tx: LedgerTx }
+    | { kind: "mine"; key: string; label: string; sum: number; count: number; ts: string };
+
+  function dayLabel(ts: string): string {
+    const d = new Date(ts);
+    if (!isFinite(d.getTime())) return "Minage";
+    const today = new Date();
+    const yest = new Date(); yest.setDate(today.getDate() - 1);
+    const same = (a: Date, b: Date) => a.toDateString() === b.toDateString();
+    if (same(d, today)) return "Aujourd'hui";
+    if (same(d, yest)) return "Hier";
+    return d.toLocaleDateString("fr-FR", { day: "numeric", month: "long" });
+  }
+
+  // Minage regroupé par jour (1 ligne/jour, plus récent d'abord).
+  let miningDaily = $derived.by((): FeedRow[] => {
+    const map = new Map<string, { sum: number; count: number; ts: string }>();
+    for (const tx of txs) {
+      if (tx.tx_type !== "Mining") continue;
+      const d = new Date(tx.timestamp);
+      const key = isFinite(d.getTime()) ? d.toDateString() : "—";
+      const a = map.get(key) ?? { sum: 0, count: 0, ts: tx.timestamp };
+      a.sum += tx.amount; a.count += 1;
+      if (new Date(tx.timestamp).getTime() > new Date(a.ts).getTime()) a.ts = tx.timestamp;
+      map.set(key, a);
     }
-  }));
-  let totalPages = $derived(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
-  // Garde la page dans l'intervalle valide après filtrage / nouvelle data.
+    return [...map.entries()]
+      .sort((x, y) => new Date(y[1].ts).getTime() - new Date(x[1].ts).getTime())
+      .map(([key, a]) => ({ kind: "mine" as const, key, label: dayLabel(a.ts), sum: a.sum, count: a.count, ts: a.ts }));
+  });
+
+  // « Tout » = mouvements réels (transferts, burns) — le minage a son onglet dédié.
+  let feed = $derived.by((): FeedRow[] => {
+    if (filter === "mining") return miningDaily;
+    const pass = (tx: LedgerTx) => {
+      switch (filter) {
+        case "all":  return tx.tx_type !== "Mining";
+        case "out":  return tx.tx_type === "Transfer" && isOutgoing(tx);
+        case "in":   return tx.tx_type === "Transfer" && isIncoming(tx);
+        case "burn": return tx.tx_type === "Burn";
+        default:     return false;
+      }
+    };
+    return txs.filter(pass).map((tx) => ({ kind: "tx" as const, tx }));
+  });
+
+  let totalPages = $derived(Math.max(1, Math.ceil(feed.length / PAGE_SIZE)));
   let safePage  = $derived(Math.min(page, totalPages - 1));
-  let pageItems = $derived(filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE));
+  let pageItems = $derived(feed.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE));
 </script>
 
 <div class="page">
@@ -180,18 +302,14 @@
       <div class="skeleton sk-bal"></div>
       <div class="skeleton sk-unit"></div>
     {:else}
+      <div class="w-coin3d"><Network3D size={132} caption={false} /></div>
       <div class="w-balance mono">{(rep?.atn_balance ?? 0).toFixed(2)}</div>
       <div class="w-unit">QUANTA</div>
       <div class="w-meta">
-        <span class="w-pos">+{(rep?.atn_earned ?? 0).toFixed(2)} gagnés</span>
+        <span class="w-pos">+{(rep?.atn_earned ?? 0).toFixed(2)} {t('wallet.earned')}</span>
         <span class="w-sep">·</span>
-        <span>{(rep?.atn_staked ?? 0).toFixed(2)} stakés</span>
+        <span>{(rep?.atn_staked ?? 0).toFixed(2)} {t('wallet.stakedShort')}</span>
       </div>
-      {#if energy && energy.atn_floor_eur > 0}
-        <div class="w-floor">
-          ≈ {((rep?.atn_balance ?? 0) * energy.atn_floor_eur).toFixed(3)} EUR
-        </div>
-      {/if}
     {/if}
   </div>
 
@@ -201,19 +319,19 @@
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
       </svg>
-      <span>Envoyer</span>
+      <span>{t('wallet.send')}</span>
     </button>
     <button class="w-btn" class:w-active={panel === "receive"} onclick={() => togglePanel("receive")}>
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
       </svg>
-      <span>Recevoir</span>
+      <span>{t('wallet.receive')}</span>
     </button>
     <button class="w-btn" class:w-active={panel === "stake"} onclick={() => togglePanel("stake")}>
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
       </svg>
-      <span>Staker</span>
+      <span>{t('wallet.stake')}</span>
     </button>
   </div>
 
@@ -227,104 +345,162 @@
   <!-- ── Panel Envoyer ────────────────────────── -->
   {#if panel === "send"}
     <div class="w-panel">
-      <div class="section-label">ENVOYER</div>
-      <div class="w-form">
-        <div class="w-field">
-          <label for="w-to">Clé publique du destinataire</label>
-          <input id="w-to" class="input" type="text"
-            placeholder="64 caractères hex…" bind:value={toAddress} />
+      {#if !preview}
+        <div class="section-label">{t('wallet.send.title')}</div>
+        <div class="w-form">
+          <div class="w-field">
+            <label for="w-to">{t('wallet.send.toLabel')}</label>
+            <input id="w-to" class="input" type="text"
+              placeholder={t('wallet.send.toPlaceholder')} bind:value={toAddress} />
+          </div>
+          <div class="w-field">
+            <label for="w-amt">{t('wallet.send.amountLabel')}</label>
+            <input id="w-amt" class="input" type="number"
+              min="0.01" step="0.01" placeholder="0.00" bind:value={sendAmount}
+              onkeydown={(e) => e.key === "Enter" && prepareSend()} />
+          </div>
+          <button class="btn btn-primary" onclick={prepareSend} disabled={preparing}>
+            {preparing ? t('wallet.send.checking') : t('wallet.send.continue')}
+          </button>
         </div>
-        <div class="w-field">
-          <label for="w-amt">Montant (QUANTA)</label>
-          <input id="w-amt" class="input" type="number"
-            min="0.01" step="0.01" placeholder="0.00" bind:value={sendAmount}
-            onkeydown={(e) => e.key === "Enter" && send()} />
+      {:else}
+        <div class="s-tray">
+          <div class="section-label">{t('wallet.send.verifyBeforeSign')}</div>
+          <div class="st-row"><span class="st-k">{t('wallet.send.recipient')}</span><span class="st-v">{preview.toLabel}</span></div>
+          <div class="st-row"><span class="st-k">{t('wallet.send.youSend')}</span><span class="st-v mono">{fmtQ(preview.amount)} QNT</span></div>
+          <div class="st-row"><span class="st-k">{t('wallet.send.recipientGets')}</span><span class="st-v mono recv">{fmtQ(preview.net)} QNT</span></div>
+          <div class="st-row"><span class="st-k">{t('wallet.send.burned')} <span class="st-pill">{t('wallet.send.deflationary')}</span></span><span class="st-v mono burn">−{fmtQ(preview.burn)} QNT</span></div>
+          <div class="st-row st-total"><span class="st-k">{t('wallet.send.balanceAfter')}</span><span class="st-v mono">{fmtQ(preview.balanceAfter)} QNT</span></div>
+          <button class="st-confirm" onclick={confirmSend} disabled={sendBusy}>
+            {sendBusy ? t('wallet.send.signing') : t('wallet.send.confirm')}
+          </button>
+          <button class="st-cancel" onclick={cancelPreview} disabled={sendBusy}>{t('wallet.send.cancel')}</button>
+          <div class="st-note">{t('wallet.send.signNote')}</div>
         </div>
-        <button class="btn btn-primary" onclick={send} disabled={sendBusy}>
-          {sendBusy ? "Signature…" : "Confirmer l'envoi"}
-        </button>
-      </div>
+      {/if}
     </div>
   {/if}
 
   <!-- ── Panel Recevoir ───────────────────────── -->
   {#if panel === "receive"}
     <div class="w-panel">
-      <div class="section-label">VOTRE CLÉ PUBLIQUE</div>
-      <div class="w-pk-box">
-        <code class="w-pk mono">{myPk || "Chargement…"}</code>
-        <button class="w-copy" onclick={copyPk} disabled={!myPk}>
-          {pkCopied ? "Copié !" : "Copier"}
-        </button>
-      </div>
-      <p class="w-hint">Partagez cette clé pour recevoir des QUANTA.</p>
+      {#if myUsername}
+        <Aurora radius={18}>
+          <div class="rc-card">
+            <div class="rc-ident"><Identicon pubkey={myPk} size={50} /></div>
+            <div class="rc-pseudo">@{myUsername}</div>
+            <button class="rc-code" onclick={copyCode} title={t('wallet.recv.copyCodeTitle')}>
+              <span class="rc-code-lab">{t('wallet.recv.codeLabel')}</span>
+              <span class="mono">{connectionCode || "····-····"}</span>
+              <span class="rc-code-act">{codeCopied ? t('wallet.recv.copiedLower') : t('wallet.recv.copyLower')}</span>
+            </button>
+            <div class="rc-hint">{@html t('wallet.recv.hint')}</div>
+          </div>
+        </Aurora>
+        <div class="section-label" style="margin-top:18px;">{t('wallet.recv.yourAddress')}</div>
+        <div class="w-pk-box">
+          <code class="w-pk mono" style="font-size:18px;font-weight:700;color:var(--color-accent);">@{myUsername}</code>
+          <button class="w-copy" onclick={copyUsername}>
+            {unameCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
+          </button>
+        </div>
+        <p class="w-hint">{t('wallet.recv.shareUsername1')} <b>@{myUsername}</b> {t('wallet.recv.shareUsername2')}</p>
+        <details style="margin-top:10px;">
+          <summary style="font-size:12px;color:var(--color-text-2);cursor:pointer;">{t('wallet.recv.showPublicKey')}</summary>
+          <div class="w-pk-box" style="margin-top:8px;">
+            <code class="w-pk mono">{myPk || t('loading')}</code>
+            <button class="w-copy" onclick={copyPk} disabled={!myPk}>
+              {pkCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
+            </button>
+          </div>
+        </details>
+      {:else}
+        <div class="section-label">{t('wallet.recv.yourPublicKey')}</div>
+        <div class="w-pk-box">
+          <code class="w-pk mono">{myPk || t('loading')}</code>
+          <button class="w-copy" onclick={copyPk} disabled={!myPk}>
+            {pkCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
+          </button>
+        </div>
+        <p class="w-hint">
+          {@html t('wallet.recv.shareKeyHint')}
+        </p>
+      {/if}
     </div>
   {/if}
 
   <!-- ── Panel Staker ─────────────────────────── -->
   {#if panel === "stake"}
     <div class="w-panel">
-      <div class="section-label">STAKING</div>
+      <div class="section-label">{t('wallet.stake.title')}</div>
       <div class="w-staked-row">
-        <span>Actuellement stakés</span>
+        <span>{t('wallet.stake.currentlyStaked')}</span>
         <span class="mono">{(rep?.atn_staked ?? 0).toFixed(2)} QUANTA</span>
       </div>
       <div class="w-form">
         <div class="w-field">
-          <label for="w-stake-amt">Montant à verrouiller (QUANTA)</label>
+          <label for="w-stake-amt">{t('wallet.stake.amountLabel')}</label>
           <input id="w-stake-amt" class="input" type="number"
             min="0.01" step="0.01" placeholder="0.00" bind:value={stakeAmount}
             onkeydown={(e) => e.key === "Enter" && stake()} />
         </div>
         <button class="btn btn-primary" onclick={stake} disabled={stakeBusy}>
-          {stakeBusy ? "Staking…" : "Staker"}
+          {stakeBusy ? t('wallet.stake.staking') : t('wallet.stake.stakeBtn')}
         </button>
       </div>
     </div>
   {/if}
 
-  <!-- ── Énergie ──────────────────────────────── -->
+  <!-- ── Ton argent — cartes colorées, propres au portefeuille (0 doublon Réseau) ── -->
   <div class="w-section">
-    <div class="section-label">ÉNERGIE</div>
-    <div class="w-info-list">
-      {#if loading}
-        <div class="skeleton sk-row"></div>
-        <div class="skeleton sk-row"></div>
-        <div class="skeleton sk-row"></div>
-      {:else}
-        <div class="w-info-row">
-          <span>Consommation</span>
-          <span class="mono">{(energy?.kwh_consumed ?? 0).toFixed(3)} kWh</span>
+    <div class="section-label">{t('wallet.yourMoney')}</div>
+    {#if loading}
+      <div class="w-info-list"><div class="skeleton sk-row"></div><div class="skeleton sk-row"></div></div>
+    {:else}
+      <div class="w-grid">
+        <div class="w-cell c-green">
+          <div class="w-cell-k">{t('wallet.available')}</div>
+          <div class="w-cell-v mono">{avail.toFixed(2)}</div>
+          <div class="w-cell-s">{t('wallet.availableSub')}</div>
         </div>
-        <div class="w-info-row">
-          <span>QUANTA minés</span>
-          <span class="mono w-pos">+{(energy?.atn_mined ?? rep?.atn_earned ?? 0).toFixed(3)}</span>
+        <div class="w-cell c-violet">
+          <div class="w-cell-k">{t('wallet.inStaking')}</div>
+          <div class="w-cell-v mono">{(rep?.atn_staked ?? 0).toFixed(2)}</div>
+          <div class="w-cell-s">{t('wallet.inStakingSub')}</div>
         </div>
-        <div class="w-info-row">
-          <span>Uptime</span>
-          <span class="mono">{energy?.uptime_minutes ?? 0} min</span>
+        <div class="w-cell c-teal">
+          <div class="w-cell-k">{t('wallet.forged')}</div>
+          <div class="w-cell-v mono">+{(rep?.atn_earned ?? 0).toFixed(2)}</div>
+          <div class="w-cell-s">{t('wallet.forgedSub')}</div>
         </div>
-        {#if (energy?.atn_floor_eur ?? 0) > 0}
-          <div class="w-info-row">
-            <span>Plancher 1 QUANTA</span>
-            <span class="mono">{(energy?.atn_floor_eur ?? 0).toFixed(5)} EUR</span>
-          </div>
-        {/if}
-      {/if}
-    </div>
+        <div class="w-cell c-amber">
+          <div class="w-cell-k">{t('wallet.share')}</div>
+          <div class="w-cell-v mono">{supplyShare > 0 && supplyShare < 0.01 ? "<0.01" : supplyShare.toFixed(2)}<span class="w-cell-u">%</span></div>
+          <div class="w-cell-s">{t('wallet.shareSub')}</div>
+        </div>
+      </div>
+      <div class="w-energy-foot">
+        <span class="w-dot" style="background:{online ? 'var(--color-green)' : 'var(--color-text-3)'}"></span>
+        <span>{online ? `${t('wallet.connected')} · ${peers} ${peers === 1 ? t('wallet.peer') : t('wallet.peers')}` : t('wallet.offline')}</span>
+        <span class="w-sep">·</span>
+        <span>{txCount} {t('wallet.recentTx')}</span>
+        <span class="w-sep">·</span>
+        <span>⚡ {(energy?.kwh_consumed ?? 0).toFixed(3)} kWh</span>
+      </div>
+    {/if}
   </div>
 
   <!-- ── Activité ─────────────────────────────── -->
   <div class="w-section">
-    <div class="section-label">ACTIVITÉ</div>
+    <div class="section-label">{t('wallet.activity')}</div>
 
     <!-- Filtres -->
-    <div class="w-filters" role="tablist" aria-label="Filtrer les transactions">
-      <button class="w-pill" class:w-pill-on={filter === "all"}    onclick={() => setFilter("all")}    role="tab" aria-selected={filter === "all"}>Tout</button>
-      <button class="w-pill" class:w-pill-on={filter === "out"}    onclick={() => setFilter("out")}    role="tab" aria-selected={filter === "out"}>Envoyé</button>
-      <button class="w-pill" class:w-pill-on={filter === "in"}     onclick={() => setFilter("in")}     role="tab" aria-selected={filter === "in"}>Reçu</button>
-      <button class="w-pill" class:w-pill-on={filter === "mining"} onclick={() => setFilter("mining")} role="tab" aria-selected={filter === "mining"}>Mining</button>
-      <button class="w-pill" class:w-pill-on={filter === "burn"}   onclick={() => setFilter("burn")}   role="tab" aria-selected={filter === "burn"}>Brûlé</button>
+    <div class="w-filters" role="tablist" aria-label={t('wallet.activity')}>
+      <button class="w-pill" class:w-pill-on={filter === "all"}    onclick={() => setFilter("all")}    role="tab" aria-selected={filter === "all"}>{t('wallet.f.all')}</button>
+      <button class="w-pill" class:w-pill-on={filter === "out"}    onclick={() => setFilter("out")}    role="tab" aria-selected={filter === "out"}>{t('wallet.f.out')}</button>
+      <button class="w-pill" class:w-pill-on={filter === "in"}     onclick={() => setFilter("in")}     role="tab" aria-selected={filter === "in"}>{t('wallet.f.in')}</button>
+      <button class="w-pill" class:w-pill-on={filter === "mining"} onclick={() => setFilter("mining")} role="tab" aria-selected={filter === "mining"}>{t('wallet.f.mining')}</button>
+      <button class="w-pill" class:w-pill-on={filter === "burn"}   onclick={() => setFilter("burn")}   role="tab" aria-selected={filter === "burn"}>{t('wallet.f.burn')}</button>
     </div>
 
     <div class="w-tx-list">
@@ -332,33 +508,48 @@
         <div class="skeleton sk-row"></div>
         <div class="skeleton sk-row"></div>
         <div class="skeleton sk-row"></div>
-      {:else if filtered.length === 0}
-        <p class="w-empty">
-          {#if filter === "all"}Le mining démarre automatiquement.
-          {:else}Aucune transaction dans cette catégorie.{/if}
-        </p>
+      {:else if feed.length === 0}
+        <EmptyState>
+          {#if filter === "all"}{t('wallet.empty.all')}
+          {:else if filter === "mining"}{t('wallet.empty.mining')}
+          {:else}{t('wallet.empty.other')}{/if}
+        </EmptyState>
       {:else}
-        {#each pageItems as tx (tx.id)}
-          {@const inc = isIncoming(tx)}
-          {@const burn = impliedBurn(tx)}
-          <div class="w-tx-row">
-            <div class="w-tx-left">
-              <span class="w-tx-label">{txLabel(tx.tx_type)}</span>
-              <span class="w-tx-sub mono">
-                {inc ? `de ${shortPk(tx.from)}` : `→ ${shortPk(tx.to)}`}
-              </span>
+        {#each pageItems as row (row.kind === "tx" ? row.tx.id : row.key)}
+          {#if row.kind === "mine"}
+            <div class="w-tx-row">
+              <div class="w-tx-left">
+                <span class="w-tx-label">⚡ {t('wallet.mining')} · {row.label}</span>
+                <span class="w-tx-sub">{row.count} {row.count > 1 ? t('wallet.rewards') : t('wallet.reward')} · {t('wallet.auto')}</span>
+              </div>
+              <div class="w-tx-right">
+                <span class="w-tx-amt mono tx-in">+{row.sum.toFixed(2)}</span>
+                <span class="w-tx-time">{timeAgo(row.ts)}</span>
+              </div>
             </div>
-            <div class="w-tx-right">
-              <span class="w-tx-amt mono" class:tx-in={inc} class:tx-out={!inc}>
-                {inc ? "+" : "−"}{tx.amount.toFixed(2)}
-              </span>
-              {#if burn !== null}
-                <span class="w-tx-burn mono">−{burn.toFixed(2)} brûlés</span>
-              {:else}
-                <span class="w-tx-time">{timeAgo(tx.timestamp)}</span>
-              {/if}
+          {:else}
+            {@const tx = row.tx}
+            {@const inc = isIncoming(tx)}
+            {@const burn = impliedBurn(tx)}
+            <div class="w-tx-row">
+              <div class="w-tx-left">
+                <span class="w-tx-label">{txLabel(tx.tx_type)}</span>
+                <span class="w-tx-sub mono">
+                  {inc ? `de ${shortPk(tx.from)}` : `→ ${shortPk(tx.to)}`}
+                </span>
+              </div>
+              <div class="w-tx-right">
+                <span class="w-tx-amt mono" class:tx-in={inc} class:tx-out={!inc}>
+                  {inc ? "+" : "−"}{tx.amount.toFixed(2)}
+                </span>
+                {#if burn !== null}
+                  <span class="w-tx-burn mono">−{burn.toFixed(2)} {t('wallet.burned')}</span>
+                {:else}
+                  <span class="w-tx-time">{timeAgo(tx.timestamp)}</span>
+                {/if}
+              </div>
             </div>
-          </div>
+          {/if}
         {/each}
 
         <!-- Pagination -->
@@ -367,15 +558,15 @@
             <button class="w-pager-btn"
               onclick={() => page = Math.max(0, safePage - 1)}
               disabled={safePage === 0}
-              aria-label="Page précédente">
-              Précédent
+              aria-label={t('wallet.prevAria')}>
+              {t('wallet.prev')}
             </button>
             <span class="w-pager-info mono">{safePage + 1} / {totalPages}</span>
             <button class="w-pager-btn"
               onclick={() => page = Math.min(totalPages - 1, safePage + 1)}
               disabled={safePage >= totalPages - 1}
-              aria-label="Page suivante">
-              Suivant
+              aria-label={t('wallet.nextAria')}>
+              {t('wallet.next')}
             </button>
           </div>
         {/if}
@@ -405,7 +596,6 @@
   }
   .w-sep { opacity: 0.5; }
   .w-pos { color: var(--quanta-accent); }
-  .w-floor { font-size: 12px; color: var(--quanta-text-2); margin-top: var(--space-1); }
 
   .sk-bal  { width: 180px; height: 54px; border-radius: var(--radius-sm); }
   .sk-unit { width: 48px; height: 18px; border-radius: 4px; margin-top: 8px; }
@@ -447,6 +637,102 @@
   }
   .w-panel .section-label { margin-bottom: var(--space-4); }
 
+  /* Carte d'identité Aurora (panneau Recevoir) — le "moment" partageable. */
+  .rc-card {
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    padding: 26px 22px; gap: 12px; color: #fff;
+  }
+  .rc-card :global(.identicon) { border: 2px solid rgba(255,255,255,0.7); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
+  .rc-pseudo { font-size: 24px; font-weight: 800; letter-spacing: 0.01em; }
+  .rc-code {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.4);
+    color: #fff; border-radius: 999px; padding: 8px 16px; cursor: pointer;
+    font-size: 15px; font-weight: 700; letter-spacing: 0.12em;
+    backdrop-filter: blur(6px); transition: background 0.15s ease;
+  }
+  .rc-code:hover { background: rgba(255,255,255,0.26); }
+  .rc-code-lab { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; opacity: 0.8; }
+  .rc-code-act { font-size: 11px; font-weight: 600; opacity: 0.85; text-transform: lowercase; letter-spacing: 0; }
+  .rc-hint { font-size: 12.5px; line-height: 1.5; opacity: 0.95; max-width: 300px; }
+
+  /* Tiroir d'envoi décodé — morphe à l'apparition (modèle Family). */
+  .s-tray { animation: tray-in 0.32s cubic-bezier(.2,.7,.3,1); }
+  @keyframes tray-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.985); }
+    to   { opacity: 1; transform: none; }
+  }
+  .st-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 0; border-bottom: 1px solid var(--color-border);
+    font-size: 14px; gap: 12px;
+  }
+  .st-k { color: var(--color-text-2); display: flex; align-items: center; gap: 8px; }
+  .st-v { font-weight: 600; color: var(--color-text-0); }
+  .st-v.recv { color: var(--color-green); }
+  .st-v.burn { color: var(--color-amber); }
+  .st-total { border-bottom: 0; padding-top: 14px; }
+  .st-total .st-k, .st-total .st-v { font-weight: 700; font-size: 15px; color: var(--color-text-0); }
+  .st-pill {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 7px; border-radius: 999px;
+    background: var(--color-accent-dim); color: var(--color-accent-hover);
+  }
+  .st-confirm {
+    margin-top: 16px; width: 100%; padding: 14px; border: 0; cursor: pointer;
+    border-radius: 999px; color: #fff; font-size: 14px; font-weight: 700;
+    background: linear-gradient(120deg, #0BA5A0, #3D6FE0);
+    box-shadow: 0 8px 24px rgba(11,165,160,0.28);
+    transition: transform 0.12s ease, box-shadow 0.15s ease;
+  }
+  .st-confirm:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 30px rgba(11,165,160,0.34); }
+  .st-confirm:active:not(:disabled) { transform: translateY(0) scale(0.99); }
+  .st-confirm:disabled { opacity: 0.6; cursor: default; }
+  .st-cancel {
+    margin-top: 8px; width: 100%; padding: 10px; cursor: pointer;
+    background: none; border: 0; color: var(--color-text-2); font-size: 13px;
+  }
+  .st-cancel:hover:not(:disabled) { color: var(--color-text-0); }
+  .st-note {
+    margin-top: 12px; text-align: center; font-size: 11.5px;
+    color: var(--color-text-2); line-height: 1.5;
+  }
+  @media (prefers-reduced-motion: reduce) { .s-tray { animation: none; } }
+
+  /* Pièce 3D discrète dans le hero du portefeuille. */
+  .w-coin3d { display: flex; justify-content: center; margin-bottom: 12px; }
+
+  /* Vue d'ensemble — cartes d'infos utiles. */
+  .w-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  @media (min-width: 660px) { .w-grid { grid-template-columns: repeat(4, 1fr); } }
+  .w-cell {
+    background: var(--color-bg-1); border: 1px solid var(--color-border);
+    border-radius: 12px; padding: 14px 16px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .w-cell:hover { border-color: var(--color-border-hover); transform: translateY(-1px); }
+  .w-cell-k {
+    font-size: 11px; color: var(--color-text-3); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 600; margin-bottom: 8px;
+  }
+  .w-cell-v { font-size: 22px; font-weight: 700; color: var(--color-text-0); line-height: 1; }
+  .w-cell-u { font-size: 12px; color: var(--color-text-2); font-weight: 600; margin-left: 4px; }
+  .w-cell-s { font-size: 11px; color: var(--color-text-2); margin-top: 7px; line-height: 1.4; }
+  .w-energy-foot {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin-top: 12px; font-size: 11.5px; color: var(--color-text-3);
+  }
+  .w-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  /* Cartes colorées — chaque bloc a sa couleur. */
+  .w-cell.c-green  { background: rgba(16,163,74,0.06);  border-color: rgba(16,163,74,0.28); }
+  .w-cell.c-green  .w-cell-v { color: var(--color-green); }
+  .w-cell.c-violet { background: rgba(124,58,237,0.06); border-color: rgba(124,58,237,0.28); }
+  .w-cell.c-violet .w-cell-v { color: #7c3aed; }
+  .w-cell.c-teal   { background: rgba(11,165,160,0.07); border-color: rgba(11,165,160,0.30); }
+  .w-cell.c-teal   .w-cell-v { color: var(--color-accent); }
+  .w-cell.c-amber  { background: rgba(232,129,12,0.06); border-color: rgba(232,129,12,0.28); }
+  .w-cell.c-amber  .w-cell-v { color: var(--color-amber); }
+
   .w-form  { display: flex; flex-direction: column; gap: var(--space-4); }
   .w-field { display: flex; flex-direction: column; gap: 6px; }
   .w-field label { font-size: 12px; font-weight: 500; color: var(--quanta-text-1); }
@@ -478,14 +764,6 @@
   /* Sections */
   .w-section { padding: 0 var(--space-5); margin-bottom: var(--space-8); }
 
-  .w-info-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 0; border-bottom: 1px solid var(--quanta-border); font-size: 14px;
-  }
-  .w-info-row:last-child { border-bottom: none; }
-  .w-info-row > span:first-child { color: var(--quanta-text-1); }
-  .w-info-row .mono { color: var(--quanta-text-0); font-weight: 500; }
-
   /* Transactions */
   .w-tx-row {
     display: flex; justify-content: space-between; align-items: center;
@@ -501,7 +779,6 @@
   .tx-in      { color: var(--quanta-accent); }
   .tx-out     { color: var(--quanta-text-1); }
 
-  .w-empty { padding: var(--space-6) 0; font-size: 13px; color: var(--quanta-text-2); text-align: center; }
 
   /* Filtres — pills sobres, accent discret quand actif. Inspiration Apple Settings. */
   .w-filters {

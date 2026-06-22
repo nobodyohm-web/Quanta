@@ -99,6 +99,30 @@ impl CryptoEngine {
         }
     }
 
+    /// **Deterministic** hybrid signature for the simulation / DST harness:
+    /// Ed25519 (already deterministic) + ML-DSA-65 signed with a message-derived
+    /// RNG instead of `OsRng` ([`hybrid_crypto::ml_dsa_sign_deterministic`]), so
+    /// seeded runs are byte-reproducible. Production keeps [`Self::sign_hybrid`]
+    /// (hedged); this is never on the production tx path.
+    ///
+    /// SIGN-DET-VERIFY: gated `#[cfg(test)]` so the weaker deterministic path is
+    /// **physically absent from release builds** (it calls the likewise-gated
+    /// [`hybrid_crypto::ml_dsa_sign_deterministic`]). A non-test build cannot
+    /// downgrade signing to deterministic even if a caller set `det_sign=true`.
+    #[cfg(test)]
+    pub fn sign_hybrid_det(&self, data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, String), String> {
+        let kp = self.key_pair.as_ref().ok_or("No active keypair")?;
+        let classical = kp.signing_key.sign(data).to_bytes().to_vec();
+        match &self.ml_dsa {
+            Some((sk, pk_hex)) => {
+                let sig = crate::security::hybrid_crypto::ml_dsa_sign_deterministic(sk, data)
+                    .ok_or("ML-DSA signing failed")?;
+                Ok((classical, sig, pk_hex.clone()))
+            }
+            None => Ok((classical, Vec::new(), String::new())),
+        }
+    }
+
     pub fn verify(pk: &[u8], data: &[u8], sig: &[u8]) -> Result<bool, String> {
         let pk_arr: [u8; 32] = pk.try_into().map_err(|_| "Invalid pk len")?;
         let sig_arr: [u8; 64] = sig.try_into().map_err(|_| "Invalid sig len")?;
@@ -140,4 +164,79 @@ pub struct SecureBuffer {
 #[allow(dead_code)]
 impl SecureBuffer {
     pub fn new(data: Vec<u8>) -> Self { Self { data } }
+}
+
+#[cfg(test)]
+mod zeroize_guards {
+    //! C6: compile-time guarantees that the secrets held by [`CryptoEngine`]
+    //! (and therefore by `sm::Node`) are wiped from memory on drop.
+    //! `CryptoEngine` owns its secrets in `key_pair.signing_key` (Ed25519)
+    //! and `ml_dsa.0` (ML-DSA-65); both types below implement
+    //! `ZeroizeOnDrop`, so the engine's drop glue erases them. These
+    //! assertions fail to COMPILE if a dependency's zeroize support is ever
+    //! dropped (e.g. removing the ed25519-dalek `zeroize` feature), so the
+    //! §3 "zeroize every secret" invariant cannot silently regress.
+    use zeroize::ZeroizeOnDrop;
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn held_signing_secrets_zeroize_on_drop() {
+        // Ed25519 secret scalar — requires the ed25519-dalek `zeroize` feature.
+        assert_zeroize_on_drop::<ed25519_dalek::SigningKey>();
+        // ML-DSA-65 (FIPS 204) private key — zeroizes by default.
+        assert_zeroize_on_drop::<fips204::ml_dsa_65::PrivateKey>();
+    }
+}
+
+#[cfg(test)]
+mod sign_mode_guards {
+    //! SIGN-DET-VERIFY A.3: pin the two signing modes so the `det_sign` switch
+    //! provably does what it claims AND production sits on the strong side. The
+    //! deterministic path (`sign_hybrid_det`) is `#[cfg(test)]` — physically
+    //! absent from release — so these tests are the live proof that the
+    //! production path stays hedged while the harness path stays reproducible.
+    use super::CryptoEngine;
+
+    const MSG: &[u8] = b"SIGN-DET-VERIFY canonical message";
+
+    #[test]
+    fn prod_signing_is_hedged() {
+        // Production signing (`sign_hybrid`, ML-DSA over `OsRng`) MUST be
+        // non-deterministic: signing the SAME message twice yields DIFFERENT
+        // ML-DSA signatures. If they ever matched, prod would have silently
+        // become deterministic — a post-quantum hardness downgrade (the exact
+        // failure SIGN-DET-VERIFY exists to catch).
+        let mut engine = CryptoEngine::new();
+        engine.generate_keypair();
+        let (c1, q1, _) = engine.sign_hybrid(MSG).expect("sign_hybrid");
+        let (c2, q2, _) = engine.sign_hybrid(MSG).expect("sign_hybrid");
+        // Anti-vacuity: the ML-DSA layer must actually be present, else "differ"
+        // would compare two empty vecs.
+        assert!(!q1.is_empty(), "ML-DSA layer must be present for the check to bite");
+        assert_ne!(q1, q2, "production ML-DSA signing must be hedged (non-deterministic)");
+        // Ed25519 is deterministic by construction — documents that the hedging
+        // lives purely in the ML-DSA layer, not Ed25519.
+        assert_eq!(c1, c2, "Ed25519 layer is deterministic by construction");
+    }
+
+    #[test]
+    fn sim_signing_is_deterministic() {
+        // Harness signing (`sign_hybrid_det`, ML-DSA over a BLAKE3-derived RNG)
+        // MUST be byte-reproducible across BOTH layers: the DST determinism
+        // proof (C1) and seed-replay depend on it. Signing the SAME message
+        // twice yields BYTE-IDENTICAL signatures.
+        let mut engine = CryptoEngine::new();
+        engine.generate_keypair();
+        let (c1, q1, p1) = engine.sign_hybrid_det(MSG).expect("sign_hybrid_det");
+        let (c2, q2, p2) = engine.sign_hybrid_det(MSG).expect("sign_hybrid_det");
+        // Anti-vacuity: a present ML-DSA layer is what makes determinism
+        // non-trivial (two empty vecs would compare equal for free).
+        assert!(!q1.is_empty(), "ML-DSA layer must be present for the check to bite");
+        assert_eq!(
+            (c1, q1, p1),
+            (c2, q2, p2),
+            "simulation hybrid signing must be byte-identical (C1 depends on it)"
+        );
+    }
 }

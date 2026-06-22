@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t, type TKey } from "./i18n.svelte";
+
   let { isOpen, onClose, onCommand }: {
     isOpen: boolean;
     onClose: () => void;
@@ -8,18 +10,18 @@
   let query = $state("");
   let activeIndex = $state(0);
 
-  const commands = [
-    { id: "feed", label: "Aller au fil", shortcut: "F", group: "Navigate" },
-    { id: "discover", label: "Rechercher sur le réseau", shortcut: "S", group: "Navigate" },
-    { id: "editor", label: "Créer / éditer un site", shortcut: "E", group: "Navigate" },
-    { id: "wallet", label: "Ouvrir le portefeuille", shortcut: "W", group: "Navigate" },
-    { id: "profile", label: "Mon profil", shortcut: "P", group: "Navigate" },
-    { id: "settings", label: "Réglages", shortcut: ",", group: "Navigate" },
+  const commands: { id: string; labelKey: TKey; shortcut: string; groupKey: TKey }[] = [
+    { id: "wallet", labelKey: "cmd.wallet", shortcut: "W", groupKey: "cmd.group.goTo" },
+    { id: "dashboard", labelKey: "cmd.dashboard", shortcut: "D", groupKey: "cmd.group.goTo" },
+    { id: "network", labelKey: "cmd.network", shortcut: "N", groupKey: "cmd.group.goTo" },
+    { id: "explorer", labelKey: "cmd.explorer", shortcut: "E", groupKey: "cmd.group.goTo" },
+    { id: "profile", labelKey: "cmd.profile", shortcut: "P", groupKey: "cmd.group.goTo" },
+    { id: "settings", labelKey: "cmd.settings", shortcut: ",", groupKey: "cmd.group.goTo" },
   ];
 
   let filtered = $derived(
     query
-      ? commands.filter(c => c.label.toLowerCase().includes(query.toLowerCase()))
+      ? commands.filter(c => t(c.labelKey).toLowerCase().includes(query.toLowerCase()))
       : commands
   );
 
@@ -53,7 +55,7 @@
       <input
         class="cmd-input"
         type="text"
-        placeholder="Type a command…"
+        placeholder={t('cmd.placeholder')}
         bind:value={query}
         id="cmd-palette-input"
       />
@@ -66,12 +68,12 @@
             id="cmd-{cmd.id}"
           >
             <span class="cmd-icon">◈</span>
-            <span class="cmd-label">{cmd.label}</span>
+            <span class="cmd-label">{t(cmd.labelKey)}</span>
             <span class="cmd-shortcut mono">⌘{cmd.shortcut}</span>
           </button>
         {/each}
         {#if filtered.length === 0}
-          <div class="cmd-empty">No commands match "{query}"</div>
+          <div class="cmd-empty">{t('cmd.empty')} "{query}"</div>
         {/if}
       </div>
     </div>

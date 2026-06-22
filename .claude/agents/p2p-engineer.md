@@ -51,7 +51,7 @@ Lis AVANT de commencer :
 5. `src-tauri/src/p2p/ledger.rs` — Blockchain (934 lignes)
 6. `src-tauri/src/p2p/pos_consensus.rs` — Consensus PoS (400+ lignes)
 7. `src-tauri/src/p2p/state_persistence.rs` — Snapshots SQLite
-8. `src-tauri/src/p2p/page_store.rs` — Sites P2P
+8. `src-tauri/src/p2p/reputation.rs` — Mining + émission décroissante + trust score
 
 ## Invariants réseau — JAMAIS VIOLER
 1. **Tout message** est signé Ed25519 et vérifié à la réception

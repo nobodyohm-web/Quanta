@@ -8,7 +8,7 @@ full license text.
 
 ---
 
-Quanta is a sovereign peer-to-peer web and value network: no server, no cloud,
+Quanta is a sovereign peer-to-peer value network: no server, no cloud,
 no intermediary. The native coin is QUANTA (smallest unit: µQTA, 1 QUANTA =
 1,000,000 µQTA).
 
@@ -18,6 +18,7 @@ dependencies include (non-exhaustive):
 
   - Iroh / iroh-gossip / iroh-blobs (QUIC P2P transport)        — MIT / Apache-2.0
   - ed25519-dalek (Ed25519 signatures)                          — BSD-3-Clause
+  - fips204 (ML-DSA-65 post-quantum signatures, FIPS 204)       — Apache-2.0 / MIT
   - aes-gcm (AES-256-GCM authenticated encryption)              — Apache-2.0 / MIT
   - argon2 (Argon2id key derivation)                            — Apache-2.0 / MIT
   - blake3 (BLAKE3 hashing)                                     — Apache-2.0 / CC0-1.0

@@ -12,7 +12,7 @@ Lis CLAUDE.md et `.agent/memory.md`.
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 Chaque module P2P doit avoir des tests :
-- `reputation.rs` : émission fixe, proportionnalité, trust score
+- `reputation.rs` : émission décroissante (plafond 100M), énergie, trust score
 - `ledger.rs` : mining, transfert, burn, verify_chain
 - `consensus.rs` : CRDT merge, convergence
 - `gossip.rs` : enveloppe, signature, dedup

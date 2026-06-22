@@ -1,322 +1,243 @@
-# Quanta — Le Web P2P récompensé
+# Quanta — Monnaie souveraine pair-à-pair
 
 > **Whitepaper — Quanta v3.3**
-> Un protocole où créer, découvrir et modérer rapporte des QUANTA.
-> Pas de serveur. Pas d'algorithme caché. Pas de censeur.
+> La monnaie que tu forges, que tu possèdes, et que personne ne peut t'enlever.
+> Pas de serveur. Pas de banque. Pas d'autorité d'émission. Pas de censeur.
 
 > **État d'implémentation.** Quanta est un logiciel alpha de recherche. Ce document décrit
 > le protocole tel que conçu et largement implémenté ; pour la répartition précise
 > « réel vs expérimental vs pas-encore », voir le tableau d'état du [README](README.md).
-> Rien ici n'est une promesse de sécurité de production ou de valeur monétaire actuelle.
+> Rien ici n'est une promesse de sécurité de production ni de valeur monétaire actuelle.
+> QUANTA n'est coté sur aucune bourse et n'a aucun prix de marché ; le projet n'en invente aucun.
 
 ---
 
 ## 1. Pourquoi Quanta
 
-Le Web actuel est un oligopole d'attention :
+La monnaie d'aujourd'hui est contrôlée par des autorités que tu n'as pas choisies :
 
 | Problème | Effet |
 |---|---|
-| 5 plateformes captent 80% du trafic | Censure unilatérale, démonétisation arbitraire |
-| Algorithmes de classement opaques | Personne ne sait *pourquoi* un contenu remonte |
-| Hébergement centralisé | Si AWS tombe, la moitié du Web tombe |
-| Modération opaque | Un compte supprimé = un travail perdu |
-| Créateurs paient (hosting) ou vendent leur audience | Aucune valeur captée par le créateur direct |
+| Les émetteurs créent à volonté | Ton épargne est diluée en silence |
+| Les comptes vivent sur le serveur d'un tiers | Ils peuvent être gelés, annulés, fermés |
+| Des intermédiaires sont dans chaque transfert | Une commission est prise, une trace gardée |
+| La garde est déléguée à une plateforme | « Tes » coins sont une reconnaissance de dette que tu ne détiens pas |
 
-**Quanta inverse le contrat** :
-- L'hébergement est mutualisé (P2P, BLAKE3 content-addressing).
-- Le classement est public (algorithme **QuantaRank** open-source, paramètres on-chain).
-- La modération est exercée par un jury aléatoire (style Kleros, mais P2P pur).
-- Chaque interaction (publication, like, abonnement, modération honnête) **rapporte des QUANTA**.
+**Quanta inverse le contrat.** C'est une monnaie **rare, à plafond dur**, que tu mines en
+gardant un nœud en ligne, que tu gardes avec **tes propres clés**, et que tu envoies en
+pair-à-pair. Pas de société, pas de serveur à assigner, pas de clé admin, et aucune
+autorité capable de l'inflater, de te geler, ou de signer à ta place.
 
 ---
 
-## 2. Vision en 30 secondes
-
-> Tu télécharges Quanta. Tu génères ton wallet. Tu publies `torus://alex` en 3 clics. Quelqu'un cherche « cuisine vegan rapide », tombe sur ton site, te like, t'abonne. Tu mines plus. Tu achètes son ebook avec tes QUANTA. Lui modère un thread, gagne du QUANTA aussi. Personne ne possède Quanta.
-
----
-
-## 3. Coin QUANTA — invariants
+## 2. Le coin QUANTA — invariants
 
 | Paramètre | Valeur |
 |---|---|
-| Émission | **100 QUANTA / heure**, fixe, à perpétuité |
-| Halving | **Aucun** — l'inflation devient asymptotiquement nulle quand le supply croît |
-| Distribution (Shapley v2) | 25% énergie · 25% travail compute · 20% validation · 15% uptime · **15% utilité sociale** |
-| Burn | 1% par transfert · 2% par tâche compute · 5% par boost · 10% slashing modération |
-| Unité | 1 QUANTA = 1 000 000 µQTA (`u64`, déterministe) |
-| Bridge | Quand masse critique : pool Uniswap v4 + bridge ERC-20 audité |
+| Plafond dur | **100 000 000 QUANTA**, vérifié au consensus — jamais dépassable |
+| Émission | **décroissante** : chaque minute frappe `(plafond − miné) / 50 000 000` µQTA |
+| Rythme à la genèse | ≈ **120 QUANTA / heure**, décroissant doucement vers le plafond |
+| Premine / autorité d'émission | **aucun** — personne ne peut créer du QUANTA hors de la règle |
+| Unité | 1 QUANTA = 1 000 000 µQTA (`u64`, arithmétique entière déterministe, zéro flottant) |
+| Burn | **1% détruit à chaque transfert** (burn-and-mint) |
 
-**Pourquoi 100/h fixe** : un coin avec halving favorise les early-adopters au détriment des nouveaux. Un coin avec inflation nominale fixe + burn variable converge vers une émission *réelle* nulle quand l'usage explose, sans privilégier qui que ce soit.
+**La rareté est le cœur.** Le *rythme* d'émission est front-loaded mais borné : chaque tick
+libère une fraction fixe de l'offre **restante**, donc le rythme baisse à mesure qu'on
+approche du plafond, et le total émis tend asymptotiquement vers — sans jamais atteindre —
+100 000 000. La borne est vérifiée deux fois au consensus : un plafond d'émission **par
+bloc** et le plafond dur **global**, pour qu'un pair malveillant ne puisse ni dépasser le
+cap, ni rafler une année d'émission en un seul bloc.
+
+Deux nuances honnêtes. (1) « Front-loaded » qualifie le *rythme* (maximal à la genèse, ne
+fait que baisser) — **pas** les montants absolus, qui prennent des siècles à approcher le
+plafond :
+
+| Échéance | Offre cumulée (approx.) |
+|---|---|
+| Rythme genèse | ≈ 120 QUANTA/h ≈ 1,05 M/an, décroissant |
+| An 1 | ≈ 1,05 M (~1% du plafond) |
+| An 10 | ≈ 10 M (~10%) |
+| ~66 ans | 50 M (la moitié) |
+| ~219 ans | 90 M (90%) |
+| → ∞ | approche sans jamais atteindre 100 M |
+
+(2) Le burn de 1% ne rend l'offre **nette** déflationniste **qu'au-delà d'un seuil de volume
+de transferts** — quand le burn dépasse l'émission. À faible volume, l'émission domine et
+l'offre croît encore vers le plafond. On ne prétend pas à une déflation inconditionnelle.
+
+**Sur la valeur.** Miner coûte de l'électricité réelle, mais un coût de production n'est pas
+un prix. QUANTA n'a aujourd'hui aucune bourse ni valeur de marché ; une valeur d'échange
+n'existera que si des gens choisissent librement de l'échanger. L'app n'affiche jamais de
+chiffre fiat inventé.
 
 ---
 
-## 4. Architecture — vue d'ensemble
+## 3. Comment tu gagnes du QUANTA — minage par contribution
+
+Garder un nœud Quanta en ligne, *c'est* miner. Une fois par minute, le réseau frappe
+l'émission du tick et la distribue selon la **contribution mesurée**, via une pondération
+fixe. Elle s'*inspire* des axiomes d'efficience (somme des parts = 1) et de symétrie (nœuds
+identiques → parts égales) de la valeur de Shapley, mais c'est un score de contribution
+linéaire O(n) — **pas** un calcul de Shapley exact (NP-difficile). Les poids :
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    APPLICATION TAURI                     │
-│  ┌────────────────────┐    ┌──────────────────────────┐  │
-│  │  Frontend Svelte 5 │ ←→ │   Backend Rust (tokio)   │  │
-│  │ Browser · Builder  │IPC │  P2P · Search · Social   │  │
-│  │ Search · Forums    │    │  Mining · Ledger · Mod   │  │
-│  └────────────────────┘    └──────────┬───────────────┘  │
-└────────────────────────────────────────┼──────────────────┘
-                                          │ Iroh QUIC + Gossip
-            ┌─────────────────────────────┼─────────────────────────────┐
-            ▼                             ▼                             ▼
-   ┌────────────────┐           ┌────────────────┐           ┌────────────────┐
-   │  Pair Alice    │           │   Pair Bob     │           │  Pair Charlie  │
-   │  Index shard A │           │ Index shard B  │           │  Index shard C │
-   │  Pages, votes  │           │ Pages, votes   │           │  Pages, votes  │
-   └────────────────┘           └────────────────┘           └────────────────┘
-                          (DAG BLAKE3 + Ledger CRDT)
+énergie 30% · travail 30% · validation 25% · uptime 15%   (somme = 1,0)
 ```
 
----
-
-## 5. Publication d'un site
-
-### 5.1 PageBuilder
-- Éditeur WYSIWYG par blocs : **titre · paragraphe · image · vidéo · lien · code · embed**
-- Templates : **blog · vitrine · portfolio · shop · landing · forum**
-- Aperçu live, multi-page, navigation interne
-- Toggle JS sandboxé (opt-in par site, désactivé par défaut)
-
-### 5.2 Stockage
-1. Le site est sérialisé en arbre `Site { routes: HashMap<path, PageNode> }`
-2. Chaque page > 64 KB est découpée en chunks DAG BLAKE3 (réutilise `merkle_dag.rs`)
-3. Le manifest `Site` est signé Ed25519 par le wallet créateur
-4. Diffusion via gossip `PublishSite { manifest_cid }`
-5. Les pairs intéressés (déjà abonnés ou recherche match) téléchargent à la demande
-
-### 5.3 Pinning incentivé (innovation)
-> **Problème classique du P2P** : si personne ne pin, le contenu disparaît.
-> **Solution Quanta** : un pair peut déclarer `Pin { cid, until_ts }`. À chaque téléchargement servi par ce pair, le créateur du contenu reçoit `0.001 QUANTA`, le pair pinneur `0.0005 QUANTA`. Statistique vérifiable on-chain (compteurs CRDT).
+L'énergie est **mesurée localement** (RAPL Intel/AMD, `powermetrics` Apple, ou un repli
+sysinfo calibré) — jamais auto-déclarée comme un nombre invérifiable. Le terme *travail*
+suit aujourd'hui le ratio d'énergie (pas de marché de calcul dans la version crypto-only),
+donc en pratique les récompenses suivent l'énergie mesurée, la validation et l'uptime. En
+solo, tu reçois le tick entier ; avec des pairs, ta part est proportionnelle à ta
+contribution mesurée, multipliée par un facteur anti-sybil. Pas de classe de mineurs
+privilégiée, pas de course à l'armement matériel : un laptop laissé en ligne contribue.
 
 ---
 
-## 6. Noms de domaine — `*.torus`
+## 4. Le ledger
 
-### 6.1 Registre
-- Format : `^[a-z0-9-]{2,40}\.torus$`
-- Stockage : `HashMap<name, DomainRecord>` répliqué CRDT
-- `DomainRecord { name, owner_pk, target_pk, value_qta, last_paid_ts, signature }`
-
-### 6.2 Harberger Tax (innovation)
-> **Problème** : sur ENS, des squatters achètent des noms évidents (`google.eth`) et les gardent à vie pour 5 $/an.
-> **Solution Quanta** : le propriétaire **déclare** la valeur de son domaine (`value_qta`). Il paie un loyer mensuel = `value_qta × 1%`. **N'importe qui** peut racheter le domaine en payant exactement `value_qta` au propriétaire actuel.
->
-> ⇒ Si tu sous-évalues, tu te fais racheter à perte. Si tu surévalues, tu paies trop de loyer. **Le marché trouve le juste prix.**
-
-### 6.3 Sous-domaines
-- Le propriétaire de `alex.torus` signe un `SubdomainGrant { sub, target_pk }` pour `shop.alex.torus`
-- Délégation arbitraire en profondeur (`a.b.c.alex.torus`)
-
-### 6.4 Période de grâce
-- 30 jours après expiration de loyer, le nom reste réservé au propriétaire (avertissement)
-- Au-delà, le nom revient au pool public
+- **Les blocs** sont scellés par le leader du slot environ toutes les 2 minutes ; chacun
+  porte une racine de Merkle BLAKE3 des IDs de ses transactions.
+- **Les transferts** sont signés Ed25519 ; le destinataire reçoit 99%, 1% est brûlé, et
+  l'expéditeur est débité du montant total — le tout en `u64` µQTA, donc aucune dérive.
+- **Le cache de solde** est O(1) (`HashMap` incrémental), mis à jour à l'application et
+  reverté en cas de reorg.
+- **Anti-replay** : nonce strictement monotone par compte + ensemble `seen_tx_hashes`.
+- **La résolution de fork est déterministe** : on valide le challenger avant toute mutation,
+  on pop le tip perdant, on remet en attente les transactions exclusives à la branche
+  perdante, puis on applique la gagnante — aucun bloc validé n'est jamais perdu en silence.
+- **La synchronisation de chaîne** est paginée (`RequestChain → ChainSegment`, ≤50
+  blocs/segment) et reprend depuis n'importe quelle hauteur.
 
 ---
 
-## 7. Moteur de recherche — QuantaRank
+## 5. Protocole réseau & sécurité
 
-### 7.1 Index inversé distribué
-- Tokenizer multilingue (FR, EN, ES, DE, JA initial) : NFKD + lowercase + stop-words
-- Chaque token est shardé : `shard_id = blake3(token)[0..2] % N`
-- Réplication k=3 par shard (résilience à la perte de pairs)
-- Chaque pair maintient les shards qui lui sont assignés
+La seule unité sur le fil est un `GossipEnvelope` signé. Les octets bruts ne sont jamais de confiance.
 
-### 7.2 Algorithme QuantaRank
-```
-score(page, query) =
-   Σ termes ∈ query  TF-IDF(terme, page)
- × log(1 + likes_pondérés(page))
- × log(1 + abonnés(auteur))
- × reputation(auteur)^0.5
- × freshness(page.updated_at)        # half-life 30 jours
- × diversity_bonus(page, results)    # pénalise la sur-représentation d'un auteur
- × (1 - moderation_malus(auteur))    # 0 si banni, 0.5 si warn
-```
+- **La signature** couvre `(sender, nonce, timestamp, payload)` canoniquement — jamais le payload seul.
+- **Le nonce** est strictement monotone par expéditeur (commence à 1), donnant un anti-replay par pair.
+- **Le timestamp** doit être frais (fenêtre ±90 s) ; le même timestamp est signé et envoyé.
+- **L'ID de message** est `BLAKE3(payload)` — déterministe, permettant la déduplication.
 
-### 7.3 Anti-spam SEO
-- Un mot-clé ne peut apparaître plus de 5× dans les méta-tags d'une page (sinon on ignore)
-- Mots cachés (CSS `display:none`) → pénalité
-- Réseau d'auto-likes (clusters fermés détectés via graphe) → pondération annulée
-
-### 7.4 Filtres utilisateur
-`lang` · `since` · `type` (`site`, `forum`, `shop`, `blog`, `comment`) · `creator` · `min_likes`
-
----
-
-## 8. Économie d'attention — `social.rs`
-
-### 8.1 Like quadratique (innovation)
-> **Problème** : sur Twitter, un like coûte 0. Une ferme de bots peut générer 1 M de likes pour 0 $.
-> **Solution Quanta** : chaque like coûte au minimum 0,1 QUANTA. Tu peux mettre plus pour amplifier ; influence = √(QTA dépensé). Mettre 100 QTA sur **un** like = 10× influence d'un like normal. Mettre 1 QTA × 100 likes différents = 100× plus efficace que 100 QTA sur 1 like. **Force la diversité.**
-
-### 8.2 Abonnements à 3 tiers
-| Tier | Coût | Effet |
-|---|---|---|
-| 1 (signal) | 0 QTA | Suis le créateur (notifications) |
-| 2 (supporter) | 1 QTA / mois | +5% de mining boost pour le créateur |
-| 3 (mécène) | 10 QTA / mois | +15% de mining boost pour le créateur |
-
-L'abonné ne paie pas le réseau ; il **redirige** une part de son propre mining futur. Les QUANTA brûlés en compensation sont aussi à l'échelle (5%/15% du mining mensuel de l'abonné).
-
-### 8.3 Tip · Boost · Sponsor
-- **Tip** : transfert direct, mémo, taxe 1% (BME)
-- **Boost** : payer X QUANTA pour ranking ×1,5 pendant 24h. Cap : 100 QTA / page / jour. Burn 5%.
-- **Sponsor** : flux récurrent créateur → créateur, déductible du mining sponsorisé
-
----
-
-## 9. Modération — Jury VRF (Kleros-like)
-
-### 9.1 Cycle d'un signalement
-```
-1. Reporter signale  ──► 0.1 QTA dépensé (anti-spam)
-2. Si ≥5 reports indépendants  ──► déclenche jury
-3. VRF tire 7 jurés  ──► parmi pool stake ≥100 QTA, rep > 0.6
-4. Vote scellé 24h  ──► commit-reveal Schnorr
-5. Verdict majorité  ──► payouts/slashing
-```
-
-### 9.2 Verdicts et conséquences
-| Verdict | Créateur | Reporters | Jurés majoritaires | Jurés minoritaires |
-|---|---|---|---|---|
-| Innocent | rien | -0.1 QTA chacun | +0.5 QTA | 0 |
-| Warning | -10% mining 7j | rien | +0.5 QTA | 0 |
-| Hide | -50% mining 30j, vitrine masquée | rien | +0.5 QTA | 0 |
-| Ban | vitrine permanente off, -10% slashing balance | rien | +0.5 QTA | 0 |
-
-### 9.3 Appel
-Coût : 50 QTA. Super-jury de 21 jurés. Verdict définitif.
-
-### 9.4 Pourquoi VRF + commit-reveal
-- **VRF** (`schnorrkel`) : sélection prouvablement aléatoire, vérifiable, non-manipulable
-- **Commit-reveal** : empêche les jurés de copier les votes des premiers
-- **Schelling point** : voter avec la majorité paie ; les jurés cherchent la "vérité focalisable", pas leur opinion
-
----
-
-## 10. Anti-troll graduel
+Chaque message entrant passe un pipeline fixe avant tout handler :
 
 ```
-reports validés (30 derniers jours)  →  malus mining
-   1                                 →  warning
-   3                                 →  -10%
-   5                                 →  -25%
-   8                                 →  -50%
-  12                                 →  -100% + vitrine off
+garde de taille (≤10 Mo) → décode JSON → vérif bannissement → dédup (LRU 100K)
+  → fraîcheur timestamp (±90s) → rate limit adaptatif
+  → nonce anti-replay (≥1, strictement monotone) → vérif signature Ed25519 → handler
 ```
 
-**Récupération** : +1% par like positif validé. Reset complet après 30 jours sans nouveau report.
+Défenses : rate limiting adaptatif par pair (échelle `sqrt`), bannissement (3 reports → 1 h),
+plafonds DoS (10 Mo/envelope, 50 blocs/segment), et une heuristique d'éclipse qui alerte
+quand trop de pairs partagent un préfixe de clé publique.
 
 ---
 
-## 11. Web of Trust — `trust_graph.rs`
+## 6. Consensus — Proof-of-Stake, élection vérifiable pondérée par le stake
 
-> **Problème PageRank classique** : sensible aux fermes de liens.
-> **Solution Quanta** : chaque user calcule **localement** un PageRank personnalisé partant de **lui-même** (damping 0,85, 20 itérations). Les fermes de likes externes ne te touchent pas si tu ne les suis pas.
+La production de blocs est par leader et déterministe par slot (= hauteur de chaîne) :
 
-Score de confiance utilisé pour pondérer :
-- Le poids des likes reçus dans QuantaRank (du POV de qui cherche)
-- L'éligibilité au pool de jurés
-- La pondération des reports
+```
+beacon = BLAKE3(domaine ‖ bloc_enterré_hash ‖ slot)   (enterré = plusieurs slots derrière le tip)
+seed   = BLAKE3(domaine ‖ beacon ‖ slot ‖ round)
+leader = seed % stake_total_pondéré                    (poids = stake + réputation·10_000)
+```
 
----
+Le stake minimum de validateur est 1 QUANTA. Si le leader élu ne scelle pas dans un timeout
+de 30 s, la production bascule vers le suivant (rounds bornés) ; quand personne n'a staké, le
+bootstrap est sans permission. L'entropie vient d'un bloc **enterré** (plusieurs slots
+derrière le tip), pas du tip frais — le validateur qui vient de sceller ne peut donc pas
+grinder sa propre ré-élection.
 
-## 12. Forums — Threads DAG
-
-- Forum = nœud racine signé (`name`, `description`, `creator_pk`)
-- Thread = enfant du forum, body sur DAG (>64 KB chunked)
-- Comment = enfant d'un thread ou d'un comment (réponses imbriquées)
-- Like / dislike / report par nœud
-- **Soft-fork** : un user peut copier un thread + l'embrancher différemment (clone signé, lien retour vers original) — utile pour scinder une discussion qui dérive
-
----
-
-## 13. Identité et vie privée
-
-### 13.1 Pseudo + Wallet
-- Identité = clé Ed25519 (32 octets)
-- Pseudo affiché = libre, vérifié par le wallet (pas d'unicité globale forcée)
-- Avatar = identicon BLAKE3 par défaut
-
-### 13.2 Proof-of-personhood léger (innovation)
-> Pour réduire la barre, on ne demande pas KYC. On utilise un **âge de wallet + uptime** pondéré.
-> Pour des actions sensibles (jury, vote pondéré fort), on peut requérir un *attestation circle* : 5 wallets eux-mêmes attestés vouchent pour toi via signature. Web of trust scellé.
-
-### 13.3 Pages chiffrées (groupes privés)
-- Chiffrement symétrique AES-256-GCM, clé chiffrée par NaCl box pour chaque membre abonné
-- Le créateur peut révoquer un membre (rotation de clé + re-publication chunks)
+**Honnêteté de nommage.** C'est une élection *déterministe et publiquement vérifiable* —
+**pas** un VRF cryptographique : aucune composante à clé secrète, donc le leader d'un slot
+futur est publiquement prévisible (une surface de DoS ciblé). Un vrai VRF à clé secrète
+(imprévisibilité) et un VDF (résistance au grinding) sont au roadmap, pas livrés.
 
 ---
 
-## 14. Marketplace (déjà existant, élargi)
+## 7. Cryptographie
 
-Le module `marketplace.rs` v2 (tâches compute) reste. V3 ajoute :
-- **Services humains** : devs, designers, traducteurs proposent leurs prestations payées QUANTA. Escrow + arbitrage par jury si litige.
-- **Items numériques** : ebooks, musiques, modèles 3D, code source — chiffrés, débloqués à l'achat.
-- **Commissions** : 1% au protocole (burn), 0,5% au créateur du shop si embed sur autre site.
+| Couche | Mécanisme |
+|---|---|
+| Identité / signatures | **Hybride Ed25519 + ML-DSA-65** (NIST FIPS 204), actif sur la couche transaction |
+| Dérivation de clé | Argon2id (64 Mio, 3 itérations, parallélisme 4) |
+| Chiffrement au repos | AES-256-GCM (nonce unique de 12 octets par opération) |
+| Hachage / content-addressing | BLAKE3 |
+| Sûreté mémoire | `zeroize` + `ZeroizeOnDrop` sur chaque secret |
 
----
-
-## 15. Bridges et exchanges (long terme)
-
-Quand 100 000 wallets actifs / 30 jours :
-1. Pool Uniswap v4 (Ethereum L2) — paire QTA/USDC
-2. Bridge ERC-20 audité (LayerZero ou Wormhole)
-3. Listing CEX (CoinGecko → Gate.io → MEXC → Kraken progressif)
-4. **Pas de pré-mine** : aucun token n'est créé hors mining. Le bridge nécessitera un *lockbox* on-protocol.
-
----
-
-## 16. Roadmap
-
-| Phase | Contenu | Statut |
-|---|---|---|
-| V2 | Mining énergie, ledger, gossip, marketplace compute | ✅ |
-| V3.0 | CLAUDE.md + Whitepaper pivot | ✅ ce document |
-| V3.1 | Modules backend `domains` · `search` · `social` · `moderation` · `forums` · `trust_graph` | 🚧 en cours |
-| V3.2 | Site multi-pages + assets DAG, gossip étendu | 🚧 |
-| V3.3 | Frontend : Browser, PageBuilder, Search, Profile, Forums | 🚧 |
-| V3.4 | Tests + audit sécurité externe | À faire |
-| V3.5 | Bêta publique 100 testeurs | À faire |
-| V3.6 | Bridge + listing | T+12 mois |
+**Post-quantique — actif (hybride).** Chaque **transaction** est signée par une signature
+hybride **Ed25519 + ML-DSA-65** (NIST FIPS 204) via la crate autonome `fips204` (Rust pur,
+temps constant, zéro `unsafe`). La clé ML-DSA est **dérivée de la graine Ed25519** (XOF
+BLAKE3), donc aucun secret supplémentaire n'est persisté et aucune migration de coffre n'est
+nécessaire. La vérification est **strictement ET** quand une couche PQ est présente — forger
+exige de casser *les deux* schémas — avec un repli Ed25519 pour les signatures
+pré-activation. Les enveloppes gossip restent en Ed25519 (transport éphémère, fenêtre de
+fraîcheur ±90 s, déjà à l'intérieur de QUIC/TLS) ; un jour-drapeau *require-PQ* (`REQUIRE_PQ`)
+à l'échelle du réseau est un futur bump de protocole.
 
 ---
 
-## 17. FAQ
+## 8. Identité & auto-custodie
 
-**Q. Et si un site est illégal ?**
-R. Jury communautaire. Si verdict `Hide`/`Ban`, les pairs cessent volontairement de servir le contenu. Les pairs récalcitrants risquent leur propre réputation (les autres pairs peuvent les blacklister).
+Ton identité est une paire de clés — rien de plus, rien de loué. On te joint par un court
+**`@pseudo`** (et un code de connexion à usage unique), pas par un domaine qu'il faut payer en
+continu. La clé privée ne quitte jamais l'appareil : elle vit dans un coffre chiffré
+(Argon2id + AES-256-GCM) et c'est la seule chose qui peut déplacer tes fonds. Une **clé de
+récupération** affichée une seule fois à la création est l'unique moyen de restaurer le
+compte sur un autre appareil.
 
-**Q. Et si Iroh tombe ?**
-R. Iroh est un transport (QUIC). On peut basculer libp2p ou implémenter notre propre transport. L'architecture (DAG, ledger CRDT, gossip) est transport-agnostique.
-
-**Q. Et si un État tente de censurer ?**
-R. Aucun point central à fermer. Les pairs peuvent tourner sur Tor/I2P. Pour bloquer Quanta, il faudrait bloquer toutes les connexions QUIC sortantes du pays.
-
-**Q. Et si quelqu'un publie 1 million de pages spam ?**
-R. Coût : 1 QTA × 1M = 1M QTA. Plus le coût Harberger des domaines. Plus le slashing si signalé. Économiquement non viable.
-
-**Q. Comment commencer ?**
-R. Télécharge l'app, génère un wallet. 1h plus tard tu as 100 QTA disponibles (mining solo). Tu peux acheter ton premier domaine.
+Aucun KYC, aucun tracking, aucun compte à fermer. Tu détiens les clés ; personne ne peut
+signer à ta place, et personne ne peut geler, annuler ou confisquer ce que tu détiens.
 
 ---
 
-## 18. Conclusion
+## 9. Modèle de menace & limites honnêtes
 
-Quanta n'est pas un Twitter décentralisé, ni un Google libre, ni un Wordpress P2P.
-**C'est les trois en un seul protocole, avec un coin qui aligne créateurs, modérateurs et lecteurs.**
+- **Non audité par un tiers.** La cryptographie et le réseau n'ont eu aucun audit indépendant.
+- **Réseau à l'échelle alpha.** La convergence a été vérifiée entre deux machines physiques,
+  pas à grande échelle. NAT traversal à grande échelle, résilience aux partitions et
+  résistance à l'éclipse sont en cours.
+- **L'anti-sybil est un proof-of-concept.** Quanta résiste aux attaques sybil via la
+  pondération par réputation, le poids de stake et le rate limiting — mais il n'y a pas
+  encore de puzzle d'admission proof-of-work/stake durci, et la couche gossip elle-même
+  n'est pas filtrée anti-sybil. L'heuristique d'éclipse ne détecte que les attaquants
+  *paresseux* (pairs partageant un préfixe de clé) ; la vraie résistance à l'éclipse exige
+  diversité IP/AS et pairs d'ancrage persistants — au roadmap.
+- **Le consensus converge mais n'est pas encore économiquement final.** L'élection du leader
+  est publiquement prévisible (pas de VRF à clé secrète) et il n'y a **pas de slashing** de
+  l'équivocation : la résolution de fork fait *converger* le réseau, mais rien ne *pénalise*
+  économiquement un leader qui signe deux blocs à la même hauteur. Considère les confirmations
+  profondes comme plus fortes, jamais comme finales, tant que finalité BFT + slashing ne sont
+  pas livrés.
+- **Aucune valeur monétaire réelle.** QUANTA est expérimental et non coté. Ne stocke pas une
+  valeur que tu ne peux pas perdre.
 
-L'architecture est conservatrice : Rust + Iroh + Ed25519 + BLAKE3 — du standard cryptographique audité. L'innovation est dans la composition : Harberger pour les noms, quadratic voting pour les likes, jury VRF pour la modération, web of trust personnel pour le ranking, mining énergie pour l'émission.
-
-Le but n'est pas de remplacer Google demain. C'est de prouver qu'un Web où **chaque interaction crée de la valeur partagée** est techniquement possible — et économiquement soutenable.
+On documente ça parce qu'un protocole qui cache ses limites ne peut pas être digne de
+confiance pour ce qu'il fait bien.
 
 ---
 
-*Quanta est un protocole libre (Apache-2.0). Le code est ouvert, les paramètres sont sur le ledger, les décisions de gouvernance future passeront par vote on-chain pondéré reputation.*
+## 10. Feuille de route
+
+Audit de sécurité externe · tests multi-nœuds durcis (chaos & partitions) · pipeline de
+release signé + notarisé · finalité BFT sub-seconde
+([design DAG-BFT](docs/DESIGN-CONSENSUS-DAG-BFT.md) — un DAG de *consensus*, sans rapport
+avec le DAG de contenu social retiré lors de la refonte crypto-only) · aléa d'élection
+durci par VDF ·
+jour-drapeau *require-PQ* à l'échelle du réseau · admission anti-sybil durcie · gouvernance
+on-chain des paramètres économiques. L'UI est internationalisée (EN · FR · ES · RU · ZH · JA).
+
+---
+
+## 11. Conclusion
+
+Quanta est une monnaie souveraine : rare par la règle, minée par la contribution, détenue
+par toi seul, et déplacée en pair-à-pair sans autorité au milieu. Le plafond dur et
+l'émission décroissante sont gravés dans le code et vérifiés au consensus ; les clés sont
+les tiennes ; le réseau n'a pas de propriétaire. Le moteur est réel et testé ; le réseau est
+jeune et ouvert. Tout est libre (Apache-2.0) — le code est ouvert, les règles vivent dans le
+protocole, et la gouvernance future sera on-chain.
+
+<p align="center"><strong>◈ Quanta — La rareté que tu forges ◈</strong></p>

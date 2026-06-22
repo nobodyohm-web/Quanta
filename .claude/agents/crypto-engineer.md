@@ -9,7 +9,7 @@ Lis ces fichiers AVANT de commencer :
 - .agent/design/tech_references.md (Shapley, CRDT, BME, RISC Zero)
 
 ## Expertise
-- Modèles d'émission fixe (100 QUANTA/h)
+- Émission décroissante vers un plafond dur (100M), rareté prouvable
 - Distribution par Shapley Value
 - Burn-and-Mint Equilibrium
 - CRDT (G-Counter, PN-Counter) pour consensus sans verrou

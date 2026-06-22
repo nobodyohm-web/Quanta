@@ -63,9 +63,9 @@ mod network_simulation {
                 blocks_verified: 0,
                 uptime_minutes: tick_min,
                 mode: NodeMode::default(),
-                weighted_likes: 0.0,
             });
-            let (atn_a, _) = engine.uptime_tick(pk_a, 0, &peers_a);
+            let emission_a = crate::p2p::reputation::emission_for_tick(total_mined);
+            let (atn_a, _) = engine.uptime_tick(pk_a, 0, emission_a, &peers_a);
             total_mined = total_mined.saturating_add(atn_a);
 
             // Peers vus par B : juste A
@@ -77,9 +77,9 @@ mod network_simulation {
                 blocks_verified: 0,
                 uptime_minutes: tick_min,
                 mode: NodeMode::default(),
-                weighted_likes: 0.0,
             });
-            let (atn_b, _) = engine.uptime_tick(pk_b, 0, &peers_b);
+            let emission_b = crate::p2p::reputation::emission_for_tick(total_mined);
+            let (atn_b, _) = engine.uptime_tick(pk_b, 0, emission_b, &peers_b);
             total_mined = total_mined.saturating_add(atn_b);
         }
 

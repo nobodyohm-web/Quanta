@@ -16,34 +16,31 @@ JAMAIS l'inverse — risque de deadlock
 toutes les 60s:
   watts = estimate_watts()
   total = node.total_network_watts() + watts
-  (qta, kwh) = reputation.uptime_tick(pk, total_mined, total)
+  (qta, kwh) = reputation.uptime_tick(pk, blocks_verified, emission_for_tick, peer_contribs)
   ledger.mine_tx(pk, qta, kwh)
-  dag.append(mine_node)
-  
+
 toutes les 2 ticks (seal):
   block = ledger.seal_if_pending(pk, kwh)
   if block → broadcast NewBlock
 ```
 
-## Émission V2
-- `NETWORK_EMISSION_PER_HOUR = 100.0`
-- `EMISSION_PER_TICK = 100.0 / 60.0` (1.6667 QUANTA/min)
-- Solo : 100% de l'émission
-- Multi : proportionnel aux watts via `mining_rate_proportional()`
+## Émission (rareté — plafond dur + décroissance)
+- `MAX_SUPPLY_MICRO = 100_000_000 * MICRO` (plafond DUR, vérifié au consensus)
+- `EMISSION_DIVISOR = 50_000_000`
+- `emission_for_tick(total_mined) = (MAX_SUPPLY_MICRO − total_mined) / EMISSION_DIVISOR`
+  → ≈2 QUANTA/tick à la genèse (~120 QUANTA/h), décroît vers le plafond
+- Solo : 100% du tick ; Multi : part proportionnelle à la contribution mesurée
+  (Shapley) distribuée par `uptime_tick` / `shapley::distribute_emission`
+- Zéro premine, zéro autorité d'émission ; le minage en direct (`mining_loop`)
+  appelle `emission_for_tick(total_mined)`
 
-## Gossip Protocol — 22 Message Types
+## Gossip Protocol — Message Types (crypto-only)
 ```
 Core sync:     Hello, RequestChain, ChainSegment, NewBlock
 Transactions:  BroadcastTx
-DAG sync:      WantNodes, HaveNodes
-Web P2P:       PublishPage, RequestPage, PublishSiteManifest
 Liveness:      Ping, Pong
 Security:      ReportPeer
-Domains:       PublishDomain, PublishSubdomain
-Search:        PublishSite
-Social:        BroadcastSocialAction
-Moderation:    BroadcastReport, BroadcastJurorCommit, BroadcastJurorReveal
-Forums:        PublishForumNode
+Identity:      PublishUsername
 ```
 
 ## Dispatch pipeline (dispatcher.rs)
@@ -61,12 +58,12 @@ Forums:        PublishForumNode
 
 ## State stores (WillowNode)
 ```
-reputation, ledger, consensus, dag, gossip,
+reputation, ledger, consensus, gossip,
 energy_oracle, peer_country_reports, peer_info,
-nonce_tracker, marketplace, page_store, domains,
-search, social, moderation, forums, follow_graph
+nonce_tracker, usernames
 ```
-Tous wrappés dans `Arc<RwLock<T>>`, snapshotés toutes les 30s.
+Tous wrappés dans `Arc<RwLock<T>>`. Stores persistés (30s) :
+ledger, reputation, consensus, gossip, usernames.
 
 ## Tests critiques
 ```bash

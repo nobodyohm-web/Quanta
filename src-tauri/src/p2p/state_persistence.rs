@@ -15,12 +15,10 @@
 //!    are committed atomically through `Database::save_states`, replacing N
 //!    individual fsyncs with one.
 //!
-//! ## V3.3 — Coverage des 6 moteurs sociaux
+//! ## Crypto-core stores
 //!
-//! En plus des 6 stores V2 (`ledger`, `reputation`, `dag`, `consensus`, `gossip`,
-//! `pages`), on persiste désormais les 6 moteurs V3 (`domains`, `search`,
-//! `social`, `moderation`, `forums`, `follow_graph`). Sans cette étape, redémarrer
-//! le nœud faisait perdre l'état social — bloquant pour la réelle production.
+//! On persiste les stores du cœur crypto : `ledger`, `reputation`, `consensus`,
+//! `gossip` et le registre d'identité `usernames`.
 
 use crate::p2p;
 use crate::storage::db::Database;
@@ -31,21 +29,13 @@ use std::sync::Arc;
 const PERSIST_INTERVAL_SECS: u64 = 30;
 
 /// Keys we snapshot, in stable order.
-/// V2 (6) + V3 (6) = 12 stores persistés.
-const KEYS: [&str; 12] = [
+const KEYS: [&str; 5] = [
     "ledger",
     "reputation",
-    "dag",
     "consensus",
     "gossip",
-    "pages",
-    // V3 social web
-    "domains",
-    "search",
-    "social",
-    "moderation",
-    "forums",
-    "follow_graph",
+    // Identité — registre de pseudos @handle
+    "usernames",
 ];
 
 /// Spawn the periodic persistence task (every 30 seconds).
@@ -64,25 +54,16 @@ pub fn spawn_persistence(state: Arc<AppState>) {
 
             // ── 1. Snapshot all engines in parallel (independent read locks) ──
             let (
-                ledger_json, rep_json, dag_json, cons_json, gos_json, pages_json,
-                domains_json, search_json, social_json, mod_json, forums_json, follow_json,
+                ledger_json, rep_json, cons_json, gos_json, usernames_json,
             ) = tokio::join!(
                 snapshot_ledger(&state),
                 snapshot_reputation(&state),
-                snapshot_dag(&state),
                 snapshot_consensus(&state),
                 snapshot_gossip(&state),
-                snapshot_pages(&state),
-                snapshot_domains(&state),
-                snapshot_search(&state),
-                snapshot_social(&state),
-                snapshot_moderation(&state),
-                snapshot_forums(&state),
-                snapshot_follow_graph(&state),
+                snapshot_usernames(&state),
             );
             let snapshots = [
-                ledger_json, rep_json, dag_json, cons_json, gos_json, pages_json,
-                domains_json, search_json, social_json, mod_json, forums_json, follow_json,
+                ledger_json, rep_json, cons_json, gos_json, usernames_json,
             ];
 
             // ── 2. Compute hashes; keep only the entries that changed ──
@@ -133,11 +114,6 @@ async fn snapshot_reputation(state: &AppState) -> String {
     serde_json::to_string(&snap).unwrap_or_default()
 }
 
-async fn snapshot_dag(state: &AppState) -> String {
-    let snap = state.node.dag.read().await.snapshot();
-    serde_json::to_string(&snap).unwrap_or_default()
-}
-
 async fn snapshot_consensus(state: &AppState) -> String {
     let snap = state.node.consensus.read().await.snapshot();
     serde_json::to_string(&snap).unwrap_or_default()
@@ -148,43 +124,9 @@ async fn snapshot_gossip(state: &AppState) -> String {
     serde_json::to_string(&snap).unwrap_or_default()
 }
 
-async fn snapshot_pages(state: &AppState) -> String {
-    let snap = state.node.page_store.read().await.snapshot();
+async fn snapshot_usernames(state: &AppState) -> String {
+    let snap = state.node.usernames.read().await.snapshot();
     serde_json::to_string(&snap).unwrap_or_default()
-}
-
-// ── V3 stores ────────────────────────────────────────────────────────────────
-
-async fn snapshot_domains(state: &AppState) -> String {
-    let snap = state.node.domains.read().await.snapshot();
-    serde_json::to_string(&snap).unwrap_or_default()
-}
-
-async fn snapshot_search(state: &AppState) -> String {
-    let snap = state.node.search.read().await.snapshot();
-    serde_json::to_string(&snap).unwrap_or_default()
-}
-
-async fn snapshot_social(state: &AppState) -> String {
-    let snap = state.node.social.read().await.snapshot();
-    serde_json::to_string(&snap).unwrap_or_default()
-}
-
-async fn snapshot_moderation(state: &AppState) -> String {
-    let snap = state.node.moderation.read().await.snapshot();
-    serde_json::to_string(&snap).unwrap_or_default()
-}
-
-async fn snapshot_forums(state: &AppState) -> String {
-    let snap = state.node.forums.read().await.snapshot();
-    serde_json::to_string(&snap).unwrap_or_default()
-}
-
-async fn snapshot_follow_graph(state: &AppState) -> String {
-    // FollowGraph est un type alias `HashMap<String, Vec<String>>`,
-    // sérialisable directement.
-    let g = state.node.follow_graph.read().await;
-    serde_json::to_string(&*g).unwrap_or_default()
 }
 
 /// Restore all engine state from the database on startup.
@@ -214,15 +156,6 @@ pub async fn restore_state(state: &AppState, database: &Database) {
         }
     }
 
-    // ── Merkle-DAG ────────────────────────────────────────────────
-    if let Ok(Some(json)) = database.load_state("dag").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::merkle_dag::DagSnapshot>(&json) {
-            let count = snap.nodes.len();
-            *state.node.dag.write().await = p2p::merkle_dag::MerkleDAG::restore(snap);
-            log::info!("◈ [Quanta] DAG restored ({} nodes)", count);
-        }
-    }
-
     // ── CRDT Consensus ────────────────────────────────────────────
     if let Ok(Some(json)) = database.load_state("consensus").await {
         if let Ok(snap) = serde_json::from_str::<p2p::consensus::ConsensusSnapshot>(&json) {
@@ -241,69 +174,12 @@ pub async fn restore_state(state: &AppState, database: &Database) {
         }
     }
 
-    // ── Pages P2P Web ─────────────────────────────────────────────
-    if let Ok(Some(json)) = database.load_state("pages").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::page_store::PageStoreSnapshot>(&json) {
-            let count = snap.pages.len();
-            *state.node.page_store.write().await = p2p::page_store::PageStore::restore(snap);
-            log::info!("◈ [Quanta] Pages restored ({} pages)", count);
-        }
-    }
-
-    // ── V3 — Domains (Harberger registry) ─────────────────────────
-    if let Ok(Some(json)) = database.load_state("domains").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::domains::DomainRegistrySnapshot>(&json) {
+    // ── Identité — registre de pseudos @handle ────────────────────
+    if let Ok(Some(json)) = database.load_state("usernames").await {
+        if let Ok(snap) = serde_json::from_str::<p2p::username::UsernameRegistrySnapshot>(&json) {
             let count = snap.records.len();
-            *state.node.domains.write().await = p2p::domains::DomainRegistry::restore(snap);
-            log::info!("◈ [V3] Domains restored ({} records)", count);
-        }
-    }
-
-    // ── V3 — Search index ─────────────────────────────────────────
-    if let Ok(Some(json)) = database.load_state("search").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::search::SearchIndexSnapshot>(&json) {
-            let count = snap.docs.len();
-            *state.node.search.write().await = p2p::search::SearchIndex::restore(snap);
-            log::info!("◈ [V3] Search index restored ({} docs)", count);
-        }
-    }
-
-    // ── V3 — Social (likes, follows, tips, boosts) ────────────────
-    if let Ok(Some(json)) = database.load_state("social").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::social::SocialSnapshot>(&json) {
-            let pages = snap.pages.len();
-            let creators = snap.creators.len();
-            *state.node.social.write().await = p2p::social::SocialState::restore(snap);
-            log::info!("◈ [V3] Social restored ({} pages, {} creators)", pages, creators);
-        }
-    }
-
-    // ── V3 — Moderation (cases + jury verdicts) ───────────────────
-    if let Ok(Some(json)) = database.load_state("moderation").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::moderation::ModerationSnapshot>(&json) {
-            let count = snap.cases.len();
-            *state.node.moderation.write().await = p2p::moderation::ModerationEngine::restore(snap);
-            log::info!("◈ [V3] Moderation restored ({} cases)", count);
-        }
-    }
-
-    // ── V3 — Forums (DAG threads + comments) ──────────────────────
-    if let Ok(Some(json)) = database.load_state("forums").await {
-        if let Ok(snap) = serde_json::from_str::<p2p::forums::ForumsSnapshot>(&json) {
-            let f = snap.forums.len();
-            let t = snap.threads.len();
-            let c = snap.comments.len();
-            *state.node.forums.write().await = p2p::forums::ForumsEngine::restore(snap);
-            log::info!("◈ [V3] Forums restored ({} forums, {} threads, {} comments)", f, t, c);
-        }
-    }
-
-    // ── V3 — Follow graph (Web of Trust) ──────────────────────────
-    if let Ok(Some(json)) = database.load_state("follow_graph").await {
-        if let Ok(g) = serde_json::from_str::<p2p::trust_graph::FollowGraph>(&json) {
-            let n = g.len();
-            *state.node.follow_graph.write().await = g;
-            log::info!("◈ [V3] Follow graph restored ({} accounts)", n);
+            *state.node.usernames.write().await = p2p::username::UsernameRegistry::restore(snap);
+            log::info!("◈ [identité] Pseudos restaurés ({} @handle)", count);
         }
     }
 }

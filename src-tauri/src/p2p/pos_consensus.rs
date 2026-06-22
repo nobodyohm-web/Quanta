@@ -1,4 +1,12 @@
-//! Proof-of-Stake Leader Election with VRF (Verifiable Random Function).
+//! Proof-of-Stake leader election — verifiable, stake-weighted, buried-beacon seeded.
+//!
+//! > **Naming honesty.** This is a *deterministic, publicly verifiable* election,
+//! > **not** a cryptographic VRF — there is no per-validator secret key, so the
+//! > output is a public function of public data. Consequence: future leaders are
+//! > **publicly predictable** (a DoS-targeting surface still to harden). The
+//! > internal `vrf` identifiers are legacy names kept for domain-tag/wire
+//! > compatibility. A true secret-key VRF (ECVRF, for unpredictability) and a VDF
+//! > (for grinding resistance) are roadmap items.
 //!
 //! # How it works
 //!
@@ -73,11 +81,19 @@ pub struct Validator {
 }
 
 impl Validator {
-    /// Consensus weight = stake + reputation bonus.
-    /// Reputation is scaled to be meaningful relative to stake
-    /// (100 rep = 1 QUANTA worth of weight = 1_000_000 µQTA).
+    /// Consensus weight = stake + a **bounded** reputation bonus.
+    ///
+    /// Reputation is scaled relative to stake (100 rep = 1 QUANTA of weight =
+    /// 1_000_000 µQTA), but the bonus is **capped at the validator's own stake**
+    /// (audit 3.4). So contribution-mined reputation can at most *double* a
+    /// validator's election weight and can never overcome stake. This keeps the
+    /// election **stake-anchored**: energy-farmed reputation cannot dominate, and
+    /// there is no cheaper Sybil path via reputation than via stake. (Eligibility
+    /// already requires `stake >= MIN_VALIDATOR_STAKE`, so a zero-stake identity
+    /// has zero weight regardless of reputation.)
     pub fn weight(&self) -> u64 {
-        self.stake.saturating_add(self.reputation.saturating_mul(10_000))
+        let rep_bonus = self.reputation.saturating_mul(10_000).min(self.stake);
+        self.stake.saturating_add(rep_bonus)
     }
 }
 
@@ -106,30 +122,43 @@ pub fn elect_leader(
         return None;
     }
 
-    // Sort by pk for deterministic ordering across all nodes
+    // Sort by pk for deterministic ordering across all nodes.
+    // NOTE: this sort is what makes the election **permutation-invariant** — the
+    // result must not depend on the caller's validator ordering, otherwise two
+    // honest nodes with the same validator set could elect different leaders and
+    // fork the chain (Constitution §3: zero HashMap-iteration-order dependence).
+    // Locked by the `elect_leader_is_permutation_invariant` property test.
     eligible.sort_by(|a, b| a.pk.cmp(&b.pk));
 
     // 2. Compute VRF seed
     let seed = compute_vrf_seed(prev_block_hash, slot, 0);
 
-    // 3. Weighted random selection
-    let total_weight: u64 = eligible.iter().map(|v| v.weight()).sum();
+    // 3. Weighted selection over the cumulative weight distribution.
+    // Accumulate in u128: each `weight()` is ≤ u64::MAX and the validator count is
+    // bounded, so the sum cannot overflow u128 (max ≈ N·2^64 ≪ 2^128). This makes
+    // overflow *unreachable* rather than wrapping (release) or panicking (debug) —
+    // Constitution §3 (checked arithmetic, no silent wrap). For any realistic set
+    // (total_weight ≤ u64::MAX) the elected leader is bit-identical to the prior
+    // u64 math, so consensus behavior is unchanged.
+    let total_weight: u128 = eligible.iter().map(|v| v.weight() as u128).sum();
     if total_weight == 0 {
         return Some(eligible[0].pk.clone());
     }
 
-    let target = seed % total_weight;
-    let mut cumulative = 0u64;
+    let target = (seed as u128) % total_weight;
+    let mut cumulative: u128 = 0;
 
     for v in &eligible {
-        cumulative += v.weight();
+        cumulative += v.weight() as u128;
         if target < cumulative {
             return Some(v.pk.clone());
         }
     }
 
-    // Fallback (should not reach here)
-    Some(eligible.last().unwrap().pk.clone())
+    // Unreachable: target < total_weight == cumulative once the loop completes.
+    // Fall back to the last eligible validator *without panicking* (Constitution
+    // §3/§8: zero unwrap in production code).
+    eligible.last().map(|v| v.pk.clone())
 }
 
 /// Compute the fallback leader for a given round.
@@ -151,25 +180,29 @@ pub fn elect_fallback_leader(
         return None;
     }
 
+    // Permutation-invariant ordering (see `elect_leader`).
     eligible.sort_by(|a, b| a.pk.cmp(&b.pk));
 
     let seed = compute_vrf_seed(prev_block_hash, slot, fallback_round);
-    let total_weight: u64 = eligible.iter().map(|v| v.weight()).sum();
+    // u128 accumulation: overflow-unreachable, behavior-identical for realistic
+    // weights (see `elect_leader` for the full rationale).
+    let total_weight: u128 = eligible.iter().map(|v| v.weight() as u128).sum();
     if total_weight == 0 {
         return Some(eligible[0].pk.clone());
     }
 
-    let target = seed % total_weight;
-    let mut cumulative = 0u64;
+    let target = (seed as u128) % total_weight;
+    let mut cumulative: u128 = 0;
 
     for v in &eligible {
-        cumulative += v.weight();
+        cumulative += v.weight() as u128;
         if target < cumulative {
             return Some(v.pk.clone());
         }
     }
 
-    Some(eligible.last().unwrap().pk.clone())
+    // Unreachable; non-panicking fallback (Constitution §3/§8: zero unwrap).
+    eligible.last().map(|v| v.pk.clone())
 }
 
 /// Check if a given public key is the elected leader (or valid fallback) for a slot.
@@ -395,6 +428,18 @@ mod tests {
         assert_eq!(alice.reputation, 95);
     }
 
+    #[test]
+    fn reputation_bonus_capped_at_stake() {
+        // 3.4: a huge reputation cannot let a small stake dominate — the bonus is
+        // capped at stake, so weight tops out at 2× stake.
+        let farmer = Validator { pk: "rep_farmer".into(), stake: 1_000_000, reputation: 10_000 };
+        // raw bonus = 10_000 * 10_000 = 100_000_000, capped at stake (1_000_000)
+        assert_eq!(farmer.weight(), 2_000_000, "reputation bonus must be capped at stake");
+        // Modest reputation stays uncapped: 90 * 10_000 = 900_000 < 5_000_000 stake.
+        let modest = Validator { pk: "modest".into(), stake: 5_000_000, reputation: 90 };
+        assert_eq!(modest.weight(), 5_900_000);
+    }
+
     // ─── Track C: aléa d'élection non-grindable (beacon d'entropie enterrée) ──
 
     #[test]
@@ -427,5 +472,73 @@ mod tests {
             .map(|s| elect_leader(&leader_beacon(&format!("blk{}", s % 7), s), s, &vals).unwrap())
             .collect();
         assert!(leaders.len() > 1, "l'entropie enterrée doit diversifier les leaders");
+    }
+
+    // ─── Constitution Phase 0: déterminisme & arithmétique de l'élection ──────
+
+    /// Deterministically permute `validators` from `perm_seed` (no external RNG,
+    /// so the property test is itself fully reproducible).
+    fn permute(validators: &[Validator], perm_seed: u64) -> Vec<Validator> {
+        let mut v = validators.to_vec();
+        v.sort_by_key(|val| {
+            let mut h = blake3::Hasher::new();
+            h.update(&perm_seed.to_le_bytes());
+            h.update(val.pk.as_bytes());
+            let d = h.finalize();
+            let b = d.as_bytes();
+            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+        });
+        v
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        /// CORE DETERMINISM INVARIANT (Constitution §3): the elected leader must
+        /// be a pure function of the validator *set*, never its iteration order.
+        /// Two honest nodes that disagree on leader fork the chain — so we assert
+        /// that arbitrarily permuting the input never changes the result, across
+        /// many validator sets, slots, and beacons.
+        #[test]
+        fn elect_leader_is_permutation_invariant(
+            stakes in proptest::collection::vec(MIN_VALIDATOR_STAKE..50_000_000u64, 1..8usize),
+            reps in proptest::collection::vec(0..100u64, 1..8usize),
+            slot in 0u64..100_000,
+            perm_seed in proptest::prelude::any::<u64>(),
+        ) {
+            let validators: Vec<Validator> = stakes.iter().enumerate().map(|(i, &s)| Validator {
+                pk: format!("v{:02}", i),
+                stake: s,
+                reputation: *reps.get(i).unwrap_or(&0),
+            }).collect();
+
+            let beacon = leader_beacon("perm-prop", slot);
+            let baseline = elect_leader(&beacon, slot, &validators);
+            proptest::prop_assert!(baseline.is_some(), "all stakes >= MIN ⇒ a leader exists");
+
+            let shuffled = permute(&validators, perm_seed);
+            let after = elect_leader(&beacon, slot, &shuffled);
+            proptest::prop_assert_eq!(baseline, after, "leader must be permutation-invariant");
+        }
+    }
+
+    #[test]
+    fn elect_leader_handles_extreme_weights_without_overflow() {
+        // Adversarial arithmetic case: two whales whose weights together exceed
+        // u64::MAX. The previous `eligible.iter().map(weight).sum::<u64>()` would
+        // panic in debug / wrap in release; the u128 accumulation must elect one
+        // of them without panicking (Constitution §3: no silent wrap/overflow).
+        let vals = vec![
+            Validator { pk: "whale_a".into(), stake: u64::MAX / 2, reputation: 100 },
+            Validator { pk: "whale_b".into(), stake: u64::MAX / 2, reputation: 100 },
+        ];
+        let leader = elect_leader("extreme", 7, &vals);
+        assert!(
+            matches!(leader.as_deref(), Some("whale_a") | Some("whale_b")),
+            "extreme-weight election must elect an eligible whale, got {leader:?}"
+        );
+        // Fallback path must survive the same extreme weights.
+        let fb = elect_fallback_leader("extreme", 7, 1, &vals);
+        assert!(matches!(fb.as_deref(), Some("whale_a") | Some("whale_b")));
     }
 }

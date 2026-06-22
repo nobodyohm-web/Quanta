@@ -2,7 +2,9 @@
 // No secrets here. Identity & QUANTA balance live elsewhere (encrypted vault, ledger).
 
 export type Theme = "light" | "dark" | "auto";
-export type Locale = "fr" | "en";
+export type Locale = "en" | "fr" | "es" | "ru" | "zh" | "ja";
+
+export const LOCALES: Locale[] = ["en", "fr", "es", "ru", "zh", "ja"];
 
 export interface Prefs {
   theme: Theme;
@@ -15,10 +17,10 @@ const LEGACY_KEY = "titan.prefs.v1";
 const KEY = "quanta.prefs.v1";
 
 const DEFAULT_PREFS: Prefs = {
-  theme: "dark",
+  theme: "light",
   lockMinutes: 15,
   confirmThreshold: 100,
-  locale: "fr",
+  locale: "en",
 };
 
 export function getPrefs(): Prefs {
@@ -35,7 +37,7 @@ export function getPrefs(): Prefs {
       theme: (["light", "dark", "auto"] as const).includes(p.theme as Theme) ? (p.theme as Theme) : DEFAULT_PREFS.theme,
       lockMinutes: typeof p.lockMinutes === "number" ? p.lockMinutes : DEFAULT_PREFS.lockMinutes,
       confirmThreshold: typeof p.confirmThreshold === "number" ? p.confirmThreshold : DEFAULT_PREFS.confirmThreshold,
-      locale: (["fr", "en"] as const).includes(p.locale as Locale) ? (p.locale as Locale) : DEFAULT_PREFS.locale,
+      locale: LOCALES.includes(p.locale as Locale) ? (p.locale as Locale) : DEFAULT_PREFS.locale,
     };
   } catch { return { ...DEFAULT_PREFS }; }
 }

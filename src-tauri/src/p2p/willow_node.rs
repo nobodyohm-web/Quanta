@@ -8,50 +8,23 @@ use super::dispatcher::NonceTracker;
 use super::reputation::ReputationEngine;
 use super::ledger::Ledger;
 use super::consensus::ConsensusEngine;
-use super::merkle_dag::MerkleDAG;
 use super::gossip::GossipRouter;
 use super::gossip_priority::{priority_channel, PrioritySender, PriorityReceiver};
 use super::energy::EnergyOracle;
-use super::marketplace::Marketplace;
-use super::page_store::PageStore;
-// V3 social web engines
-use super::domains::DomainRegistry;
-use super::search::SearchIndex;
-use super::social::SocialState;
-use super::moderation::ModerationEngine;
-use super::forums::ForumsEngine;
-use super::trust_graph::FollowGraph;
+use super::username::UsernameRegistry;
 use iroh::protocol::Router;
 use iroh_gossip::{
     api::{GossipReceiver, GossipSender},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-
-// ─── NET-7: Incremental DAG sync state ──────────────────────────────────────
-
-/// Per-peer cache so we only re-ask for DAG nodes when the peer's head set
-/// genuinely changed (or the cache is stale). Avoids redundant WantNodes
-/// chatter every time we receive a periodic Hello.
-#[derive(Debug, Clone)]
-pub struct DagSyncState {
-    /// Hash set of the heads we last saw from this peer.
-    pub last_their_heads: HashSet<String>,
-    /// When we last asked this peer for missing nodes.
-    pub last_asked: Instant,
-}
-
-/// Window after which we re-issue a WantNodes even if heads haven't changed.
-/// 90s is comfortably > Hello interval (120s would skip an entire cycle), so
-/// we still get a periodic re-ask as a backstop against lost messages.
-pub const DAG_SYNC_REASK_WINDOW: Duration = Duration::from_secs(90);
 
 /// B3: Maximum time without a Hello before a peer is considered dead.
 /// Conservative 5-minute TTL. Solana uses 15s; we use 5m for our scale.
@@ -130,9 +103,8 @@ impl KnownPeer {
 pub struct WillowNode {
     pub reputation: Arc<RwLock<ReputationEngine>>,
     pub ledger: Arc<RwLock<Ledger>>,
-    // Phase 2B/3 — Consensus Merkle-CRDT branché
+    // Phase 2B/3 — Consensus CRDT branché
     pub consensus: Arc<RwLock<ConsensusEngine>>,
-    pub dag: Arc<RwLock<MerkleDAG>>,
     pub gossip: Arc<RwLock<GossipRouter>>,
     // Phase 2C — Oracle énergie + reports pays des peers (code_pays → nb_peers)
     pub energy_oracle: Arc<RwLock<EnergyOracle>>,
@@ -141,22 +113,8 @@ pub struct WillowNode {
     pub peer_info: Arc<RwLock<HashMap<String, PeerInfo>>>,
     /// CRIT-1: Per-peer nonce tracker for gossip-level anti-replay
     pub nonce_tracker: Arc<RwLock<NonceTracker>>,
-    /// Phase 3 — Marketplace de calcul distribué (tâches compute, BME burn 2%)
-    pub marketplace: Arc<RwLock<Marketplace>>,
-    /// P2P Web — pages publiées par les wallets
-    pub page_store: Arc<RwLock<PageStore>>,
-    /// V3 — Registre des noms de domaine `*.torus` (Harberger Tax)
-    pub domains: Arc<RwLock<DomainRegistry>>,
-    /// V3 — Index de recherche P2P (TF-IDF + signaux sociaux)
-    pub search: Arc<RwLock<SearchIndex>>,
-    /// V3 — État social (likes quadratiques, abonnements, tips, boost)
-    pub social: Arc<RwLock<SocialState>>,
-    /// V3 — Moteur de modération décentralisée (jury VRF, commit-reveal)
-    pub moderation: Arc<RwLock<ModerationEngine>>,
-    /// V3 — Forums (threads DAG + commentaires)
-    pub forums: Arc<RwLock<ForumsEngine>>,
-    /// V3 — Graphe de Follow (pour PageRank personnalisé Web of Trust)
-    pub follow_graph: Arc<RwLock<FollowGraph>>,
+    /// Identité — registre de pseudos uniques `@handle` (adresse de wallet lisible)
+    pub usernames: Arc<RwLock<UsernameRegistry>>,
     /// Phase 3 + NET-3 — channel sortant priorisé pour les enveloppes gossip.
     /// Quatre lanes (Critical/High/Medium/Low) drainées par ordre de priorité.
     /// Le drain est branché à Iroh dès qu'un endpoint est actif ; sinon il
@@ -175,15 +133,11 @@ pub struct WillowNode {
     puzzle_difficulty: u8,
     endpoint_active: Arc<RwLock<bool>>,
     /// CRIT-B: Count of remote blocks successfully validated & integrated.
-    /// Feeds the Shapley "validation" factor (20% weight).
+    /// Feeds the Shapley "validation" factor (25% weight).
     pub blocks_validated: Arc<AtomicU64>,
     /// NET-1: Registry of peers we've connected to (for auto-reconnection).
     /// Key = Iroh EndpointId string.
     pub known_peers: Arc<RwLock<HashMap<String, KnownPeer>>>,
-    /// NET-7: Per-peer DAG sync state — used by `handle_hello` to skip
-    /// redundant WantNodes broadcasts when a peer's heads haven't changed
-    /// since the last sync round. Key = sender public key hex.
-    pub dag_sync: Arc<RwLock<HashMap<String, DagSyncState>>>,
     /// NET-9: Outstanding Ping nonces — keyed by nonce, value is when we
     /// broadcast that Ping. The first Pong with a given nonce attributes
     /// the round-trip time to its sender. Bounded by `MAX_PENDING_PINGS`
@@ -221,20 +175,12 @@ impl WillowNode {
             reputation: Arc::new(RwLock::new(ReputationEngine::new())),
             ledger: Arc::new(RwLock::new(Ledger::new())),
             consensus: Arc::new(RwLock::new(ConsensusEngine::new())),
-            dag: Arc::new(RwLock::new(MerkleDAG::new())),
             gossip: Arc::new(RwLock::new(GossipRouter::new())),
             energy_oracle: Arc::new(RwLock::new(EnergyOracle::new())),
             peer_country_reports: Arc::new(RwLock::new(HashMap::new())),
             peer_info: Arc::new(RwLock::new(HashMap::new())),
             nonce_tracker: Arc::new(RwLock::new(NonceTracker::new())),
-            marketplace: Arc::new(RwLock::new(Marketplace::new())),
-            page_store: Arc::new(RwLock::new(PageStore::new())),
-            domains: Arc::new(RwLock::new(DomainRegistry::new())),
-            search: Arc::new(RwLock::new(SearchIndex::new())),
-            social: Arc::new(RwLock::new(SocialState::new())),
-            moderation: Arc::new(RwLock::new(ModerationEngine::new())),
-            forums: Arc::new(RwLock::new(ForumsEngine::new())),
-            follow_graph: Arc::new(RwLock::new(FollowGraph::new())),
+            usernames: Arc::new(RwLock::new(UsernameRegistry::new())),
             gossip_tx,
             gossip_rx: Arc::new(RwLock::new(Some(gossip_rx))),
             gossip_topic_sender: Arc::new(RwLock::new(None)),
@@ -246,7 +192,6 @@ impl WillowNode {
             endpoint_active: Arc::new(RwLock::new(false)),
             blocks_validated: Arc::new(AtomicU64::new(0)),
             known_peers: Arc::new(RwLock::new(HashMap::new())),
-            dag_sync: Arc::new(RwLock::new(HashMap::new())),
             pending_pings: Arc::new(RwLock::new(HashMap::new())),
             shutdown: CancellationToken::new(),
         }
@@ -498,9 +443,9 @@ impl WillowNode {
             connected_peers: connected_known,
             active_subspaces: 0,
             protocol: if is_online {
-                "Torus P2P v2 — Connected".into()
+                "v2 · Connecté".into()
             } else {
-                "Torus P2P v2 — Local Mode".into()
+                "v2 · Mode local".into()
             },
             puzzle_difficulty: self.puzzle_difficulty,
         }

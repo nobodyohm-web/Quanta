@@ -23,12 +23,23 @@
       "Read(*)",
       "Write(*)",
       "Edit(*)",
-      "MultiEdit(*)"
+      "MultiEdit(*)",
+      "Bash(npm ls *)",
+      "Bash(node -e \"console.log\\('global WebSocket:', typeof WebSocket\\)\")",
+      "Bash(pkill -f \"remote-debugging-port=9333\")",
+      "Bash(node /tmp/cdp_drive.mjs)",
+      "Read(//private/tmp/**)",
+      "Bash(sed -i '' 's/async function eval\\(/async function ev\\(/; s/await eval\\(/await ev\\(/g' cdp_drive.mjs)",
+      "Bash(pkill -f \"remote-debugging-port=9334\")",
+      "Bash(node /tmp/cdp_theme_check.mjs)",
+      "Bash(pkill -f \"remote-debugging-port=9335\")",
+      "Bash(node /tmp/cdp_builder_test.mjs)",
+      "Skill(update-config)",
+      "Bash(node *)"
     ],
-    "deny": [
-      "Bash(rm -rf *)",
-      "Bash(sudo *)"
-    ]
+    "deny": [],
+    "defaultMode": "bypassPermissions"
   },
-  "effortLevel": "xhigh"
+  "effortLevel": "xhigh",
+  "skipDangerousModePermissionPrompt": true
 }

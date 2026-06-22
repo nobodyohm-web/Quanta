@@ -4,8 +4,6 @@ pub mod willow_node;
 pub mod reputation;
 pub mod ledger_types;
 pub mod ledger;
-// Phase 2B : Consensus Merkle-CRDT
-pub mod merkle_dag;
 pub mod consensus;
 pub mod gossip;
 // NET-3 : Priority-aware outgoing gossip channel
@@ -16,8 +14,6 @@ pub mod energy;
 pub mod sybil;
 // Phase 3 : Shapley Value distribution
 pub mod shapley;
-// Phase 3 : Marketplace de calcul distribué
-pub mod marketplace;
 // Phase 4 : Dispatcher des messages gossip entrants
 pub mod dispatcher;
 // Mining loop (extracted from lib.rs)
@@ -26,17 +22,10 @@ pub mod mining_loop;
 pub mod state_persistence;
 // Gossip background tasks (extracted from lib.rs)
 pub mod gossip_tasks;
-// P2P Web publishing — pages associées aux wallets
-pub mod page_store;
-// V3 Social Web — modules de la nouvelle vision Torus
-pub mod domains;
-pub mod search;
-pub mod social;
-pub mod moderation;
-pub mod forums;
-pub mod trust_graph;
 // Phase 5 : Proof-of-Stake consensus with VRF leader election
 pub mod pos_consensus;
+// Identité — registre P2P de pseudos uniques @handle (adresse de wallet lisible)
+pub mod username;
 // Simulation réseau
 #[cfg(test)]
 mod simulation;

@@ -3,6 +3,9 @@
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { getPrefs, setPrefs, applyTheme, type Prefs } from "./prefs";
+  import TrustCharter from "./TrustCharter.svelte";
+  import LanguageSelect from "./LanguageSelect.svelte";
+  import { t } from "./i18n.svelte";
 
   let prefs = $state<Prefs>(getPrefs());
   let nodeTicket = $state<string>("");
@@ -22,12 +25,12 @@
   });
 
   async function refresh() {
-    try { nodeTicket = await invoke<string>("get_node_ticket"); } catch { nodeTicket = "Hors ligne"; }
+    try { nodeTicket = await invoke<string>("get_node_ticket"); } catch { nodeTicket = t('set.offline'); }
     try { economy = await invoke("get_economy_stats"); } catch {}
   }
 
   async function copyTicket() {
-    if (!nodeTicket || nodeTicket === "Hors ligne") return;
+    if (!nodeTicket || nodeTicket === t('set.offline')) return;
     await navigator.clipboard.writeText(nodeTicket);
     ticketCopied = true;
     setTimeout(() => ticketCopied = false, 1600);
@@ -40,7 +43,7 @@
     try {
       await invoke("connect_peer", { peerId: peerInput.trim() });
       connectStatus = "ok";
-      connectMsg = "Connecté !";
+      connectMsg = t('set.connected');
       peerInput = "";
       setTimeout(() => { connectStatus = "idle"; connectMsg = ""; }, 3000);
     } catch (e: any) {
@@ -137,11 +140,11 @@
   }
 
   async function rotateDevToken() {
-    if (!confirm("Régénérer le token ? L'ancien sera invalidé immédiatement.")) return;
+    if (!confirm(t('set.regenConfirm'))) return;
     devApiBusy = true;
     try {
-      const t = await invoke<string>("dev_api_rotate_token");
-      if (devApi) devApi = { ...devApi, token: t };
+      const tok = await invoke<string>("dev_api_rotate_token");
+      if (devApi) devApi = { ...devApi, token: tok };
     } finally {
       devApiBusy = false;
     }
@@ -149,21 +152,30 @@
 </script>
 
 <div class="page settings-page">
-  <h1 class="page-title">Réglages</h1>
-  <p class="page-sub">Préférences locales · stockées sur cet appareil uniquement</p>
+  <h1 class="page-title">{t('set.title')}</h1>
+  <p class="page-sub">{t('set.pageSub')}</p>
+
+  <!-- Langue -->
+  <section class="set-card">
+    <header class="set-head">
+      <h2 class="set-title">{t('settings.language')}</h2>
+      <p class="set-sub">{t('settings.languageSub')}</p>
+    </header>
+    <LanguageSelect />
+  </section>
 
   <!-- Apparence -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Apparence</h2>
-      <p class="set-sub">Adaptez l'interface à votre environnement.</p>
+      <h2 class="set-title">{t('set.appearance')}</h2>
+      <p class="set-sub">{t('set.appearanceSub')}</p>
     </header>
     <div class="set-row">
-      <span class="set-label">Thème</span>
+      <span class="set-label">{t('set.theme')}</span>
       <div class="seg">
-        <button class="seg-btn" class:active={prefs.theme === "light"} onclick={() => setTheme("light")}>Clair</button>
-        <button class="seg-btn" class:active={prefs.theme === "dark"} onclick={() => setTheme("dark")}>Sombre</button>
-        <button class="seg-btn" class:active={prefs.theme === "auto"} onclick={() => setTheme("auto")}>Auto</button>
+        <button class="seg-btn" class:active={prefs.theme === "light"} onclick={() => setTheme("light")}>{t('set.themeLight')}</button>
+        <button class="seg-btn" class:active={prefs.theme === "dark"} onclick={() => setTheme("dark")}>{t('set.themeDark')}</button>
+        <button class="seg-btn" class:active={prefs.theme === "auto"} onclick={() => setTheme("auto")}>{t('set.themeAuto')}</button>
       </div>
     </div>
   </section>
@@ -171,23 +183,23 @@
   <!-- Sécurité -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Sécurité</h2>
-      <p class="set-sub">Verrouillage automatique et seuils de transfert.</p>
+      <h2 class="set-title">{t('set.security')}</h2>
+      <p class="set-sub">{t('set.securitySub')}</p>
     </header>
 
     <div class="set-row">
-      <span class="set-label">Verrouillage auto</span>
+      <span class="set-label">{t('set.autoLock')}</span>
       <div class="seg">
         {#each [0, 5, 15, 30, 60] as m}
           <button class="seg-btn" class:active={prefs.lockMinutes === m} onclick={() => setLockMinutes(m)}>
-            {m === 0 ? "Jamais" : m + " min"}
+            {m === 0 ? t('set.autoLockNever') : m + " min"}
           </button>
         {/each}
       </div>
     </div>
 
     <div class="set-row">
-      <span class="set-label">Confirmation pour transferts > </span>
+      <span class="set-label">{t('set.confirmThreshold')}</span>
       <input class="input set-input" type="number" min="0" step="1"
         bind:value={prefs.confirmThreshold} placeholder="100" />
       <span class="set-suffix">QUANTA</span>
@@ -197,13 +209,13 @@
   <!-- Identité réseau -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Partage de nœud</h2>
-      <p class="set-sub">Donnez ce ticket à un pair pour qu'il vous trouve sur le réseau.</p>
+      <h2 class="set-title">{t('set.nodeShare')}</h2>
+      <p class="set-sub">{t('set.nodeShareSub')}</p>
     </header>
     <div class="ticket-box">
       <code class="ticket-val">{nodeTicket}</code>
-      <button class="btn btn-sm" onclick={copyTicket} disabled={!nodeTicket || nodeTicket === "Hors ligne"}>
-        {ticketCopied ? "Copié" : "Copier"}
+      <button class="btn btn-sm" onclick={copyTicket} disabled={!nodeTicket || nodeTicket === t('set.offline')}>
+        {ticketCopied ? t('set.copied') : t('set.copy')}
       </button>
     </div>
   </section>
@@ -211,13 +223,13 @@
   <!-- Connecter un pair -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Connecter un pair</h2>
-      <p class="set-sub">Collez le ticket d'un autre nœud pour le rejoindre sur le réseau QUANTA.</p>
+      <h2 class="set-title">{t('set.connectPeer')}</h2>
+      <p class="set-sub">{t('set.connectPeerSub')}</p>
     </header>
     <div class="connect-box">
       <input class="input connect-input" type="text" bind:value={peerInput}
-        placeholder="Coller le ticket du pair ici..." />
-      <button class="btn btn-accent" onclick={connectPeer} disabled={!peerInput.trim()}>Connecter</button>
+        placeholder={t('set.connectPlaceholder')} />
+      <button class="btn btn-accent" onclick={connectPeer} disabled={!peerInput.trim()}>{t('set.connectBtn')}</button>
     </div>
     {#if connectMsg}
       <div class="connect-msg" class:ok={connectStatus === "ok"} class:err={connectStatus === "error"}>
@@ -230,39 +242,39 @@
   {#if economy}
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Économie QUANTA — temps réel</h2>
-      <p class="set-sub">Émission fixe 100 QUANTA/h. Pas de halving. Distribution Shapley.</p>
+      <h2 class="set-title">{t('set.econTitle')}</h2>
+      <p class="set-sub">{t('set.econSub')}</p>
     </header>
     <div class="econ-grid">
       <div class="econ-cell">
-        <span class="ec-lab">Supply circulante</span>
+        <span class="ec-lab">{t('set.econCirculating')}</span>
         <span class="ec-val">{economy.circulating?.toFixed(2) ?? "0"}</span>
         <span class="ec-meta">QUANTA</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Brûlés</span>
+        <span class="ec-lab">{t('set.econBurned')}</span>
         <span class="ec-val">{economy.total_burned?.toFixed(2) ?? "0"}</span>
-        <span class="ec-meta">QUANTA — déflationniste</span>
+        <span class="ec-meta">{t('set.econBurnedMeta')}</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Émission</span>
-        <span class="ec-val">100</span>
-        <span class="ec-meta">QUANTA/h (fixe, pas de halving)</span>
+        <span class="ec-lab">{t('set.econHardCap')}</span>
+        <span class="ec-val">100M</span>
+        <span class="ec-meta">{t('set.econHardCapMeta')}</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Votre taux</span>
-        <span class="ec-val">{economy.mining_rate_per_hour?.toFixed(4) ?? "0"}</span>
-        <span class="ec-meta">QUANTA/h (Shapley × énergie)</span>
+        <span class="ec-lab">{t('set.econTotalMined')}</span>
+        <span class="ec-val">{economy.total_mined?.toFixed(2) ?? "0"}</span>
+        <span class="ec-meta">{t('set.econTotalMinedMeta')}</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Trust score</span>
-        <span class="ec-val">{economy.your_trust_score?.toFixed(0) ?? "0"}</span>
-        <span class="ec-meta">influence votre part Shapley</span>
+        <span class="ec-lab">{t('set.econEmission')}</span>
+        <span class="ec-val">{economy.emission_per_hour?.toFixed(2) ?? "0"}</span>
+        <span class="ec-meta">{t('set.econEmissionMeta')}</span>
       </div>
       <div class="econ-cell">
-        <span class="ec-lab">Plancher énergie</span>
-        <span class="ec-val">{economy.atn_floor_eur?.toFixed(4) ?? "0"}</span>
-        <span class="ec-meta">EUR par QUANTA</span>
+        <span class="ec-lab">{t('set.econProgress')}</span>
+        <span class="ec-val">{economy.max_supply ? (economy.total_mined / economy.max_supply * 100).toFixed(3) : "0"} %</span>
+        <span class="ec-meta">{t('set.econProgressMeta')}</span>
       </div>
     </div>
   </section>
@@ -271,28 +283,28 @@
   <!-- Mise à jour OTA -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">Mise à jour</h2>
-      <p class="set-sub">Vérifiez et installez les nouvelles versions automatiquement.</p>
+      <h2 class="set-title">{t('set.update')}</h2>
+      <p class="set-sub">{t('set.updateSub')}</p>
     </header>
     <div class="update-box">
       {#if updateStatus === "idle"}
-        <button class="btn btn-accent" onclick={checkForUpdate}>Vérifier les mises à jour</button>
+        <button class="btn btn-accent" onclick={checkForUpdate}>{t('set.updateCheck')}</button>
       {:else if updateStatus === "checking"}
-        <div class="update-info">⏳ Vérification en cours...</div>
+        <div class="update-info">⏳ {t('set.updateChecking')}</div>
       {:else if updateStatus === "downloading"}
-        <div class="update-info">📦 Téléchargement v{updateVersion}...</div>
+        <div class="update-info">📦 {t('set.updateDownloading')} v{updateVersion}...</div>
         <div class="ep-bar" style="margin-top:8px">
           <div class="ep-fill" style="width:{downloadProgress}%"></div>
         </div>
         <div class="ep-label">{downloadProgress}%</div>
       {:else if updateStatus === "ready"}
-        <div class="update-info update-success">✅ v{updateVersion} installée !</div>
-        <button class="btn btn-accent" onclick={doRelaunch}>Relancer l'application</button>
+        <div class="update-info update-success">✅ v{updateVersion} {t('set.updateInstalled')}</div>
+        <button class="btn btn-accent" onclick={doRelaunch}>{t('set.updateRelaunch')}</button>
       {:else if updateStatus === "latest"}
-        <div class="update-info update-success">✅ Vous avez la dernière version.</div>
+        <div class="update-info update-success">✅ {t('set.updateLatest')}</div>
       {:else if updateStatus === "error"}
         <div class="update-info update-err">❌ {updateError}</div>
-        <button class="btn btn-accent" onclick={checkForUpdate}>Réessayer</button>
+        <button class="btn btn-accent" onclick={checkForUpdate}>{t('set.updateRetry')}</button>
       {/if}
     </div>
   </section>
@@ -300,18 +312,18 @@
   <!-- API Développeur -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">API Développeur</h2>
-      <p class="set-sub">Permet de publier des sites depuis VSCode, un terminal, ou tout outil externe.</p>
+      <h2 class="set-title">{t('set.devApi')}</h2>
+      <p class="set-sub">{t('set.devApiSub')}</p>
     </header>
     {#if devApi}
       <div class="set-row">
-        <span class="set-label">Activer l'API HTTP locale</span>
+        <span class="set-label">{t('set.devApiEnable')}</span>
         <button
           class="seg-btn"
           class:active={devApi.enabled}
           onclick={toggleDevApi}
           disabled={devApiBusy}
-        >{devApi.enabled ? "Activée" : "Désactivée"}</button>
+        >{devApi.enabled ? t('set.devApiOn') : t('set.devApiOff')}</button>
       </div>
       {#if devApi.enabled}
         <div class="set-row">
@@ -322,29 +334,34 @@
           <span class="set-label">Token</span>
           <code class="dev-token">{devTokenVisible ? devApi.token : "•".repeat(64)}</code>
           <button class="seg-btn" onclick={() => (devTokenVisible = !devTokenVisible)}>
-            {devTokenVisible ? "Masquer" : "Afficher"}
+            {devTokenVisible ? t('set.devHide') : t('set.devShow')}
           </button>
-          <button class="seg-btn" onclick={copyDevToken}>{devTokenCopied ? "✓ Copié" : "Copier"}</button>
-          <button class="seg-btn" onclick={rotateDevToken} disabled={devApiBusy}>Régénérer</button>
+          <button class="seg-btn" onclick={copyDevToken}>{devTokenCopied ? "✓ " + t('set.copied') : t('set.copy')}</button>
+          <button class="seg-btn" onclick={rotateDevToken} disabled={devApiBusy}>{t('set.devRegen')}</button>
         </div>
         <div class="dev-hint">
-          Test rapide : <code>curl -H "Authorization: Bearer &lt;token&gt;" http://{devApi.endpoint}/api/status</code>
+          {t('set.devQuickTest')} <code>curl -H "Authorization: Bearer &lt;token&gt;" http://{devApi.endpoint}/api/status</code>
         </div>
       {/if}
     {:else}
-      <div class="dev-hint muted">Chargement…</div>
+      <div class="dev-hint muted">{t('set.loading')}</div>
     {/if}
+  </section>
+
+  <!-- Charte d'intégrité — confiance -->
+  <section style="margin-bottom:16px;">
+    <TrustCharter />
   </section>
 
   <!-- À propos -->
   <section class="set-card">
     <header class="set-head">
-      <h2 class="set-title">À propos</h2>
+      <h2 class="set-title">{t('set.about')}</h2>
     </header>
     <div class="about">
-      <span class="about-line"><b>QUANTA</b> · Torus Protocol v2</span>
+      <span class="about-line"><b>QUANTA</b> · {t('set.aboutTagline')}</span>
       <span class="about-line">Tauri 2.0 · Svelte 5 · libSQL · Iroh QUIC · Ed25519 · BLAKE3 · AES-256-GCM</span>
-      <span class="about-line muted">Vos données ne quittent jamais cet appareil sans votre signature.</span>
+      <span class="about-line muted">{t('set.aboutPrivacy')}</span>
     </div>
   </section>
 </div>
@@ -445,7 +462,7 @@
     background: var(--color-bg-2); overflow: hidden;
   }
   .ep-fill {
-    height: 100%; background: linear-gradient(90deg, var(--color-accent), #a78bfa);
+    height: 100%; background: var(--color-accent);
     border-radius: 3px;
     transition: width 0.4s ease;
   }

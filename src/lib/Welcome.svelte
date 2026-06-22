@@ -1,7 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import StrengthMeter from "./StrengthMeter.svelte";
-  import { t, setLocale, locale } from "./i18n.svelte";
+  import Aurora from "./Aurora.svelte";
+  import LanguageSelect from "./LanguageSelect.svelte";
+  import QuantumField from "./QuantumField.svelte";
+  import { t } from "./i18n.svelte";
 
   let {
     onCreated = (_pk: string) => {},
@@ -56,15 +59,24 @@
 </script>
 
 <div class="welcome">
-  <div class="w-content">
-    <span class="w-logo">QUANTA</span>
-    <div class="lang-switch">
-      <button type="button" class:active={locale() === "fr"} onclick={() => setLocale("fr")}>FR</button>
-      <button type="button" class:active={locale() === "en"} onclick={() => setLocale("en")}>EN</button>
+  <QuantumField density={1.1} />
+  <div class="card">
+    <!-- Aurora hero — l'artefact de marque (moment, jamais le chrome) -->
+    <div class="hero">
+      <Aurora radius={0}>
+        <div class="hero-inner">
+          <div class="brand">
+            <div class="coin-glass">Q</div>
+            <span class="wordmark">QUANTA</span>
+          </div>
+          <h1 class="headline">{@html t("welcome.headline")}</h1>
+          <p class="sub">{@html t("welcome.sub")}</p>
+        </div>
+      </Aurora>
     </div>
-    <h1 class="w-headline">{@html t("welcome.headline")}</h1>
-    <p class="w-sub">{@html t("welcome.sub")}</p>
 
+    <!-- Panneau identité (chrome clair & sobre) -->
+    <div class="panel">
     <div class="form">
       <div class="fg">
         <input
@@ -119,119 +131,119 @@
       </div>
     </div>
 
-    <p class="security-note">{@html t("welcome.securityNote")}</p>
+      <p class="security-note">{@html t("welcome.securityNote")}</p>
+      <div class="lang-row"><LanguageSelect /></div>
+    </div>
   </div>
 </div>
 
 <style>
   .welcome {
-    height: 100vh;
+    height: 100vh; position: relative;
     display: flex; align-items: center; justify-content: center;
-    background: var(--color-bg-0);
+    background: var(--color-bg-2);
     padding: 24px;
   }
-  .w-content {
-    text-align: center;
-    max-width: 440px;
-    width: 100%;
-    animation: fadeIn 0.15s ease-out;
-  }
-  .w-logo {
-    display: block;
-    font-size: 14px; font-weight: 700;
-    letter-spacing: 0.15em;
-    color: var(--color-text-2);
-    margin-bottom: 16px;
-  }
-  .lang-switch {
-    display: flex; justify-content: center; gap: 4px;
-    margin-bottom: 20px;
-  }
-  .lang-switch button {
-    background: none;
+  .card {
+    position: relative; z-index: 1;
+    width: 100%; max-width: 460px;
+    background: var(--color-bg-0);
     border: 1px solid var(--color-border);
-    color: var(--color-text-2);
-    font-size: 11px; font-weight: 600;
-    padding: 3px 10px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: all 0.15s ease;
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    animation: welcomeRise 0.4s cubic-bezier(0.22, 0.61, 0.36, 1);
   }
-  .lang-switch button.active {
-    color: var(--color-text-0);
-    border-color: var(--color-accent);
-  }
-  .lang-switch button:hover:not(.active) { color: var(--color-text-1); }
-  .w-headline {
-    font-size: 28px; font-weight: 700;
-    letter-spacing: -0.03em;
-    line-height: 1.25;
-    margin-bottom: 12px;
-  }
-  .w-sub {
-    font-size: 14px;
-    color: var(--color-text-1);
-    line-height: 1.6;
-    margin-bottom: 32px;
+  @keyframes welcomeRise {
+    from { opacity: 0; transform: translateY(12px) scale(0.99); }
+    to   { opacity: 1; transform: none; }
   }
 
+  /* ── Aurora hero (moment de marque) ── */
+  .hero { position: relative; }
+  .hero-inner { padding: 30px 32px 34px; }
+  .lang-row { display: flex; justify-content: center; margin-top: 16px; }
+
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+  .coin-glass {
+    width: 44px; height: 44px; border-radius: 13px;
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.4);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 23px; font-weight: 800; color: #fff;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  }
+  .wordmark { font-size: 22px; font-weight: 800; letter-spacing: 0.14em; color: #fff; }
+  .headline {
+    font-size: 27px; font-weight: 800;
+    letter-spacing: -0.02em; line-height: 1.1;
+    color: #fff; margin-bottom: 12px;
+  }
+  .sub {
+    font-size: 14.5px; line-height: 1.55;
+    color: rgba(255,255,255,0.92);
+    max-width: 380px;
+  }
+
+  /* ── Panneau identité (chrome clair) ── */
+  .panel { padding: 26px 32px 28px; }
   .form {
     display: flex; flex-direction: column; gap: 12px;
-    margin-bottom: 24px;
-    text-align: left;
+    margin-bottom: 18px; text-align: left;
   }
-  .fg { display: flex; flex-direction: column; gap: 4px; }
+  .fg { display: flex; flex-direction: column; gap: 6px; }
   .big-input {
-    padding: 14px 16px;
+    padding: 13px 15px;
     background: var(--color-bg-1);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius);
     color: var(--color-text-0);
     font-size: 15px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  .big-input:focus { outline: 1px solid var(--color-accent); }
+  .big-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-accent-dim);
+  }
 
   .err {
     font-size: 13px; color: var(--color-red);
     padding: 8px 12px;
-    background: rgba(255, 68, 68, 0.06);
+    background: rgba(229, 72, 77, 0.07);
     border-radius: var(--radius-sm);
   }
 
   .primary {
     padding: 14px 24px;
     background: var(--color-accent);
-    color: #000;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 16px; font-weight: 600;
+    color: #fff; border: none;
+    border-radius: var(--radius);
+    font-size: 15px; font-weight: 700;
     cursor: pointer;
-    transition: opacity 0.15s ease;
+    box-shadow: 0 6px 18px rgba(11, 165, 160, 0.26);
+    transition: transform 0.12s ease, box-shadow 0.15s ease, background 0.15s ease;
   }
-  .primary:disabled { opacity: 0.4; cursor: default; }
-  .primary:hover:not(:disabled) { opacity: 0.9; }
+  .primary:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+  .primary:not(:disabled):hover { background: var(--color-accent-hover); box-shadow: 0 8px 22px rgba(11, 165, 160, 0.32); }
+  .primary:not(:disabled):active { transform: translateY(1px); }
 
   .links {
     display: flex; flex-direction: column; gap: 6px;
-    margin-top: 8px;
-    text-align: center;
+    margin-top: 10px; text-align: center;
   }
   .ghost-link {
     background: none; border: none;
     color: var(--color-text-2);
-    font-size: 12px;
-    cursor: pointer;
-    padding: 4px;
-    text-decoration: underline;
-    text-decoration-color: transparent;
-    transition: text-decoration-color 0.15s ease;
+    font-size: 12px; cursor: pointer; padding: 4px;
+    text-decoration: underline; text-decoration-color: transparent;
+    transition: text-decoration-color 0.15s ease, color 0.15s ease;
   }
-  .ghost-link:hover { text-decoration-color: var(--color-text-2); }
+  .ghost-link:hover { color: var(--color-text-1); text-decoration-color: var(--color-text-3); }
 
   .security-note {
-    font-size: 11px;
-    color: var(--color-text-2);
-    line-height: 1.6;
-    margin: 0;
+    font-size: 11px; color: var(--color-text-3);
+    line-height: 1.6; text-align: center; margin: 14px 0 0;
   }
 </style>

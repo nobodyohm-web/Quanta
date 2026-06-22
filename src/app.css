@@ -1,41 +1,49 @@
-@import "tailwindcss";
-
 /* ═══════════════════════════════════════════════════════════════
-   QUANTA Design System v9 — Quantum Cyan #00E5CC
-   Converted from Claude Design prototype.
+   QUANTA Design System v11 — « Aurora » (direction Arc-quality)
+   UI claire & sobre (blanc), accent TEAL joyau distinctif. La couleur
+   forte (gradient Aurora) vit dans les MOMENTS (accueil/identité/succès),
+   jamais dans le chrome. Profondeur : bordures fines + ombres douces.
    ═══════════════════════════════════════════════════════════════ */
 
-@theme {
-  --cyan: #00E5CC;
-  --cyan-dim: rgba(0,229,204,0.12);
-  --cyan-mid: rgba(0,229,204,0.25);
+/* Design tokens — variables CSS pures (plus de dépendance Tailwind `@theme`). */
+:root {
+  /* Accent — teal joyau QUANTA (distinctif, hors du bleu fintech générique).
+     Le nom --cyan est conservé pour compat : il pilote l'accent teal partout. */
+  --cyan: #0BA5A0;
+  --cyan-dim: rgba(11,165,160,0.10);
+  --cyan-mid: rgba(11,165,160,0.22);
 
-  --color-bg-0: #050507;
-  --color-bg-1: #0a0a0d;
-  --color-bg-2: #111116;
-  --color-bg-3: #18181f;
-  --color-bg-4: #222229;
-  --color-bg-hover: #1f1f25;
-  --color-bg-elevated: #141418;
+  /* Surfaces — blanc + gris Apple très clairs */
+  --color-bg-0: #ffffff;
+  /* Surfaces « papier crayon » — blancs cassés chauds, très subtils (style Arc) */
+  --color-bg-1: #fbfaf8;
+  --color-bg-2: #f4f2ee;
+  --color-bg-3: #ece9e3;
+  --color-bg-4: #e1ddd5;
+  --color-bg-hover: #f4f2ee;
+  --color-bg-elevated: #ffffff;
 
-  --color-border: rgba(255,255,255,0.06);
-  --color-border-hover: rgba(255,255,255,0.12);
-  --color-border-focus: #00E5CC;
+  /* Bordures légèrement chaudes (encre diluée) */
+  --color-border: rgba(46,38,28,0.09);
+  --color-border-hover: rgba(46,38,28,0.17);
+  --color-border-focus: #0BA5A0;
 
-  --color-text-0: #e8e8f0;
-  --color-text-1: #a0a0b0;
-  --color-text-2: #8888a0;
-  --color-text-3: #444458;
+  /* Texte — quasi-noir Apple, dégradé de gris lisibles sur blanc */
+  --color-text-0: #1d1d1f;
+  --color-text-1: #424245;
+  --color-text-2: #6e6e73;
+  --color-text-3: #a1a1a6;
 
-  --color-accent: #00E5CC;
-  --color-accent-hover: #00f5db;
-  --color-accent-dim: rgba(0,229,204,0.12);
+  --color-accent: #0BA5A0;
+  --color-accent-hover: #087F8C;
+  --color-accent-dim: rgba(11,165,160,0.10);
+  --color-accent-bright: #14C8B8;
 
-  --color-green: #22c55e;
-  --color-red: #f43f5e;
-  --color-amber: #f97316;
-  --color-blue: #3B82F6;
-  --color-purple: #8b5cf6;
+  --color-green: #16a34a;
+  --color-red: #e5484d;
+  --color-amber: #e8810c;
+  --color-blue: #0BA5A0;
+  --color-purple: #7c3aed;
 
   --navbar-h: 56px;
   --topbar-h: 48px;
@@ -47,12 +55,25 @@
   --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
   --font-display: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
 
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
-  --shadow: 0 4px 12px rgba(0,0,0,0.4);
-  --shadow-lg: 0 12px 32px rgba(0,0,0,0.5);
+  /* Ombres chaudes & douces — profondeur Arc (lumière rasante, pas de noir dur) */
+  --shadow-sm: 0 1px 2px rgba(48,40,30,0.05);
+  --shadow: 0 4px 18px rgba(48,40,30,0.06), 0 1px 3px rgba(48,40,30,0.04);
+  --shadow-lg: 0 22px 50px rgba(48,40,30,0.11), 0 4px 14px rgba(48,40,30,0.05);
 
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+}
+
+/* ── Compat: --quanta-* aliases (Wallet.svelte référence ces noms ; ils
+   n'étaient définis nulle part → styles cassés. On les mappe au thème clair). ── */
+:root {
+  --quanta-accent: var(--color-accent);
+  --quanta-accent-dim: var(--color-accent-dim);
+  --quanta-bg-elevated: var(--color-bg-elevated);
+  --quanta-border: var(--color-border);
+  --quanta-border-h: var(--color-border-hover);
+  --quanta-negative: var(--color-red);
+  --quanta-positive: var(--color-green);
 }
 
 /* ── Reset ── */
@@ -66,11 +87,24 @@ html, body {
   font-size: 14px; line-height: 1.5;
 }
 
+/* Grain « papier » global — texture crayon très subtile, par-dessus tout,
+   non interactive. Donne du grain aux surfaces sans nuire à la lisibilité. */
+body::after {
+  content: "";
+  position: fixed; inset: 0; z-index: 60;
+  pointer-events: none; opacity: 0.04; mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@media (prefers-reduced-motion: reduce) { body::after { opacity: 0.03; } }
+
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-bg-4); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.28); }
 
-.mono { font-family: var(--font-mono); font-feature-settings: 'tnum'; }
+.mono { font-family: var(--font-mono); font-feature-settings: 'tnum', 'zero'; font-variant-numeric: tabular-nums lining-nums; }
+/* Montants/soldes : chiffres tabulaires + zéro barré, sans saut visuel à la mise à jour. */
+.stat-val, .num { font-variant-numeric: tabular-nums lining-nums; font-feature-settings: 'tnum', 'zero'; }
 .cyan { color: var(--cyan); }
 .green { color: var(--color-green); }
 .red { color: var(--color-red); }
@@ -144,8 +178,8 @@ html, body {
   background: var(--color-bg-0); display: flex; flex-direction: column;
 }
 .page {
-  flex: 1; padding: 32px 36px; max-width: 960px; width: 100%;
-  animation: fadein 0.2s ease;
+  flex: 1; padding: 32px 36px; max-width: 1040px; width: 100%;
+  margin: 0 auto;   /* centre le contenu sur les grands écrans / plein écran */
 }
 @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .page-header {
@@ -158,7 +192,7 @@ html, body {
 /* ── Cards ── */
 .card {
   background: var(--color-bg-1); border: 1px solid var(--color-border);
-  border-radius: 12px; padding: 20px 24px;
+  border-radius: 12px; padding: 20px 24px; box-shadow: var(--shadow-sm);
 }
 .card-title {
   font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
@@ -184,8 +218,8 @@ html, body {
   font-size: 13px; font-weight: 600; cursor: pointer; border: none;
   transition: all 0.15s ease; font-family: inherit;
 }
-.btn-primary { background: var(--cyan); color: #000; }
-.btn-primary:hover { background: #00f5db; }
+.btn-primary { background: var(--color-accent); color: #fff; }
+.btn-primary:hover { background: var(--color-accent-hover); }
 .btn-ghost { background: var(--color-bg-3); color: var(--color-text-0); border: 1px solid var(--color-border-hover); }
 .btn-ghost:hover { background: var(--color-bg-4); }
 .btn-outline { background: transparent; color: var(--cyan); border: 1px solid var(--cyan-mid); }
@@ -244,13 +278,14 @@ html, body {
 /* ── Modal ── */
 .modal-overlay {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+  background: rgba(0,0,0,0.32); backdrop-filter: blur(4px);
   z-index: 100; display: flex; align-items: center; justify-content: center;
   animation: fadein 0.15s ease;
 }
 .modal {
-  background: var(--color-bg-2); border: 1px solid var(--color-border-hover);
+  background: #ffffff; border: 1px solid var(--color-border);
   border-radius: 16px; padding: 28px; width: 420px; max-width: 90vw;
+  box-shadow: var(--shadow-lg);
 }
 .modal-title { font-size: 17px; font-weight: 700; margin-bottom: 20px; }
 .form-label { font-size: 12px; color: var(--color-text-2); margin-bottom: 6px; font-weight: 500; }

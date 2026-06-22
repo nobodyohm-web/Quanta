@@ -1,6 +1,12 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import Blockchain3D from "./Blockchain3D.svelte";
+  import Network3D from "./Network3D.svelte";
+  import ChainHistory from "./ChainHistory.svelte";
+  import { t } from "./i18n.svelte";
+
+  let chainView = $state<"history" | "2d" | "3d">("history");
 
   let peerCount = $state(0);
   let myPeerId = $state("");
@@ -10,6 +16,41 @@
   let totalBurned = $state(0);
   let supply = $state(0);
   let copied = $state(false);
+
+  // ─── La Forge — blockchain en direct + rareté ──────────────────
+  let chainHeight = $state(0);
+  let supplyQta = $state(0);
+  let mintedQta = $state(0);
+  let burnedQta = $state(0);
+  let maxSupply = $state(100_000_000);
+  let pctToCap = $state(0);
+  let emissionNextTick = $state(0);   // QUANTA émis au prochain tick (minute)
+  let emissionPerHour = $derived(emissionNextTick * 60);
+  let pendingTx = $state(0);
+  let holders = $state(0);
+  let myBalance = $state(0);
+  let blocks = $state<any[]>([]);
+  let newBlockFlash = $state(0);     // ms epoch du dernier bloc reçu → animation
+  let mintedDisplay = $state(0);     // compteur animé, monte en continu
+  const myShare = $derived(supplyQta > 0 ? (myBalance / supplyQta) * 100 : 0);
+
+  async function loadChain() {
+    try {
+      const o = await invoke<any>("get_chain_overview", { limit: 14 });
+      const prev = chainHeight;
+      chainHeight = o.height ?? 0;
+      supplyQta = o.total_supply_qta ?? 0;
+      mintedQta = o.total_mined_qta ?? 0;
+      burnedQta = o.total_burned_qta ?? 0;
+      maxSupply = o.max_supply_qta ?? 100_000_000;
+      pctToCap = o.pct_to_cap ?? 0;
+      emissionNextTick = o.emission_next_tick_qta ?? 0;
+      pendingTx = o.pending ?? 0;
+      holders = o.holders ?? 0;
+      blocks = o.blocks ?? [];
+      if (prev && chainHeight > prev) newBlockFlash = Date.now();
+    } catch {}
+  }
   let connectInput = $state("");
   let connectErr = $state("");
   let connectSuccess = $state(false);
@@ -50,13 +91,6 @@
   let syncProgress = $state<SyncProgress | null>(null);
   let syncProgressAt = $state(0); // ms epoch — used to fade banner
 
-  interface CanvasNode {
-    x: number; y: number; vx: number; vy: number;
-    r: number; isMe: boolean; label: string;
-  }
-
-  let nodes: CanvasNode[] = [];
-  let pulses: { fx: number; fy: number; tx: number; ty: number; t: number }[] = [];
 
   async function refresh() {
     try {
@@ -75,6 +109,10 @@
     // NET-9/10: pull per-peer metrics every refresh tick
     try {
       peerMetrics = await invoke<PeerMetric[]>("get_peer_metrics");
+    } catch {}
+    try {
+      const r = await invoke<any>("get_my_reputation");
+      myBalance = r?.atn_balance ?? 0;
     } catch {}
   }
 
@@ -100,15 +138,37 @@
 
   $effect(() => {
     refresh();
+    loadChain();
     loadDisplayName();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
+    const iv = setInterval(refresh, 5000);
+    const tc = setInterval(loadChain, 1500);
+    return () => { clearInterval(iv); clearInterval(tc); };
+  });
+
+  // Compteur « QUANTA forgés » qui monte en continu : dérive au rythme
+  // d'émission RÉEL du moment (emissionPerHour, décroissant, lu de la chaîne)
+  // et rattrape la vraie valeur à chaque sondage.
+  // Lit mintedQta/emissionPerHour uniquement dans le callback rAF (async) →
+  // pas de dépendance réactive, l'effet ne tourne qu'une fois.
+  $effect(() => {
+    let raf = 0;
+    let last = performance.now();
+    let v = 0;
+    const tick = (now: number) => {
+      const dt = Math.min(0.1, (now - last) / 1000); last = now;
+      v += (emissionPerHour / 3600) * dt;                 // dérive live
+      if (mintedQta > v) v += (mintedQta - v) * Math.min(1, dt * 2.5); // rattrapage doux
+      mintedDisplay = v;
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
   });
 
   // NET-16: subscribe to chain-sync progress events from the backend.
   $effect(() => {
     let unlisten: UnlistenFn | null = null;
-    listen<SyncProgress>("torus://chain-sync-progress", (e) => {
+    listen<SyncProgress>("quanta://chain-sync-progress", (e) => {
       syncProgress = e.payload;
       syncProgressAt = Date.now();
     }).then((fn) => { unlisten = fn; }).catch(() => {});
@@ -128,104 +188,110 @@
     return Math.max(0, Math.min(100, pct));
   });
 
-  // Canvas animation — uses REAL peer count, no fake data
+  // Canvas animation — graphe réseau vivant (compte de peers RÉEL, zéro fake).
+  // Les peers orbitent en ellipse ; les connexions « coulent » (pointillés
+  // animés) ; à chaque nouveau bloc, une rafale d'impulsions part de mon nœud
+  // vers tous les peers (propagation du bloc). Lit newBlockFlash dans le rAF
+  // (async) → pas de dépendance réactive, l'effet ne se reconstruit que sur
+  // changement de peerCount.
   $effect(() => {
     if (!networkCanvas) return;
     const W = networkCanvas.width, H = networkCanvas.height;
     const cx = W / 2, cy = H / 2;
+    const count = peerCount;
 
-    const myNode: CanvasNode = { x: cx, y: cy, vx: 0, vy: 0, r: 18, isMe: true, label: 'MOI' };
-    const count = peerCount; // REAL count only
-    const peerNodes: CanvasNode[] = Array.from({ length: count }, (_, i) => {
-      const angle = (i / Math.max(count, 1)) * Math.PI * 2;
-      const dist = 80 + Math.random() * 100;
-      return {
-        x: cx + Math.cos(angle) * dist,
-        y: cy + Math.sin(angle) * dist,
-        vx: (Math.random() - 0.5) * 0.3,
-        vy: (Math.random() - 0.5) * 0.3,
-        r: 8 + Math.random() * 6,
-        isMe: false,
-        label: `P${i + 1}`,
-      };
-    });
-    nodes = [myNode, ...peerNodes];
+    const peers = Array.from({ length: count }, (_, i) => ({
+      angle: (i / Math.max(count, 1)) * Math.PI * 2 + Math.random() * 0.4,
+      radius: 92 + (i % 3) * 28,
+      speed: 0.0015 + Math.random() * 0.0011,
+      r: 7 + Math.random() * 4,
+      phase: Math.random() * Math.PI * 2,
+    }));
+    let localPulses: { fx: number; fy: number; tx: number; ty: number; t: number; big: boolean }[] = [];
+    let lastFlash = newBlockFlash;
 
     const draw = () => {
       const ctx = networkCanvas.getContext('2d');
       if (!ctx) return;
+      const now = Date.now();
       ctx.clearRect(0, 0, W, H);
 
-      // Move peers gently
-      nodes.forEach(n => {
-        if (n.isMe) return;
-        n.x += n.vx; n.y += n.vy;
-        const dx = n.x - cx, dy = n.y - cy;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > 180 || dist < 60) { n.vx *= -0.5; n.vy *= -0.5; }
-        if (n.x < 10 || n.x > W - 10) n.vx *= -1;
-        if (n.y < 10 || n.y > H - 10) n.vy *= -1;
-      });
-
-      // Random pulse (only if peers exist)
-      if (Math.random() < 0.02 && peerNodes.length > 0) {
-        const target = peerNodes[Math.floor(Math.random() * peerNodes.length)];
-        pulses.push({ fx: myNode.x, fy: myNode.y, tx: target.x, ty: target.y, t: 0 });
+      // Anneaux de guidage (profondeur)
+      for (const rr of [72, 118, 162]) {
+        ctx.beginPath(); ctx.ellipse(cx, cy, rr, rr * 0.78, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(0,0,0,0.035)'; ctx.lineWidth = 1; ctx.stroke();
       }
 
-      // Draw connections
-      peerNodes.forEach(n => {
-        const dx = n.x - myNode.x, dy = n.y - myNode.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const alpha = Math.max(0, 1 - dist / 220) * 0.3;
+      // Positions courantes (orbite elliptique = léger effet de tilt 3D)
+      peers.forEach(p => { p.angle += p.speed; });
+      const pos = peers.map(p => ({
+        x: cx + Math.cos(p.angle) * p.radius,
+        y: cy + Math.sin(p.angle) * p.radius * 0.78,
+        r: p.r, phase: p.phase,
+      }));
+
+      // Nouveau bloc → rafale de propagation vers tous les peers
+      if (newBlockFlash !== lastFlash) {
+        lastFlash = newBlockFlash;
+        pos.forEach(n => localPulses.push({ fx: cx, fy: cy, tx: n.x, ty: n.y, t: 0, big: true }));
+      }
+      // Trafic ambiant
+      if (Math.random() < 0.02 && pos.length) {
+        const n = pos[Math.floor(Math.random() * pos.length)];
+        localPulses.push({ fx: cx, fy: cy, tx: n.x, ty: n.y, t: 0, big: false });
+      }
+
+      // Connexions « qui coulent »
+      pos.forEach(n => {
+        const dist = Math.hypot(n.x - cx, n.y - cy);
+        const a = Math.max(0, 1 - dist / 230) * 0.4;
         ctx.beginPath();
-        ctx.moveTo(myNode.x, myNode.y);
-        ctx.lineTo(n.x, n.y);
-        ctx.strokeStyle = `rgba(0,229,204,${alpha})`;
-        ctx.lineWidth = 0.5;
+        ctx.setLineDash([3, 6]);
+        ctx.lineDashOffset = -((now / 55) % 9);
+        ctx.moveTo(cx, cy); ctx.lineTo(n.x, n.y);
+        ctx.strokeStyle = `rgba(11,165,160,${a})`;
+        ctx.lineWidth = 1;
         ctx.stroke();
       });
+      ctx.setLineDash([]);
 
-      // Pulses
-      pulses = pulses.filter(p => p.t < 1);
-      pulses.forEach(p => {
-        p.t += 0.015;
-        const px = p.fx + (p.tx - p.fx) * p.t;
-        const py = p.fy + (p.ty - p.fy) * p.t;
-        const a = 1 - p.t;
-        ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(0,229,204,${a})`; ctx.fill();
+      // Impulsions
+      localPulses = localPulses.filter(p => p.t < 1);
+      localPulses.forEach(p => {
+        p.t += p.big ? 0.03 : 0.02;
+        const e = p.t;
+        const px = p.fx + (p.tx - p.fx) * e, py = p.fy + (p.ty - p.fy) * e;
+        ctx.beginPath(); ctx.arc(px, py, (p.big ? 4 : 2.5) * (1 - e * 0.25), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(11,165,160,${(1 - e) * (p.big ? 0.9 : 0.55)})`; ctx.fill();
       });
 
-      // Peer nodes
-      peerNodes.forEach(n => {
-        ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1; ctx.stroke();
-        ctx.font = '9px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(n.label, n.x, n.y);
+      // Peers — anneaux propres, halo doux, respiration
+      pos.forEach(n => {
+        const breathe = 1 + Math.sin(now / 700 + n.phase) * 0.08;
+        const r = n.r * breathe;
+        ctx.beginPath(); ctx.arc(n.x, n.y, r + 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(11,165,160,0.06)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff'; ctx.fill();
+        ctx.strokeStyle = 'rgba(11,165,160,0.55)'; ctx.lineWidth = 1.6; ctx.stroke();
       });
 
-      // My node
-      const t = Date.now() / 1000;
-      const glow = 0.15 + Math.sin(t * 2) * 0.05;
-      ctx.beginPath(); ctx.arc(myNode.x, myNode.y, myNode.r + 8, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(0,229,204,${glow})`; ctx.fill();
-      ctx.beginPath(); ctx.arc(myNode.x, myNode.y, myNode.r, 0, Math.PI * 2);
-      ctx.fillStyle = '#00E5CC'; ctx.fill();
-      ctx.font = 'bold 8px monospace'; ctx.fillStyle = '#000';
+      // Mon nœud — anneau qui respire + cœur plein
+      const mb = 1 + Math.sin(now / 600) * 0.06;
+      const mr = 18 * mb;
+      ctx.beginPath(); ctx.arc(cx, cy, mr + 10, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(11,165,160,${0.10 + Math.sin(now / 600) * 0.03})`; ctx.fill();
+      ctx.beginPath(); ctx.arc(cx, cy, mr, 0, Math.PI * 2);
+      ctx.fillStyle = '#0BA5A0'; ctx.fill();
+      ctx.font = 'bold 9px Inter, sans-serif'; ctx.fillStyle = '#fff';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('MOI', myNode.x, myNode.y);
+      ctx.fillText(t('net.canvasMe'), cx, cy);
 
-      // Empty state text
-      if (peerNodes.length === 0) {
-        ctx.font = '13px Inter, sans-serif';
-        ctx.fillStyle = 'rgba(255,255,255,0.2)';
-        ctx.textAlign = 'center';
-        ctx.fillText('Aucun peer connecté', cx, cy + 50);
-        ctx.font = '11px Inter, sans-serif';
-        ctx.fillText('Partagez votre Peer ID pour connecter un ami', cx, cy + 70);
+      if (pos.length === 0) {
+        ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.font = '13px Inter, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(t('net.canvasNoPeers'), cx, cy + 56);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.font = '11px Inter, sans-serif';
+        ctx.fillText(t('net.canvasShareHint'), cx, cy + 76);
       }
 
       animFrame = requestAnimationFrame(draw);
@@ -243,7 +309,7 @@
   async function connectPeer() {
     connectErr = "";
     connectSuccess = false;
-    if (!connectInput.trim()) { connectErr = "Peer ID requis"; return; }
+    if (!connectInput.trim()) { connectErr = t('net.peerIdRequired'); return; }
     connecting = true;
     try {
       await invoke("connect_peer", { peerId: connectInput.trim() });
@@ -262,48 +328,127 @@
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return n.toFixed(2);
   }
+
+  // Grand compteur live : séparateurs de milliers + 3 décimales qui défilent.
+  function fmtForge(n: number) {
+    return n.toLocaleString('fr-FR', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+  }
 </script>
 
 <div class="page">
   <div class="page-header">
     <div>
-      <div class="page-title">Réseau</div>
-      <div class="page-sub">Réseau P2P QUANTA — {protocol || 'Initialisation…'}</div>
+      <div class="page-title">{t('network.title')}</div>
+      <div class="page-sub">{t('network.sub')} — {protocol || t('loading')}</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <div class="status-dot" class:online={isOnline}></div>
-      <span style="font-size:13px;color:var(--color-text-2);">{peerCount} peer{peerCount !== 1 ? 's' : ''} connecté{peerCount !== 1 ? 's' : ''}</span>
+      <span style="font-size:13px;color:var(--color-text-2);">{peerCount} {peerCount !== 1 ? t('wallet.peers') : t('wallet.peer')} {t('network.connectedAdj')}</span>
     </div>
   </div>
 
-  <!-- Network visualization -->
-  <div class="network-canvas-wrap" style="height:300px;margin-bottom:12px;">
-    <canvas bind:this={networkCanvas} width={860} height={300} style="width:100%;height:300px;"></canvas>
+  <!-- Globe réseau 3D — héros : le réseau P2P souverain à l'échelle mondiale -->
+  <div class="globe-hero">
+    <div class="globe-copy">
+      <div class="globe-eyebrow">{t('globe.eyebrow')}</div>
+      <div class="globe-h">{@html t('globe.h')}</div>
+      <p class="globe-p">{t('globe.p')}</p>
+      <div class="globe-stats">
+        <div class="globe-stat"><span class="gs-v mono">{peerCount}</span><span class="gs-k">{t('globe.peers')}</span></div>
+        <div class="globe-stat"><span class="gs-v mono">{chainHeight}</span><span class="gs-k">{t('globe.blocks')}</span></div>
+      </div>
+    </div>
+    <div class="globe-canvas">
+      <Network3D size={420} caption={false} />
+    </div>
   </div>
 
-  <!-- Network stats -->
-  <div class="grid-3" style="margin-bottom:12px;">
-    <div class="card">
-      <div class="stat-label">Total miné</div>
-      <div class="stat-val sm mono">{fmtNum(totalMined)}<span style="font-size:13px;color:var(--color-text-3);margin-left:4px;">QNT</span></div>
+  <!-- La Forge — QUANTA forgés en direct (rareté + possession) -->
+  <div class="forge-hero" class:forge-flash={Date.now() - newBlockFlash < 1200}>
+    <div class="forge-main">
+      <div class="forge-label">{t('net.forgeLabel')} · {t('net.forgeMaxOf')} {fmtNum(maxSupply)} {t('net.forgeMaximum')}</div>
+      <div class="forge-count mono">{fmtForge(mintedDisplay)}</div>
+      <div class="forge-sub">
+        <span class="forge-live-dot"></span>
+        {t('net.forgeLive')} · {emissionPerHour < 1 ? emissionPerHour.toFixed(2) : emissionPerHour.toFixed(0)} {t('net.forgePerHour')} · {t('net.forgeBlock')} #{chainHeight}
+      </div>
+      <!-- Rareté : progression vers le plafond DUR (100M) -->
+      <div class="cap-wrap">
+        <div class="cap-bar"><div class="cap-fill" style="width:{Math.min(100, Math.max(pctToCap, pctToCap > 0 ? 0.5 : 0))}%;"></div></div>
+        <div class="cap-meta">
+          <span><b>{pctToCap < 0.01 && pctToCap > 0 ? '<0,01' : pctToCap.toFixed(2)}%</b> {t('net.capEmitted')}</span>
+          <span>{@html t('net.capSupply')}</span>
+        </div>
+      </div>
     </div>
-    <div class="card">
-      <div class="stat-label">Total brûlé</div>
-      <div class="stat-val sm mono" style="color:var(--color-amber);">{fmtNum(totalBurned)}<span style="font-size:13px;color:var(--color-text-3);margin-left:4px;">QNT</span></div>
+    <div class="forge-side">
+      <div class="forge-side-row">
+        <span class="forge-side-k">{t('net.youOwn')}</span>
+        <span class="forge-side-v mono">{fmtForge(myBalance)}<span class="forge-unit"> QNT</span></span>
+      </div>
+      <div class="forge-side-row">
+        <span class="forge-side-k">{t('net.yourShare')}</span>
+        <span class="forge-side-v mono" style="color:var(--color-accent);">{myShare > 0 && myShare < 0.01 ? '<0,01' : myShare.toFixed(2)} %</span>
+      </div>
+      <div class="forge-share-bar"><div class="forge-share-fill" style="width:{Math.min(100, myShare > 0 ? Math.max(myShare, 2) : 0)}%;"></div></div>
+      <div class="forge-side-row" style="margin-top:10px;">
+        <span class="forge-side-k">{t('net.holders')}</span>
+        <span class="forge-side-v mono">{holders}</span>
+      </div>
+      <div class="forge-side-row">
+        <span class="forge-side-k">{t('net.circulating')}</span>
+        <span class="forge-side-v mono">{fmtNum(supplyQta)} QNT</span>
+      </div>
     </div>
-    <div class="card">
-      <div class="stat-label">En circulation</div>
-      <div class="stat-val sm mono">{fmtNum(supply)}<span style="font-size:13px;color:var(--color-text-3);margin-left:4px;">QNT</span></div>
+  </div>
+
+  <!-- Blockchain en direct -->
+  <div class="chain-wrap">
+    <div class="chain-head">
+      <span class="chain-title">{t('net.chainTitle')}</span>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span class="chain-meta">{pendingTx} {t('net.chainPendingMeta')}</span>
+        <div class="chain-toggle">
+          <button class:active={chainView === 'history'} onclick={() => (chainView = 'history')}>{t('net.chainViewHistory')}</button>
+          <button class:active={chainView === '2d'} onclick={() => (chainView = '2d')}>{t('net.chainViewRecent')}</button>
+          <button class:active={chainView === '3d'} onclick={() => (chainView = '3d')}>3D</button>
+        </div>
+      </div>
     </div>
+    {#if chainView === 'history'}
+      <ChainHistory />
+    {:else if chainView === '3d'}
+      <Blockchain3D blocks={blocks} pending={pendingTx} flashAt={newBlockFlash} />
+    {:else}
+      <div class="chain-strip">
+        <div class="chain-pending" title={t('net.chainPendingTip')}>
+          <div class="chain-pending-n mono">{pendingTx}</div>
+          <div class="chain-pending-l">{t('net.chainForging')}</div>
+        </div>
+        {#each blocks as b, i (b.index)}
+          <div class="chain-link"></div>
+          <div class="chain-block" class:chain-block-new={i === 0 && Date.now() - newBlockFlash < 1600}>
+            <div class="chain-block-h">#{b.index}</div>
+            <div class="chain-block-mint mono">+{(b.minted_qta ?? 0).toFixed(3)}</div>
+            <div class="chain-block-meta">{b.tx_count} {t('net.txAbbr')}</div>
+            <div class="chain-block-hash mono">{(b.hash || '········').slice(0, 8)}</div>
+          </div>
+        {/each}
+        {#if blocks.length === 0}
+          <div class="chain-link"></div>
+          <div class="chain-empty">{t('net.chainEmpty')}</div>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <!-- NET-16: chain-sync progress banner -->
   {#if showSyncBanner && syncProgress}
     <div class="card sync-banner" style="margin-bottom:12px;">
       <div class="sync-row">
-        <span class="sync-label">Synchronisation chaîne</span>
+        <span class="sync-label">{t('net.syncLabel')}</span>
         <span class="sync-counts mono">
-          {syncProgress.our_height} / {syncProgress.sender_height} blocs
+          {syncProgress.our_height} / {syncProgress.sender_height} {t('net.syncBlocks')}
           {#if syncProgress.integrated > 0}
             <span class="sync-delta">+{syncProgress.integrated}</span>
           {/if}
@@ -317,40 +462,40 @@
   <div class="card name-panel" style="margin-bottom:12px;">
     <div class="name-row">
       <div class="name-label">
-        <span class="name-title">Surnom public</span>
-        <span class="name-sub">Affiché aux autres peers (signé). Vide = anonyme.</span>
+        <span class="name-title">{t('net.nicknameTitle')}</span>
+        <span class="name-sub">{t('net.nicknameHint')}</span>
       </div>
       <div style="display:flex;gap:8px;flex:1;max-width:420px;">
         <input
           class="input"
           maxlength="32"
-          placeholder="Ex: alex@quanta"
+          placeholder={t('net.nicknamePlaceholder')}
           bind:value={displayNameDraft}
           onkeydown={(e) => e.key === 'Enter' && saveDisplayName()}
           style="flex:1;"
         />
         <button class="btn btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
-          {displayNameSaving ? '⏳' : 'Enregistrer'}
+          {displayNameSaving ? '⏳' : t('net.nicknameSave')}
         </button>
       </div>
     </div>
     {#if myDisplayName !== null && myDisplayName !== ''}
-      <div class="name-current">Actuel : <strong>{myDisplayName}</strong></div>
+      <div class="name-current">{t('net.nicknameCurrent')} <strong>{myDisplayName}</strong></div>
     {/if}
   </div>
 
   <!-- NET-9/10: Peer metrics table -->
   {#if peerMetrics.length > 0}
     <div class="card peers-panel" style="margin-bottom:12px;">
-      <h3 class="connect-title" style="margin-bottom:12px;">Pairs ({peerMetrics.length})</h3>
+      <h3 class="connect-title" style="margin-bottom:12px;">{t('net.peersHeading')} ({peerMetrics.length})</h3>
       <div class="peers-table">
         <div class="peers-head">
-          <span>Nom / Clé</span>
-          <span>Pays</span>
+          <span>{t('net.colNameKey')}</span>
+          <span>{t('net.colCountry')}</span>
           <span>RTT</span>
-          <span>Pertes</span>
-          <span>Qualité</span>
-          <span>Vu</span>
+          <span>{t('net.colLoss')}</span>
+          <span>{t('net.colQuality')}</span>
+          <span>{t('net.colSeen')}</span>
         </div>
         {#each peerMetrics as p (p.public_key)}
           <div class="peers-row">
@@ -376,19 +521,19 @@
 
   <!-- Connection panel -->
   <div class="card connect-panel" style="margin-bottom:12px;">
-    <h3 class="connect-title">Connexion P2P</h3>
+    <h3 class="connect-title">{t('net.connectTitle')}</h3>
 
     <!-- Step 1: Your ID -->
     <div class="connect-section">
       <div class="connect-step">
         <span class="step-num">1</span>
-        <span class="step-text">Envoyez votre Peer ID à votre ami</span>
+        <span class="step-text">{t('net.step1')}</span>
       </div>
       <div class="id-display">
-        <code class="peer-id-code">{myPeerId || '⏳ Endpoint en cours…'}</code>
+        <code class="peer-id-code">{myPeerId || t('net.endpointLoading')}</code>
         {#if myPeerId}
           <button class="btn btn-sm" onclick={copyId}>
-            {copied ? '✓ Copié' : 'Copier'}
+            {copied ? t('net.copied') : t('net.copy')}
           </button>
         {/if}
       </div>
@@ -398,39 +543,155 @@
     <div class="connect-section">
       <div class="connect-step">
         <span class="step-num">2</span>
-        <span class="step-text">Collez le Peer ID de votre ami</span>
+        <span class="step-text">{t('net.step2')}</span>
       </div>
       <div style="display:flex;gap:10px;">
-        <input class="input mono" placeholder="Coller le Peer ID reçu…" bind:value={connectInput}
+        <input class="input mono" placeholder={t('net.connectPlaceholder')} bind:value={connectInput}
           onkeydown={(e) => e.key === 'Enter' && connectPeer()} style="flex:1;" />
         <button class="btn btn-primary" onclick={connectPeer} disabled={connecting}>
-          {connecting ? '⏳' : 'Connecter'}
+          {connecting ? '⏳' : t('net.connectBtn')}
         </button>
       </div>
       {#if connectErr}
         <div class="connect-msg err">{connectErr}</div>
       {/if}
       {#if connectSuccess}
-        <div class="connect-msg ok">✓ Peer connecté ! Le Hello sera échangé dans quelques secondes.</div>
+        <div class="connect-msg ok">{t('net.connectSuccess')}</div>
       {/if}
     </div>
   </div>
 </div>
 
 <style>
+  /* ── Globe réseau (héros) ── */
+  .globe-hero {
+    display: grid; grid-template-columns: 1fr 460px;
+    align-items: center; gap: 12px;
+    background: #ffffff; border: 1px solid var(--color-border);
+    border-radius: 20px; padding: 8px 8px 8px 32px; margin-bottom: 14px;
+    overflow: hidden; box-shadow: var(--shadow);
+  }
+  .globe-copy { padding: 22px 0; }
+  .globe-eyebrow {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
+    color: var(--color-accent); margin-bottom: 12px;
+  }
+  .globe-h {
+    font-size: 30px; font-weight: 800; letter-spacing: -0.02em;
+    line-height: 1.08; color: var(--color-text-0); margin-bottom: 12px;
+  }
+  .globe-p {
+    font-size: 14px; line-height: 1.6; color: var(--color-text-2);
+    max-width: 400px; margin-bottom: 20px;
+  }
+  .globe-stats { display: flex; gap: 28px; }
+  .globe-stat { display: flex; flex-direction: column; gap: 2px; }
+  .gs-v { font-size: 26px; font-weight: 800; color: var(--color-text-0); letter-spacing: -0.02em; }
+  .gs-k { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-3); }
+  .globe-canvas {
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 45%, var(--color-bg-1), var(--color-bg-2));
+    border-radius: 16px; align-self: stretch; min-height: 444px;
+  }
+  @media (max-width: 860px) {
+    .globe-hero { grid-template-columns: 1fr; padding: 24px; }
+    .globe-canvas { min-height: 380px; }
+  }
+
+  /* ── La Forge — rareté & possession ── */
+  .forge-hero {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    background: #ffffff; border: 1px solid var(--color-border);
+    border-radius: 16px; padding: 24px 28px; margin-bottom: 14px;
+    box-shadow: var(--shadow); position: relative; overflow: hidden;
+    transition: box-shadow .45s ease;
+  }
+  .forge-hero::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: var(--color-accent);
+  }
+  .forge-flash { box-shadow: 0 0 0 3px var(--color-accent-dim), var(--shadow-lg); }
+  .forge-main { flex: 1; min-width: 240px; }
+  .forge-label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--color-text-3); }
+  .forge-count {
+    font-size: 46px; font-weight: 700; line-height: 1.05; letter-spacing: -.02em;
+    color: var(--color-text-0); margin: 8px 0 10px;
+    font-variant-numeric: tabular-nums; font-feature-settings: 'tnum';
+  }
+  .forge-sub { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-text-2); }
+  .forge-live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--color-green);
+    animation: forge-pulse 1.8s ease infinite; flex-shrink: 0;
+  }
+  @keyframes forge-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(22,163,74,.35); } 50% { box-shadow: 0 0 0 5px rgba(22,163,74,0); } }
+  .forge-side {
+    min-width: 220px; display: flex; flex-direction: column; gap: 7px; justify-content: center;
+    border-left: 1px solid var(--color-border); padding-left: 24px;
+  }
+  .forge-side-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .forge-side-k { font-size: 12px; color: var(--color-text-2); }
+  .forge-side-v { font-size: 15px; font-weight: 700; color: var(--color-text-0); }
+  .forge-unit { font-size: 11px; color: var(--color-text-3); font-weight: 400; }
+  .forge-share-bar { height: 6px; background: var(--color-bg-3); border-radius: 3px; overflow: hidden; margin-top: 2px; }
+  .forge-share-fill { height: 100%; background: var(--color-accent); border-radius: 3px; transition: width 1s ease; }
+
+  .cap-wrap { margin-top: 16px; max-width: 420px; }
+  .cap-bar { height: 8px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
+  .cap-fill { height: 100%; background: linear-gradient(90deg, #0BA5A0, #3D6FE0); border-radius: 4px; transition: width 1.2s ease; }
+  .cap-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--color-text-2); }
+  .cap-meta b { color: var(--color-text-0); }
+
+  /* ── Blockchain en direct ── */
+  .chain-wrap {
+    background: #fff; border: 1px solid var(--color-border); border-radius: 16px;
+    padding: 18px 20px; margin-bottom: 14px; box-shadow: var(--shadow-sm);
+  }
+  .chain-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .chain-toggle { display: inline-flex; background: var(--color-bg-2); border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; }
+  .chain-toggle button {
+    border: 0; background: transparent; cursor: pointer; font-family: inherit;
+    font-size: 12px; font-weight: 600; color: var(--color-text-2); padding: 5px 12px;
+  }
+  .chain-toggle button.active { background: var(--color-accent); color: #fff; }
+  .chain-title { font-size: 14px; font-weight: 700; color: var(--color-text-0); }
+  .chain-meta { font-size: 12px; color: var(--color-text-2); }
+  .chain-strip { display: flex; align-items: stretch; overflow-x: auto; padding-bottom: 6px; }
+  .chain-strip::-webkit-scrollbar { height: 4px; }
+  .chain-pending {
+    flex-shrink: 0; min-width: 78px; border: 1px dashed var(--color-border-hover);
+    border-radius: 12px; padding: 12px 10px; text-align: center;
+    display: flex; flex-direction: column; justify-content: center; gap: 2px;
+    background: var(--color-bg-2);
+  }
+  .chain-pending-n { font-size: 22px; font-weight: 700; color: var(--color-accent); }
+  .chain-pending-l { font-size: 10px; color: var(--color-text-3); }
+  .chain-link { flex-shrink: 0; width: 18px; align-self: center; height: 2px; background: var(--color-border-hover); }
+  .chain-block {
+    flex-shrink: 0; min-width: 94px; border: 1px solid var(--color-border);
+    border-radius: 12px; padding: 12px; background: #fff;
+    box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 3px;
+  }
+  .chain-block-new { animation: chain-in .6s cubic-bezier(.2,.8,.2,1); border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-dim); }
+  @keyframes chain-in { from { opacity: 0; transform: translateX(-18px) scale(.92); } to { opacity: 1; transform: none; } }
+  .chain-block-h { font-size: 13px; font-weight: 700; color: var(--color-text-0); }
+  .chain-block-mint { font-size: 13px; font-weight: 700; color: var(--color-green); }
+  .chain-block-meta { font-size: 11px; color: var(--color-text-2); }
+  .chain-block-hash { font-size: 10px; color: var(--color-text-3); }
+  .chain-empty { flex-shrink: 0; padding: 16px; font-size: 13px; color: var(--color-text-3); align-self: center; }
+
   .status-dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--color-text-3);
     transition: background 0.3s;
   }
   .status-dot.online {
-    background: #00E5CC;
-    box-shadow: 0 0 6px rgba(0,229,204,0.5);
+    background: var(--color-green);
+    box-shadow: 0 0 0 0 rgba(22,163,74,0.4);
     animation: pulse-dot 2s ease-in-out infinite;
   }
   @keyframes pulse-dot {
-    0%, 100% { box-shadow: 0 0 4px rgba(0,229,204,0.3); }
-    50% { box-shadow: 0 0 12px rgba(0,229,204,0.7); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(22,163,74,0.35); }
+    50% { box-shadow: 0 0 0 4px rgba(22,163,74,0); }
   }
 
   .connect-panel { padding: 24px; }
@@ -456,8 +717,8 @@
   .step-num {
     width: 22px; height: 22px; min-width: 22px;
     border-radius: 50%;
-    background: var(--color-accent, #00E5CC);
-    color: #000;
+    background: var(--color-accent);
+    color: #fff;
     display: flex; align-items: center; justify-content: center;
     font-size: 11px; font-weight: 700;
   }
@@ -497,8 +758,8 @@
     background: rgba(255, 68, 68, 0.06);
   }
   .connect-msg.ok {
-    color: #00E5CC;
-    background: rgba(0, 229, 204, 0.06);
+    color: var(--color-green);
+    background: rgba(22, 163, 74, 0.08);
   }
 
   /* NET-16: chain-sync banner */
@@ -511,8 +772,8 @@
     margin-left: 8px;
     padding: 1px 6px;
     border-radius: 3px;
-    background: rgba(0, 220, 130, 0.12);
-    color: #00DC82;
+    background: rgba(22, 163, 74, 0.12);
+    color: var(--color-green);
     font-size: 11px;
   }
   .sync-bar {
