@@ -12,6 +12,7 @@
 
 use crate::{
     p2p::gossip::{GossipEnvelope, GossipMessage, GossipRouter, ReportReason},
+    p2p::ledger::short,
     security::CryptoEngine,
     AppState,
 };
@@ -37,6 +38,19 @@ const MAX_MSG_PER_WINDOW: u32 = 120;
 
 /// Rate-limiting window duration (seconds).
 const RATE_WINDOW_SECS: u64 = 60;
+
+/// TX-AUTH-NONCE-1 §4: hard cap on distinct senders tracked in the per-sender
+/// nonce/rate maps. Bounds memory under a Sybil flood of *valid* keypairs — the
+/// residual PRESIG-ORDER left open (a spoofed sender is already dropped at
+/// signature verification). **§4 policy**: the exact value is a choice.
+const MAX_TRACKED_SENDERS: usize = 100_000;
+
+/// TX-AUTH-NONCE-1 §4: a tracked sender idle at least this long is evicted. MUST
+/// exceed the ±90 s envelope freshness window so a replay of an evicted sender's
+/// traffic is already stale (dropped at freshness before the nonce gate) ⇒
+/// eviction is anti-replay-safe. **§4 policy**: exact value is a choice
+/// (constraint: strictly greater than the freshness window).
+const NONCE_ENTRY_TTL_SECS: u64 = 120;
 
 /// Number of independent reports against a peer that triggers a ban.
 pub const REPORT_BAN_THRESHOLD: u32 = 3;
@@ -66,6 +80,9 @@ pub struct NonceTracker {
     /// Use a `HashSet` view via `is_banned()`; the timestamps gate the
     /// membership.
     bans: HashMap<String, u64>,
+    /// TX-AUTH-NONCE-1 §4: last activity (epoch sec) per tracked sender, for
+    /// expiry-based + size-bounded eviction of `last_nonces` / `rate_counters`.
+    last_seen: HashMap<String, u64>,
 }
 
 fn now_epoch_secs() -> u64 {
@@ -82,6 +99,7 @@ impl NonceTracker {
             rate_counters: HashMap::new(),
             report_counts: HashMap::new(),
             bans: HashMap::new(),
+            last_seen: HashMap::new(),
         }
     }
 
@@ -89,11 +107,58 @@ impl NonceTracker {
     /// seen). Also updates the tracker on acceptance.
     pub fn check_and_advance(&mut self, sender_pk: &str, nonce: u64) -> bool {
         let entry = self.last_nonces.entry(sender_pk.to_string()).or_insert(0);
-        if nonce > *entry {
+        let ok = if nonce > *entry {
             *entry = nonce;
             true
         } else {
             false
+        };
+        // TX-AUTH-NONCE-1 §4: record activity + keep the maps bounded.
+        self.note_activity_and_prune(sender_pk);
+        ok
+    }
+
+    /// TX-AUTH-NONCE-1 §4: record `sender_pk`'s last activity and keep the
+    /// per-sender maps bounded (expiry **and** absolute size). O(1) on the normal
+    /// path (under the cap); the O(n) prune runs only when the hard cap is
+    /// exceeded (a Sybil flood), bounding memory.
+    fn note_activity_and_prune(&mut self, sender_pk: &str) {
+        let now = now_epoch_secs();
+        self.last_seen.insert(sender_pk.to_string(), now);
+        if self.last_seen.len() <= MAX_TRACKED_SENDERS {
+            return; // common case: nothing to evict
+        }
+        // ① Expiry — drop senders idle ≥ TTL. TTL > the ±90 s freshness window,
+        // so any replay of an evicted sender's traffic is already stale (dropped
+        // at freshness before the nonce gate) ⇒ anti-replay-safe.
+        let expired: Vec<String> = self
+            .last_seen
+            .iter()
+            .filter(|(_, &seen)| now.saturating_sub(seen) >= NONCE_ENTRY_TTL_SECS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in expired {
+            self.last_seen.remove(&k);
+            self.last_nonces.remove(&k);
+            self.rate_counters.remove(&k);
+        }
+        // ② Absolute size bound — if a fast Sybil burst kept everything fresh,
+        // evict the oldest-by-last-seen until under the cap. §4 residual: evicting
+        // a < TTL entry briefly reopens that sender's nonce window; mitigated by
+        // the `seen_messages` id-dedup + signed envelopes. Exact size + eviction
+        // order = §4 policy decision.
+        while self.last_seen.len() > MAX_TRACKED_SENDERS {
+            let Some(oldest) = self
+                .last_seen
+                .iter()
+                .min_by_key(|(_, &seen)| seen)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.last_seen.remove(&oldest);
+            self.last_nonces.remove(&oldest);
+            self.rate_counters.remove(&oldest);
         }
     }
 
@@ -133,7 +198,10 @@ impl NonceTracker {
         }
 
         entry.1 += 1;
-        entry.1 <= limit
+        let within = entry.1 <= limit;
+        // TX-AUTH-NONCE-1 §4: record activity + keep the maps bounded.
+        self.note_activity_and_prune(sender_pk);
+        within
     }
 
     /// Record a report against `peer_id`. When the count reaches
@@ -229,7 +297,7 @@ fn verify_envelope_signature(env: &GossipEnvelope) -> Result<(), String> {
 /// **B1 Security Order:**
 /// 1. JSON deserialization (envelope structure only)
 /// 2. Anti-replay (message ID dedup)
-/// 3. Timestamp freshness (±5 min)
+/// 3. Timestamp freshness (±90s)
 /// 4. **Ed25519 signature verification** ← NEW
 /// 5. Payload dispatch
 pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
@@ -261,7 +329,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         if tracker.is_banned(&env.sender) {
             log::debug!(
                 "◈ [Dispatch] banned peer {} → drop",
-                &env.sender[..env.sender.len().min(12)]
+                short(&env.sender, 12)
             );
             return;
         }
@@ -289,13 +357,45 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
     }
 
-    // Fenêtre temporelle ±5 min.
+    // Fenêtre temporelle ±90s.
     if !GossipRouter::is_fresh(&env.timestamp) {
         log::debug!("◈ [Dispatch] enveloppe trop ancienne, drop");
         return;
     }
 
-    // ── NET-13: ADAPTIVE RATE LIMITING ──
+    // ── B1: SIGNATURE VERIFICATION (verify-before-process) ──────────────
+    // PRESIG-ORDER (HARDEN audit — NONCE-MEM / SLICE-SENDER): verify the Ed25519
+    // signature BEFORE any per-sender state mutation. The rate-limit and nonce
+    // checks below `.entry(env.sender)` the per-sender maps; running them on an
+    // UNVERIFIED, spoofable `env.sender` let an unauthenticated attacker grow
+    // `last_nonces` / `rate_counters` without bound (remote OOM). After this gate
+    // only a sender that actually signed the envelope reaches those maps — a
+    // spoofed sender is dropped here having mutated nothing. The cheap stateless
+    // filters (size / JSON / ban / dedup / freshness) still run first, so a
+    // bad-sig flood is shed before paying the verify on anything but
+    // unique-and-fresh envelopes.
+    if let Err(reason) = verify_envelope_signature(&env) {
+        log::warn!(
+            "◈ [Dispatch] ⚠ SIGNATURE INVALIDE from {} — {} → drop + report",
+            short(&env.sender, 12),
+            reason
+        );
+        // Emit ReportPeer to alert the network about the forger
+        broadcast(
+            state,
+            GossipMessage::ReportPeer {
+                peer_id: env.sender.clone(),
+                reason: ReportReason::InvalidSignature,
+            },
+        )
+        .await;
+        state.node.gossip.write().await.stats.peers_reported += 1;
+        state.node.gossip.write().await.stats.dropped_signature += 1;
+        return;
+    }
+
+    // ── NET-13: ADAPTIVE RATE LIMITING ── (post-verify: only authenticated
+    // senders are counted, so the per-sender map cannot be inflated by spoofing)
     // Per-peer budget grows sub-linearly with connected-peer count so a
     // mesh with many participants doesn't choke legitimate sync traffic.
     let peer_count = state.node.peer_info.read().await.len();
@@ -304,7 +404,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         if !tracker.check_rate_limit(&env.sender, peer_count) {
             log::warn!(
                 "◈ [Dispatch] ⚠ RATE LIMIT exceeded by {} (cap={} for {} peers) → drop",
-                &env.sender[..env.sender.len().min(12)],
+                short(&env.sender, 12),
                 NonceTracker::adaptive_limit_for(peer_count),
                 peer_count
             );
@@ -325,33 +425,12 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             log::warn!(
                 "◈ [Dispatch] ⚠ NONCE REPLAY/ZERO from {} — nonce {} (≤ high-water mark or 0) → \
                  drop",
-                &env.sender[..env.sender.len().min(12)],
+                short(&env.sender, 12),
                 env.nonce
             );
             state.node.gossip.write().await.stats.dropped_nonce += 1;
             return;
         }
-    }
-
-    // ── B1: SIGNATURE VERIFICATION (verify-before-process) ──────────────
-    if let Err(reason) = verify_envelope_signature(&env) {
-        log::warn!(
-            "◈ [Dispatch] ⚠ SIGNATURE INVALIDE from {} — {} → drop + report",
-            &env.sender[..env.sender.len().min(12)],
-            reason
-        );
-        // Emit ReportPeer to alert the network about the forger
-        broadcast(
-            state,
-            GossipMessage::ReportPeer {
-                peer_id: env.sender.clone(),
-                reason: ReportReason::InvalidSignature,
-            },
-        )
-        .await;
-        state.node.gossip.write().await.stats.peers_reported += 1;
-        state.node.gossip.write().await.stats.dropped_signature += 1;
-        return;
     }
 
     match env.payload {
@@ -376,14 +455,14 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
                 log::warn!(
                     "◈ [NET-5] peer {} runs newer protocol v{} (we are v{}) — processing what we \
                      can; consider upgrading",
-                    &env.sender[..env.sender.len().min(12)],
+                    short(&env.sender, 12),
                     version,
                     TORUS_PROTOCOL_VERSION
                 );
             } else if version < TORUS_PROTOCOL_VERSION {
                 log::debug!(
                     "◈ [NET-5] peer {} runs legacy protocol v{} (we are v{})",
-                    &env.sender[..env.sender.len().min(12)],
+                    short(&env.sender, 12),
                     version,
                     TORUS_PROTOCOL_VERSION
                 );
@@ -434,7 +513,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             }
             log::debug!(
                 "◈ [Dispatch] Pong from {} nonce={} rtt={:?}ms",
-                &env.sender[..env.sender.len().min(12)],
+                short(&env.sender, 12),
                 nonce,
                 rtt_ms
             );
@@ -465,7 +544,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
                         log::warn!(
                             "◈ [NET-8] ChainSegment from {} compressed payload invalid ({}) — \
                              falling back to inline",
-                            &env.sender[..env.sender.len().min(12)],
+                            short(&env.sender, 12),
                             e
                         );
                         blocks_json
@@ -575,7 +654,7 @@ async fn handle_hello(
     log::info!(
         "◈ [Dispatch] Hello from {} ({} heads, {:.1}W, {}, chain_h={}, tasks={} blocks={} \
          uptime={}m, peers={})",
-        &sender_pk[..sender_pk.len().min(12)],
+        short(sender_pk, 12),
         their_heads.len(),
         watts,
         country,
@@ -593,7 +672,7 @@ async fn handle_hello(
     if (watts - clamped_watts).abs() > 0.1 {
         log::warn!(
             "◈ [Dispatch] peer {} declared {:.1}W, clamped to {:.1}W",
-            &sender_pk[..sender_pk.len().min(12)],
+            short(sender_pk, 12),
             watts,
             clamped_watts
         );
@@ -635,7 +714,7 @@ async fn handle_hello(
             "◈ [Dispatch] Chain sync needed: our height {} < peer height {} — requesting from {}",
             our_height,
             peer_chain_height,
-            &sender_pk[..sender_pk.len().min(12)]
+            short(sender_pk, 12)
         );
         request_chain_range(state, our_height, peer_chain_height).await;
     }
@@ -663,7 +742,7 @@ async fn handle_hello(
         for peer_id in new_peers.iter().take(3) {
             log::info!(
                 "◈ [NET-2] Discovered new peer {} via gossip exchange",
-                &peer_id[..peer_id.len().min(16)]
+                short(peer_id, 16)
             );
             // Spawn connection attempt in background (non-blocking)
             let state_clone = state.clone();
@@ -675,7 +754,7 @@ async fn handle_hello(
                     Ok(()) => {
                         log::info!(
                             "◈ [NET-2] Auto-connected to discovered peer {}",
-                            &peer_id_clone[..peer_id_clone.len().min(16)]
+                            short(&peer_id_clone, 16)
                         );
                         // Trigger Hello to the new peer
                         crate::p2p::gossip_tasks::trigger_hello_now(&state_clone).await;
@@ -683,7 +762,7 @@ async fn handle_hello(
                     Err(e) => {
                         log::debug!(
                             "◈ [NET-2] Failed to auto-connect to {}: {}",
-                            &peer_id_clone[..peer_id_clone.len().min(16)],
+                            short(&peer_id_clone, 16),
                             e
                         );
                     }
@@ -752,7 +831,7 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
                 "◈ [Dispatch] tx nonce {} too far behind high-water {} for {} — drop",
                 nonce,
                 high_water,
-                &from[..from.len().min(12)]
+                short(&from, 12)
             );
             return;
         }
@@ -817,8 +896,8 @@ async fn handle_report_peer(
 ) {
     log::info!(
         "◈ [Dispatch] ReportPeer from {} → {} ({:?})",
-        &sender_pk[..sender_pk.len().min(12)],
-        &peer_id[..peer_id.len().min(12)],
+        short(sender_pk, 12),
+        short(peer_id, 12),
         reason
     );
 
@@ -833,7 +912,7 @@ async fn handle_report_peer(
     if count >= REPORT_BAN_THRESHOLD {
         log::warn!(
             "◈ [Dispatch] ⛔ peer {} BANNED ({} reports, TTL {}s)",
-            &peer_id[..peer_id.len().min(12)],
+            short(peer_id, 12),
             count,
             REPORT_BAN_TTL_SECS
         );
@@ -853,7 +932,7 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
         Err(e) => {
             log::warn!(
                 "◈ [Dispatch] invalid block JSON from {}: {}",
-                &sender[..sender.len().min(12)],
+                short(sender, 12),
                 e
             );
             return;
@@ -865,7 +944,7 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
         Ok(true) => {
             log::info!(
                 "◈ [Dispatch] ✓ Accepted remote block from {}",
-                &sender[..sender.len().min(12)]
+                short(sender, 12)
             );
             // CRIT-B: Increment validated block counter for Shapley distribution
             state
@@ -882,7 +961,7 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
         Err(reason) => {
             log::warn!(
                 "◈ [Dispatch] ⚠ Rejected block from {}: {}",
-                &sender[..sender.len().min(12)],
+                short(sender, 12),
                 reason
             );
         }
@@ -917,7 +996,7 @@ async fn handle_request_chain(
     if blocks_json.is_empty() {
         log::debug!(
             "◈ [Dispatch] RequestChain from {} — nothing to send (from_height={}, our height={})",
-            &sender[..sender.len().min(12)],
+            short(sender, 12),
             from_height,
             chain_len
         );
@@ -934,7 +1013,7 @@ async fn handle_request_chain(
         Some(c) if c.len() < (blocks_json.iter().map(|s| s.len()).sum::<usize>() / 2) => {
             log::info!(
                 "◈ [NET-8] RequestChain {} — {} blocks, {} → {} bytes after gzip",
-                &sender[..sender.len().min(12)],
+                short(sender, 12),
                 blocks_json.len(),
                 blocks_json.iter().map(|s| s.len()).sum::<usize>(),
                 c.len(),
@@ -944,7 +1023,7 @@ async fn handle_request_chain(
         _ => {
             log::info!(
                 "◈ [Dispatch] RequestChain from {} — sending {} blocks (height {} → {})",
-                &sender[..sender.len().min(12)],
+                short(sender, 12),
                 blocks_json.len(),
                 from_height,
                 from_height + blocks_json.len() as u64,
@@ -976,7 +1055,7 @@ async fn handle_chain_segment(
     let blocks_json = if blocks_json.len() > MAX_CHAIN_SEGMENT_RECEIVED {
         log::warn!(
             "◈ [Dispatch] ChainSegment from {} oversized ({} blocks > {}) — truncating",
-            &sender[..sender.len().min(12)],
+            short(sender, 12),
             blocks_json.len(),
             MAX_CHAIN_SEGMENT_RECEIVED
         );
@@ -997,7 +1076,7 @@ async fn handle_chain_segment(
             Err(e) => {
                 log::warn!(
                     "◈ [Dispatch] bad block in ChainSegment from {}: {}",
-                    &sender[..sender.len().min(12)],
+                    short(sender, 12),
                     e
                 );
                 rejected += 1;
@@ -1032,7 +1111,7 @@ async fn handle_chain_segment(
 
     log::info!(
         "◈ [Dispatch] ChainSegment from {} — integrated: {}, rejected: {}, sender_height: {}",
-        &sender[..sender.len().min(12)],
+        short(sender, 12),
         integrated,
         rejected,
         sender_height
@@ -1179,6 +1258,137 @@ async fn broadcast(state: &Arc<AppState>, msg: GossipMessage) {
 mod tests {
     use super::*;
     use crate::security::CryptoEngine;
+
+    /// Minimal in-memory `AppState` for driving `dispatch_incoming` without a
+    /// network/iroh endpoint (no DB, no Tauri handle). `WillowNode::new()`
+    /// builds all the in-memory stores + the priority gossip channel.
+    fn test_app_state() -> Arc<crate::AppState> {
+        Arc::new(crate::AppState {
+            crypto: tokio::sync::Mutex::new(CryptoEngine::new()),
+            db: tokio::sync::Mutex::new(None),
+            node: crate::p2p::willow_node::WillowNode::new(),
+            display_name: tokio::sync::RwLock::new(None),
+            app_handle: tokio::sync::RwLock::new(None),
+        })
+    }
+
+    /// PRESIG-ORDER teeth: an unauthenticated (bad-signature) envelope with a
+    /// SPOOFED sender must be dropped at signature verification BEFORE any
+    /// per-sender map write, so it cannot grow `last_nonces` / `rate_counters`
+    /// (the NONCE-MEM remote-OOM vector). Pre-reorder this FAILED — the rate and
+    /// nonce checks `.entry(env.sender)` ran first and inserted entries keyed by
+    /// the spoofable sender.
+    #[tokio::test]
+    async fn presig_bad_signature_writes_no_per_sender_state() {
+        let state = test_app_state();
+        let mut signer = CryptoEngine::new();
+        let _ = signer.generate_keypair();
+        let spoofed = "f".repeat(64); // a pubkey the attacker does NOT own
+        let msg = GossipMessage::Ping { nonce: 7 };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let nonce = 1_u64;
+        // Sign with the REAL key but claim sender == spoofed ⇒ the signature
+        // cannot verify against the spoofed pubkey.
+        let signable = GossipRouter::signable_envelope_bytes(&spoofed, nonce, &ts, &msg);
+        let sig = signer.sign(&signable).unwrap();
+        let env =
+            GossipRouter::build_signed_envelope(spoofed.clone(), msg, nonce, ts, &sig).unwrap();
+        let raw = serde_json::to_vec(&env).unwrap();
+
+        dispatch_incoming(&state, &raw).await;
+
+        let tracker = state.node.nonce_tracker.read().await;
+        assert!(
+            tracker.last_nonces.is_empty(),
+            "bad-sig spoofed sender must NOT create a nonce entry"
+        );
+        assert!(
+            tracker.rate_counters.is_empty(),
+            "bad-sig spoofed sender must NOT create a rate-limit entry"
+        );
+    }
+
+    /// The reorder must NOT break the happy path: a correctly-signed envelope is
+    /// admitted and its per-sender state IS recorded (nonce high-water + rate
+    /// bucket), proving the maps are still written for authenticated senders.
+    #[tokio::test]
+    async fn presig_valid_signature_is_admitted_and_tracked() {
+        let state = test_app_state();
+        let mut signer = CryptoEngine::new();
+        let id = signer.generate_keypair();
+        let pk = id.public_key_hex.clone();
+        let msg = GossipMessage::Ping { nonce: 7 };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let nonce = 1_u64;
+        let signable = GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
+        let sig = signer.sign(&signable).unwrap();
+        let env = GossipRouter::build_signed_envelope(pk.clone(), msg, nonce, ts, &sig).unwrap();
+        let raw = serde_json::to_vec(&env).unwrap();
+
+        dispatch_incoming(&state, &raw).await;
+
+        let tracker = state.node.nonce_tracker.read().await;
+        assert_eq!(
+            tracker.last_nonces.get(&pk),
+            Some(&1),
+            "a valid sender's nonce high-water must be recorded"
+        );
+        assert!(
+            tracker.rate_counters.contains_key(&pk),
+            "a valid sender must be tracked for rate limiting"
+        );
+    }
+
+    /// TX-AUTH-NONCE-1 §5 (Sybil cap): a flood of distinct senders must keep the
+    /// per-sender maps BOUNDED, and eviction must prefer IDLE (replay-safe)
+    /// entries over an active one.
+    #[test]
+    fn txauth_nonce_tracker_eviction_is_bounded_and_anti_replay_safe() {
+        let mut t = NonceTracker::new();
+        // Pre-fill to the cap with IDLE entries (last_seen ≥ TTL ago → a replay of
+        // their traffic would fail freshness, so expiring them is anti-replay-safe).
+        let idle = now_epoch_secs().saturating_sub(NONCE_ENTRY_TTL_SECS + 10);
+        for i in 0..MAX_TRACKED_SENDERS {
+            let k = format!("old{i}");
+            t.last_nonces.insert(k.clone(), 1);
+            t.last_seen.insert(k, idle);
+        }
+        assert_eq!(t.last_seen.len(), MAX_TRACKED_SENDERS);
+
+        // A fresh, active sender via the real path pushes over the cap → prune
+        // runs, expiring the idle entries and keeping the active one.
+        assert!(t.check_and_advance("fresh_active", 1));
+        assert!(t.last_seen.len() <= MAX_TRACKED_SENDERS, "maps stay bounded under flood");
+        assert!(t.last_nonces.len() <= MAX_TRACKED_SENDERS, "nonce map bounded");
+        assert!(t.last_seen.contains_key("fresh_active"), "the ACTIVE sender is retained");
+        assert!(
+            t.last_seen.len() < MAX_TRACKED_SENDERS,
+            "idle (replay-safe) entries were expired, not the active one"
+        );
+    }
+
+    /// TX-AUTH-NONCE-1 §5: the ABSOLUTE size bound must hold even when NOTHING is
+    /// expired (a fast Sybil burst keeping every entry fresh — the documented §4
+    /// residual path: eviction by oldest-last_seen).
+    #[test]
+    fn txauth_nonce_tracker_size_bound_holds_when_all_fresh() {
+        let mut t = NonceTracker::new();
+        let now = now_epoch_secs();
+        for i in 0..MAX_TRACKED_SENDERS {
+            let k = format!("s{i}");
+            t.last_nonces.insert(k.clone(), 1);
+            t.last_seen.insert(k, now); // all fresh ⇒ the expiry pass evicts nothing
+        }
+        assert_eq!(t.last_seen.len(), MAX_TRACKED_SENDERS);
+        // One more fresh sender pushes over the cap; with nothing expired, the
+        // size bound itself must evict to keep the map bounded.
+        assert!(t.check_and_advance("one_more", 1));
+        assert!(
+            t.last_seen.len() <= MAX_TRACKED_SENDERS,
+            "size bound caps the map even with no expired entries"
+        );
+        assert!(t.last_nonces.len() <= MAX_TRACKED_SENDERS);
+    }
 
     #[test]
     fn test_verify_envelope_valid_signature() {

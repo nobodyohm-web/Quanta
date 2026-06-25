@@ -27,6 +27,7 @@ mod security_tests {
     #[allow(dead_code)]
     fn setup_ledger_with_balance(pk: &str, amount_uqta: u64) -> (Ledger, CryptoEngine) {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let _id = crypto.generate_keypair();
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, amount_uqta, 0.0);
@@ -48,6 +49,7 @@ mod security_tests {
     #[test]
     fn s1_double_spend_rejected() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -70,6 +72,7 @@ mod security_tests {
     #[test]
     fn s1_exact_balance_transfer() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -111,6 +114,7 @@ mod security_tests {
     #[test]
     fn s2_valid_signature_accepted() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
 
         let msg = GossipMessage::Ping { nonce: 7 };
@@ -127,6 +131,7 @@ mod security_tests {
     #[test]
     fn s3_replay_tx_rejected() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -136,17 +141,33 @@ mod security_tests {
 
         let to = "d".repeat(64);
 
-        // First transfer succeeds (10 QUANTA)
-        let _tx1 = ledger.transfer_tx(pk, &to, 10 * MICRO, &crypto).unwrap();
+        // First transfer succeeds (10 QUANTA), recording its hash so an echo is
+        // deduped.
+        let tx1 = ledger.transfer_tx(pk, &to, 10 * MICRO, &crypto).unwrap();
+        assert_eq!(ledger.balance_of(pk), 90 * MICRO, "balance reduced after the first transfer");
 
-        // Balance should be 90 QUANTA = 90 * MICRO µQTA after the transfer
-        assert_eq!(ledger.balance_of(pk), 90 * MICRO,
-            "Balance should be reduced after first transfer");
+        // TEST-TEETH (HARDEN-HYGIENE-1): the named property is ANTI-REPLAY — so
+        // actually REPLAY it. Re-submitting the SAME signed tx through the
+        // network admission path (`replay_remote_tx`) MUST be rejected by the
+        // seen_tx_hashes dedup and leave every balance unchanged; otherwise a
+        // peer echoing a tx back doubles the spend. (Before this assertion the
+        // test never replayed, so a broken dedup would have passed silently.)
+        let sender_before = ledger.balance_of(pk);
+        let recipient_before = ledger.balance_of(&to);
+        assert!(
+            !ledger.replay_remote_tx(tx1.clone()),
+            "a replayed (already-seen) tx must be rejected"
+        );
+        assert_eq!(ledger.balance_of(pk), sender_before, "sender balance unchanged by the replay");
+        assert_eq!(ledger.balance_of(&to), recipient_before, "recipient balance unchanged by the replay");
+        // Rejection is idempotent — a second echo is still rejected.
+        assert!(!ledger.replay_remote_tx(tx1), "replay stays rejected on every echo");
     }
 
     #[test]
     fn s3_nonce_tracking() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -172,6 +193,7 @@ mod security_tests {
     #[test]
     fn s4_stale_message_rejected() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
 
         let msg = GossipMessage::Ping { nonce: 1 };
@@ -209,6 +231,7 @@ mod security_tests {
     #[test]
     fn s5_extreme_amount_handled() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -227,6 +250,7 @@ mod security_tests {
     #[test]
     fn s5_negative_balance_impossible() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -236,14 +260,29 @@ mod security_tests {
 
         let to = "a".repeat(64);
 
-        // Try many transfers — balance is u64 so it can't go negative.
+        // 20 unit transfers from a 10-QUANTA balance: 10 succeed (draining to
+        // exactly 0), the other 10 fail for insufficient funds (ignored here).
         for _ in 0..20 {
             let _ = ledger.transfer_tx(pk, &to, MICRO, &crypto);
         }
 
-        let _balance = ledger.balance_of(pk);
-        // u64 cannot be negative — invariant trivially holds, but we keep the test
-        // for symmetry with the previous f64 contract.
+        // TEST-TEETH (HARDEN-HYGIENE-1): the property is "balance never goes
+        // negative" — assert the EXACT residual and full conservation. A
+        // regression letting an overdraft through (an underflow saturated to 0
+        // by balance_of, or phantom µQTA) would FAIL here; the old test only
+        // discarded the balance and could never fail.
+        assert_eq!(ledger.balance_of(pk), 0, "sender drained to exactly zero, never negative");
+        assert_eq!(
+            ledger.balance_of(&to),
+            10 * MICRO,
+            "recipient holds exactly the 10 successful transfers (transfer_tx has no burn)"
+        );
+        let total: u64 = ledger.all_balances().values().sum();
+        assert_eq!(
+            total + ledger.total_burned(),
+            ledger.total_minted(),
+            "Σ balances + burned == minted (no µQTA created or destroyed)"
+        );
     }
 
     // ─── S6: Emission invariant ─────────────────────────────────────────────
@@ -319,6 +358,7 @@ mod security_tests {
     #[test]
     fn s8_self_transfer_rejected() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -336,6 +376,7 @@ mod security_tests {
     #[test]
     fn s9_negative_transfer_rejected() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -355,6 +396,7 @@ mod security_tests {
     #[test]
     fn s11_total_supply_conserved_on_transfer() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = &id.public_key_hex;
 
@@ -555,6 +597,7 @@ mod property_tests {
     #[test]
     fn p1_balance_never_negative_after_random_transfers() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = id.public_key_hex.clone();
 
@@ -574,9 +617,22 @@ mod property_tests {
 
         for amount in &amounts {
             let _ = ledger.transfer_tx(&pk, &to, *amount, &crypto);
-            // u64 cannot be negative — balance_of saturates at 0 by construction.
-            let _balance = ledger.balance_of(&pk);
+            // TEST-TEETH (HARDEN-HYGIENE-1): conservation must hold after EVERY
+            // attempt. A sender overdraft (an underflow that balance_of saturates
+            // to 0) would make Σ balances + burned != minted right here — the old
+            // test only discarded balance_of and could never catch it.
+            let total: u64 = ledger.all_balances().values().sum();
+            assert_eq!(
+                total + ledger.total_burned(),
+                ledger.total_minted(),
+                "Σ balances + burned == minted after each transfer (no phantom µQTA)"
+            );
         }
+        // The sender never exceeded the minted supply across the whole sequence.
+        assert!(
+            ledger.balance_of(&pk) <= 50 * MICRO,
+            "sender balance never exceeds the minted supply"
+        );
     }
 
     // ─── P2: Shapley shares always sum to 1.0 for any node count ────────
@@ -607,6 +663,7 @@ mod property_tests {
     #[test]
     fn p3_burn_accounting_correct() {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = id.public_key_hex.clone();
 
@@ -680,6 +737,7 @@ mod property_tests {
             ops in prop::collection::vec((0usize..4, 0usize..4, 1u64..=20_000_000u64), 0..40)
         ) {
             let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
             let _ = crypto.generate_keypair(); // identité de signature (adresses arbitraires ci-dessous)
             let acc = four_accounts();
 
@@ -706,6 +764,7 @@ mod property_tests {
             ops in prop::collection::vec((0usize..4, 0usize..4, 10_000u64..=20_000_000u64), 0..40)
         ) {
             let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
             let _ = crypto.generate_keypair();
             let acc = four_accounts();
 
@@ -734,6 +793,7 @@ mod property_tests {
             amounts in prop::collection::vec(1u64..=30_000_000u64, 0..40)
         ) {
             let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
             let id = crypto.generate_keypair();
             let pk = id.public_key_hex.clone();
             let to = "z".repeat(64);
@@ -819,18 +879,21 @@ mod property_tests {
 
     #[test]
     fn d1_fork_resolution_deterministic() {
-        // Two ledgers produce competing block #1. Both nodes must converge to the
-        // block with the lexicographically higher hash regardless of arrival order.
-        let pk = "a".repeat(64);
-        let mut a = ledger_with_pending(&pk);
-        let mut b = ledger_with_pending(&pk);
+        // Two nodes produce competing block #1. Both must converge to the block
+        // with the lexicographically higher hash regardless of arrival order.
+        // TEST-TEETH (HARDEN-HYGIENE-1): make the two blocks CONTENT-distinct
+        // (different miner + reward) so their hashes differ by content, NOT by a
+        // wall-clock sleep — this removes the flaky same-timestamp→same-hash
+        // collision the old `thread::sleep(5ms)` papered over.
+        let pk_a = "a".repeat(64);
+        let pk_b = "b".repeat(64);
+        let mut a = ledger_with_pending(&pk_a);
+        let mut b = ledger_with_pending(&pk_b);
 
-        let block_a = a.seal_block(&pk, 0.0);
-        // Ensure timestamps differ so block_b.hash != block_a.hash.
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let block_b = b.seal_block(&pk, 0.0);
+        let block_a = a.seal_block(&pk_a, 0.0);
+        let block_b = b.seal_block(&pk_b, 0.0);
         assert_ne!(block_a.hash, block_b.hash,
-            "test setup: blocks must have distinct hashes");
+            "distinct miners ⇒ distinct hashes (no timestamp dependency)");
 
         let (winner, loser): (&Block, &Block) = if block_a.hash > block_b.hash {
             (&block_a, &block_b)
@@ -937,6 +1000,7 @@ mod property_tests {
     /// On part de 1M QUANTA pour qu'une plage raisonnable d'amounts succède.
     fn fresh_ledger_with_funds() -> (Ledger, CryptoEngine, String) {
         let mut crypto = CryptoEngine::new();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
         let id = crypto.generate_keypair();
         let pk = id.public_key_hex.clone();
         let mut ledger = Ledger::new();
@@ -961,6 +1025,12 @@ mod property_tests {
             if let Ok((_tx, _burn_tx, burn)) = result {
                 prop_assert_eq!(burn, amount / 100,
                     "burn = amount/100 (intégré exact)");
+                // TEST-TEETH (HARDEN-HYGIENE-1): an INDEPENDENT post-state check
+                // that does NOT re-derive the burn formula — value is conserved
+                // (the burned µQTA is destroyed, not duplicated).
+                let total: u64 = ledger.all_balances().values().sum();
+                prop_assert_eq!(total + ledger.total_burned(), ledger.total_minted(),
+                    "Σ balances + burned == minted after a successful burn-transfer");
             }
         }
     }
@@ -981,8 +1051,19 @@ mod property_tests {
         ) {
             let (mut ledger, crypto, pk) = fresh_ledger_with_funds();
             let to = "c".repeat(64);
-            let _ = ledger.transfer_with_burn(&pk, &to, amount, &crypto);
-            // Pas de panic = test passé.
+            let before_sender = ledger.balance_of(&pk);
+            let res = ledger.transfer_with_burn(&pk, &to, amount, &crypto);
+            // TEST-TEETH (HARDEN-HYGIENE-1): "no panic" alone is vacuous. Assert
+            // the post-state at every boundary — value is always conserved, and
+            // an un-affordable amount (u64::MAX gross overflow / insufficient
+            // funds) leaves the sender untouched (no partial debit).
+            let total: u64 = ledger.all_balances().values().sum();
+            prop_assert_eq!(total + ledger.total_burned(), ledger.total_minted(),
+                "Σ balances + burned == minted at every boundary (Ok or Err)");
+            if res.is_err() {
+                prop_assert_eq!(ledger.balance_of(&pk), before_sender,
+                    "a rejected transfer leaves the sender balance unchanged");
+            }
         }
     }
 }

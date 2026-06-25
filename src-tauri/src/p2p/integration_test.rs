@@ -12,8 +12,11 @@ mod tests {
     fn full_node_lifecycle() {
         // ── 1. Create identity ──
         let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
-        let pk = id.public_key_hex.clone();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
+        let _ = crypto.generate_keypair();
+        // PQ-MIG-3B: the account identity (`from`/`to`, balance key) is the ML-DSA
+        // address; Ed25519 stays the transport key, off the value path.
+        let pk = crypto.pq_address_hex().expect("ml-dsa address");
         assert!(!pk.is_empty(), "identity must be created");
 
         // ── 2. Mine 50 QUANTA ──

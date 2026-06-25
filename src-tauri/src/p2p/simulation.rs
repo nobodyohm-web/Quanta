@@ -570,8 +570,11 @@ mod late_joiner_simulation {
 
         let mut ledger = Ledger::new();
         let mut crypto = CryptoEngine::new();
-        let sender = crypto.generate_keypair();
-        let pk = sender.public_key_hex.clone();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
+        let _ = crypto.generate_keypair();
+        // PQ-MIG-3B: the account identity (`from`/`to`, balance key) is the ML-DSA
+        // address; Ed25519 stays the transport key, off the value path.
+        let pk = crypto.pq_address_hex().expect("ml-dsa address");
 
         // Seed: mine 1000 QUANTA to sender
         for _ in 0..10 {

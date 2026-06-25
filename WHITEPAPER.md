@@ -139,7 +139,7 @@ Block production is leader-based and deterministic per slot (= chain height):
 ```
 beacon = BLAKE3(domain ‖ buried_block_hash ‖ slot)   (buried = several slots behind tip)
 seed   = BLAKE3(domain ‖ beacon ‖ slot ‖ round)
-leader = seed % total_weighted_stake                  (weight = stake + reputation·10_000)
+leader = seed % total_weighted_stake                  (weight = stake only — on-chain stake, ADR-002)
 ```
 
 Minimum validator stake is 1 QUANTA. If the elected leader fails to seal within a 30 s

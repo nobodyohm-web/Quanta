@@ -58,9 +58,27 @@ pub fn spawn(state: Arc<AppState>) {
 async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tick_start = Instant::now();
 
-    let pk = state.crypto.lock().await.get_identity()
-        .map(|id| id.public_key_hex)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    // PQ-MIG-3B: this node has two distinct identities.
+    //  • `pk`   — Ed25519 **transport** key: signs the outgoing gossip envelopes
+    //    (deferred; transport stays Ed25519).
+    //  • `addr` — ML-DSA **address** (value identity): the mining-reward target,
+    //    the CRDT credit key, the PoS proposer/seal identity (the validator set
+    //    is address-keyed via `validator_stakes()`), and — since REPUT-ID-1 —
+    //    the **reputation actor** identity (uptime/energy keyed by address, the
+    //    economic actor, not the ephemeral transport key).
+    let (pk, addr) = {
+        let crypto = state.crypto.lock().await;
+        let pk = crypto
+            .get_identity()
+            .map(|id| id.public_key_hex)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        let addr = crypto.pq_address_hex().ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> {
+                "no ML-DSA primary identity (cannot derive value address)".into()
+            },
+        )?;
+        (pk, addr)
+    };
 
     // ── 1. Read inputs (peer contributions + validation count) ──
     let peer_contribs = collect_peer_contributions(state).await;
@@ -74,20 +92,28 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
     let total_mined = state.node.ledger.read().await.stats().total_mined;
     let emission_this_tick = p2p::reputation::emission_for_tick(total_mined);
     // Garde-fou : ne jamais dépasser l'émission décroissante de ce tick.
+    // REPUT-ID-1: the local reputation actor is keyed by the ML-DSA **address**
+    // (the economic actor), not the transport key. `peer_contribs` stays
+    // transport-keyed — peers are network entities identified by their transport
+    // pubkey (`peer_info`); Shapley sums their contribution *values*, so mixing
+    // the local address into that map is harmless (keys only need to be distinct).
     let (raw_uqta, kwh) = state.node.reputation.write().await
-        .uptime_tick(&pk, blocks_verified, emission_this_tick, &peer_contribs);
+        .uptime_tick(&addr, blocks_verified, emission_this_tick, &peer_contribs);
     let uqta_mined = raw_uqta.min(emission_this_tick);
 
     // ── 3. Apply to ledger AND capture the freshly-built tx in one scope ──
-    let mining_tx = state.node.ledger.write().await.mine_tx(&pk, uqta_mined, kwh);
+    // PQ-MIG-3B: the reward credits the ML-DSA **address** (`tx.to = addr`).
+    let mining_tx = state.node.ledger.write().await.mine_tx(&addr, uqta_mined, kwh);
 
     // ── 4. Mirror into CRDT dual-ledger (only if non-zero) ──────
     if uqta_mined > 0 {
         state.node.consensus.write().await
-            .ledger.credit("network", &pk, uqta_mined);
+            .ledger.credit("network", &addr, uqta_mined);
     }
 
     // ── 5. Broadcast mining TX (uses captured tx, no ledger re-read) ──
+    // The envelope is signed by the Ed25519 transport key (`pk`); the tx inside
+    // already credits `addr`.
     broadcast_mining_tx(state, &pk, &mining_tx).await;
 
     *tick = tick.wrapping_add(1);
@@ -96,7 +122,7 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
     // Mining TXs accumulate in pending for ALL nodes, but only the
     // PoS-elected leader for this slot actually seals them into a block.
     if tick.is_multiple_of(SEAL_EVERY_N_TICKS) {
-        pos_seal_if_leader(state, &pk).await;
+        pos_seal_if_leader(state, &addr, &pk).await;
     }
 
     let elapsed = tick_start.elapsed();
@@ -151,8 +177,12 @@ async fn broadcast_mining_tx(
 }
 
 /// Seal a block and broadcast it to peers.
-async fn seal_and_broadcast(state: &AppState, pk: &str) {
-    let sealed = state.node.ledger.write().await.seal_if_pending(pk, 0.0);
+///
+/// PQ-MIG-3B: `addr` (the ML-DSA **address**) is the block's miner-reward target
+/// (value identity); `pk` (the Ed25519 **transport** key) signs the carrying
+/// gossip envelope.
+async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
+    let sealed = state.node.ledger.write().await.seal_if_pending(addr, 0.0);
     if let Some(b) = sealed {
         log::info!("◈ [Ledger] Block #{} sealed ({} tx)", b.index, b.transactions.len());
         if let Ok(block_json) = serde_json::to_string(&b) {
@@ -173,7 +203,12 @@ async fn seal_and_broadcast(state: &AppState, pk: &str) {
 ///
 /// If no validators have sufficient stake, falls back to the original
 /// seal_and_broadcast (permissionless mode for bootstrap).
-async fn pos_seal_if_leader(state: &AppState, pk: &str) {
+///
+/// PQ-MIG-3B: `addr` (the ML-DSA address) is the value identity used for BOTH
+/// the proposer election (the validator set is address-keyed via
+/// `validator_stakes()`) AND the sealed block's miner reward; `pk` (Ed25519)
+/// signs the carrying gossip envelope.
+async fn pos_seal_if_leader(state: &AppState, addr: &str, pk: &str) {
     // Source the election entropy from a *buried* block (LOOKBACK behind the
     // tip), not the freshly-sealed tip, so the immediate proposer can't grind
     // block contents to bias — or re-elect — themselves at the next slot.
@@ -182,7 +217,7 @@ async fn pos_seal_if_leader(state: &AppState, pk: &str) {
         let height = ledger.chain_height();
         if height == 0 {
             // No chain — just seal (bootstrap)
-            seal_and_broadcast(state, pk).await;
+            seal_and_broadcast(state, addr, pk).await;
             return;
         }
         let tip_index = height - 1;
@@ -190,24 +225,23 @@ async fn pos_seal_if_leader(state: &AppState, pk: &str) {
         match ledger.block_at(buried_index) {
             Some(b) => (p2p::pos_consensus::leader_beacon(&b.hash, height), height),
             None => {
-                seal_and_broadcast(state, pk).await;
+                seal_and_broadcast(state, addr, pk).await;
                 return;
             }
         }
     };
 
-    // Build validator set from reputation engine (staked + trust)
-    let (stakes, reputations) = {
-        let rep = state.node.reputation.read().await;
-        let leaderboard = rep.get_leaderboard(100);
-        let mut stakes = std::collections::HashMap::new();
-        let mut reps = std::collections::HashMap::new();
-        for u in leaderboard {
-            stakes.insert(u.public_key.clone(), u.atn_staked);
-            reps.insert(u.public_key.clone(), u.trust_score as u64);
-        }
-        (stakes, reps)
+    // ONCHAIN-STAKE-1 §4: source the validator set's stake from the **on-chain**
+    // stake state (`Ledger::validator_stakes`), NOT the node-local reputation
+    // leaderboard. The stake is now a pure function of the chain, so every node
+    // computes the same validator set and the same leader — closing the fork
+    // vector. Reputation is off the security path entirely (ADR-002): it no longer
+    // feeds the validator set, so the reputations map is empty.
+    let stakes = {
+        let ledger = state.node.ledger.read().await;
+        ledger.validator_stakes()
     };
+    let reputations: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
     let validators = p2p::pos_consensus::build_validator_set(&stakes, &reputations);
 
@@ -216,7 +250,7 @@ async fn pos_seal_if_leader(state: &AppState, pk: &str) {
     let has_eligible = validators.iter().any(|v| v.stake >= p2p::pos_consensus::MIN_VALIDATOR_STAKE);
     if !has_eligible {
         log::debug!("◈ [PoS] No eligible validators — permissionless seal (bootstrap mode)");
-        seal_and_broadcast(state, pk).await;
+        seal_and_broadcast(state, addr, pk).await;
         return;
     }
 
@@ -235,8 +269,10 @@ async fn pos_seal_if_leader(state: &AppState, pk: &str) {
         .as_secs();
     let elapsed = now.saturating_sub(tip_time);
 
+    // PQ-MIG-3B: the proposer identity matched against the address-keyed
+    // validator set is this node's ML-DSA **address**, not its transport key.
     let (is_valid, is_primary) = p2p::pos_consensus::is_valid_proposer(
-        pk, &beacon, slot, elapsed, &validators,
+        addr, &beacon, slot, elapsed, &validators,
     );
 
     if is_valid {
@@ -245,7 +281,7 @@ async fn pos_seal_if_leader(state: &AppState, pk: &str) {
         } else {
             log::info!("◈ [PoS] We are a FALLBACK proposer for slot {} (elapsed {}s)", slot, elapsed);
         }
-        seal_and_broadcast(state, pk).await;
+        seal_and_broadcast(state, addr, pk).await;
     } else {
         log::debug!(
             "◈ [PoS] Not our turn to propose at slot {} (elapsed {}s) — waiting for leader",

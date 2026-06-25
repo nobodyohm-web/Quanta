@@ -37,7 +37,13 @@
       "Skill(update-config)",
       "Bash(node *)"
     ],
-    "deny": [],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(sudo *)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)"
+    ],
     "defaultMode": "bypassPermissions"
   },
   "effortLevel": "xhigh",

@@ -1402,3 +1402,2250 @@ release · `git diff` **logique seule** · `dispatcher.rs` **intact**.
 
 > **Hors scope.** Borne de validité temporelle des tx (si B révèle un gap → c'en est un, pré-existant) =
 > décision de consensus d'Alexandre. Commit d'un baseline git propre = manuel, Alexandre.
+
+## FORK-CAP-1 — fermer la brèche d'émission sur le chemin fork-reorg (clos, 2026-06-22)
+
+> 🔴 **CRITIQUE** (HARDEN-AUDIT-1, trouvaille #1, confirmée 2×). La branche de validation
+> **fork-reorg sautait `validate_block_emission`** : un adversaire réseau pouvait forger un bloc
+> de remplacement (même hauteur, hash gagnant) avec une récompense `NETWORK→lui` arbitraire,
+> grinder le hash pour gagner le tie-break, et **minter au-delà des 100M** sur tout nœud adoptant
+> le fork — la seule propriété de sûreté monétaire qui ne doit **jamais** céder. Diff **logique
+> seule** ; **2 fichiers** (`ledger.rs`, `sm/sim.rs`) ; `dispatcher.rs` **intact**.
+
+### §1 — Fermeture de la brèche
+- Refactor : `validate_block_emission(&self, block)` délègue à un nouveau
+  `pub(crate) fn validate_block_emission_against(block, prior_mined)` — **une seule source de
+  vérité** (plafond dur `ledger.rs:862` + borne par bloc `876-887`), paramétrée par l'offre
+  **avant** le bloc. Le chemin happy passe `self.stats().total_mined` (`ledger.rs:836`,
+  byte-équivalent à l'ancien `let current = …` ; seule modif du chemin linéaire).
+- Branche fork-reorg : appelle désormais `validate_block_emission_against(&block, prior_mined)`
+  (`ledger.rs:1120`) **avant** toute mutation d'état (`self.chain.pop()` `:1123`), respectant
+  **AUDIT-BLK-2** (valider avant muter). Subtilité corrigée : le bloc **remplace** le tip, donc
+  `prior_mined = total_mined.saturating_sub(our_tip_mining)` (`:1113-1119`) — exclut la récompense
+  du tip retiré, sinon double-comptage → faux rejet d'un reorg honnête près du plafond.
+
+### §2 — Preuve (tests adverses + extension du sweep)
+- **5 tests ledger** pilotant la **branche reorg** (les anciens tests de plafond ne pilotaient que
+  le happy `tip+1`) : `forkcap_reorg_rejects_multiple_mining_rewards` (a), `…_emission_past_hard_cap`
+  (b), `…_emission_per_block_bound` (b′), `…_reward_to_non_miner` (c), + contrôle positif
+  **anti-masquage** `forkcap_reorg_accepts_honest_competing_block` (un fork **honnête** de même
+  hauteur reste **accepté** : `prior_mined` exclut le tip → 2 QTA valident contre 0).
+- **Dents prouvées** : en désactivant la ligne `:1120`, **exactement** (b)/(b′) échouent (l'over-mint
+  est accepté) tandis que (a)/(c) et le contrôle positif passent — la brèche est isolée à l'ajout
+  d'émission ; (a)/(c) sont déjà rejetés par `validate_block_against_prev` (parité structurelle).
+- **DST sweep (sm/sim.rs)** : nouvel **archétype byzantin** `Move::OverEmitReorg` +
+  `forge_over_emit_reorg` (livre un bloc legit puis un sur-émetteur même-hauteur, **timestamp
+  grindé** au-dessus du legit pour atteindre le tie-break → la prod le **rejette** sur la branche
+  reorg) ; câblé dans `scenario_equivocation` (~1/3). **Backstop montant** `Violation::EmissionAmount`
+  dans `check_invariants` (réutilise `validate_block_emission_against`, `sim.rs:474-493`) : si la
+  prod régressait, le sur-émetteur intégré **hurlerait**. 2 tests dédiés
+  (`forkcap_emission_amount_invariant_has_teeth`, `forkcap_sweep_over_emit_reorg_is_rejected`) +
+  **garde anti-vacuité** `has_over_emit_reorg()` dans `t0_8_sweep_exercises_faults` (l'archétype ne
+  peut plus disparaître en silence du sweep — gap remonté par la vérification adverse, **comblé**).
+
+### §3 — Cartographie de la classe « second chemin de validation divergent »
+Énumération de **chaque** contrôle du chemin linéaire et de sa parité sur la branche fork
+(vérifiée indépendamment par un agent adverse relisant le fichier) :
+
+| Contrôle | Linéaire | Fork-reorg | Parité |
+|----------|----------|------------|--------|
+| Continuité d'index | `:808` (`==tip+1`) | `:1075` (`==tip`, même hauteur) | variante **par conception** |
+| Lien au parent | `:816` / `:897` (`tip.hash`) | `:1099`/`:1103` (`chain[tip-1].hash`, AUDIT-BLK-2) | variante **par conception** |
+| ≤1 tx de minage | `validate_block_against_prev :916` | **même fn** `:1103` | **parité** |
+| Coinbase `from==NETWORK` | `:923` | **même fn** `:1103` | **parité** |
+| Coinbase `to==miner` | `:929` | **même fn** `:1103` | **parité** |
+| Signature par tx (`verify_tx`) | `:936-943` | **même fn** `:1103` | **parité** |
+| Merkle root recalculé | `:944` | **même fn** `:1103` | **parité** |
+| Hash de bloc recalculé (BLK-HASH-1) | `:944-963` | **même fn** `:1103` | **parité** |
+| Plafond dur 100M | `:824→836→862` | `:1120` (FORK-CAP) | parité (variante `prior_mined`) |
+| Borne d'émission/bloc | `:836→876-887` | `:1120` (FORK-CAP) | parité (variante `prior_mined`) |
+| Signature Ed25519 d'enveloppe | pipeline `dispatcher` ⑧ | **même** appel unique `integrate_remote_block` | uniforme en amont |
+
+**Résultat : aucune divergence de validation résiduelle** entre les deux chemins — chaque contrôle
+présent côté linéaire est appliqué côté fork. La classe est **close pour cette paire**.
+
+**Divergences restantes (reportées, NON corrigées ici) :**
+- *Par conception, correctes* : le tie-break (hash lexicographique) est une règle de **fork-choice**,
+  pas de validation (et le hash n'est cru qu'**après** recalcul `:956-963`, ingrindable) ; la
+  mécanique pop/revert/re-queue (`:1123-1164`, AUDIT-BLK-1 / EMIT-1 §4.1) est de la **gestion d'état**
+  de reorg, toute la validation s'exécutant **avant** la mutation.
+- *Décisions d'Alexandre (§4, à ne pas trancher)* : tie-break **hash vs stake** → [[docs/decisions/ADR-001 — Fork-choice]] ; **acceptation leaderless** (aucun chemin ne vérifie le leader élu — **uniforme**, pas une divergence) → [[docs/decisions/ADR-002 — Validator set & comité BFT]] ; **timestamp de bloc non borné**.
+- **Prochain spec recommandé** : le correctif **durable** de la classe = converger l'orchestration
+  des deux chemins en **une seule** fonction de validation appelée par les deux (ils partagent déjà
+  `validate_block_against_prev` + `validate_block_emission_against`, mais l'enchaînement reste
+  dupliqué). Son propre spec, après cette cartographie.
+
+### Vérification adverse indépendante
+Workflow de 3 agents (lecture seule) relisant le code : **fix-correctness = `sound`** (brèche close
+avant mutation ; `prior_mined` exact, pas de sous/sur-comptage ; happy-path byte-équivalent ; pas de
+masquage) ; **sweep-extension = `sound-with-notes`** (1 gap **basse** : archétype non gardé contre
+disparition → **comblé** par `has_over_emit_reorg()`) ; **class-map** confirme la parité totale
+ci-dessus. Nit relevé (non bloquant) : (a)/(c) sont rejetés par `validate_block_against_prev`, pas par
+l'émission — c'est la **parité structurelle attendue**, l'émission étant prouvée par (b)/(b′)+sweep.
+
+### Auto-revue §3
+- **Pas de masquage** : le bloc fautif est **rejeté** par la validation (`Err` via `?` à `:1120`),
+  jamais filtré ailleurs ; le contrôle positif asserte un **vrai** rejet (tip legit conservé), pas
+  un no-op ; les dents ledger **et** sim assertent des propriétés réelles (b/b′ échouent si la ligne
+  est retirée).
+- **Diff logique seule** : `ledger.rs` **+203 / −1** (la seule suppression = `let current = …` →
+  wrapper+helper), `sm/sim.rs` additif ; pas de nightly-fmt ; **`dispatcher.rs` intact**.
+- **Constitution** : chemin de fix non-test = `saturating_add/sub` + division entière + `?`, **zéro**
+  `unwrap/expect/panic` hors `#[cfg(test)]` ; plafond 100M `MAX_SUPPLY_MICRO` vérifié au consensus sur
+  les **deux** chemins ; aucun float sur le chemin de consensus.
+
+### Porte d'acceptation
+`cargo test --lib` **vert** (**260/0**, +7 : 5 ledger `forkcap_reorg_*` + 2 sim
+`forkcap_emission_amount_invariant_has_teeth` / `forkcap_sweep_over_emit_reorg_is_rejected`) ·
+**sweep par défaut vert** avec l'archétype sur-émetteur en rotation (validation rejette → **zéro
+violation persistante**) · `t0_8_sweep_exercises_faults` garde l'archétype · **C1 vert** ·
+`cargo clippy --lib` et `--lib --tests` **propres** · `src/sm/` sans-IO **propre** · `git diff`
+**logique seule** · **`dispatcher.rs` intact**.
+
+> **Hors scope.** Convergence durable des deux chemins en une fonction unique = **spec dédié**.
+> Fork-choice (hash vs stake), acceptation leaderless, borne temporelle = **décisions d'Alexandre**
+> (ADR-001/002). Commit d'un baseline git propre = **manuel, Alexandre**.
+
+## HARDEN-HYGIENE-1 — passe de durcissement groupée (la classe sans danger) (clos, 2026-06-22)
+
+> Passe groupée de l'hygiénique **indépendant du consensus** (SLICE-CLASS + zeroize + bornes
+> mémoire sûres + dents de tests). Chaque fix = unité distincte + son test. **`dispatcher.rs`
+> intact**, diff **logique seule**, 8 fichiers. Tout item touchant consensus/éviction =
+> **renvoyé en §4**, jamais bundlé.
+
+### §1 — SLICE-CLASS (slicing char-safe)
+- **Un seul helper** `pub(crate) fn short(s, max)` (troncature sur frontière UTF-8 via
+  `is_char_boundary`, `ledger.rs`) appliqué aux **11 sites** de slicing d'octets sur des champs
+  `String` télécommandés de `ledger.rs` : les 2 **durs** `&block.hash[..12]`/`&tip.hash[..12]` de
+  résolution de fork (**critique** C-1.3-fork : un hash court/multioctet paniquait la tâche gossip
+  unique → nœud sourd, DoS distant) **et** les `&champ[..len().min(N)]` char-unsafe
+  (`tx.id`/`block.hash`/`prev_hash`/`miner`, **haute** H-1.3-ledger).
+- **Tests** : `slice_short_is_char_safe` (table, dont le cas qui paniquait : 13 octets, coupe à 12
+  au milieu d'un `é`) + `slice_multibyte_block_hash_does_not_panic_in_fork_log` (intégration : un
+  bloc de fork au hash multioctet atteint l'ex-ligne `[..12]` et est **rejeté** `Err`, plus de
+  panic). **Dents** : la ligne paniquait avant, retourne `Err` après.
+- **§4 — pas d'effet consensus** : tous les slices sont **affichage seul** (`log!`/`format!`) ; le
+  consensus (tie-break, hash, merkle) utilise le champ **complet**, jamais la troncature.
+- **🛑 Renvoyé en §4** : les **2 sites `dispatcher.rs`** (C-1.3-`env.sender` **critique**,
+  H-1.3-`peer_id` **haute**) — `dispatcher.rs` **doit rester intact** et le correctif racine du
+  sender est **PRESIG-ORDER** (exclu de cette passe). `short` est `pub(crate)` pour réemploi par ce
+  spec. (Les slices `peer_id` de `willow_node.rs` sont gardés par `EndpointId::from_str` → ASCII
+  validé, pas un site vulnérable ; laissés tels quels.)
+
+### §2 — ZEROIZE-SWEEP (frères du trou Ed25519 déjà comblé)
+- `CryptoEngine::get_secret_bytes` renvoie désormais un **`Zeroizing<Vec<u8>>`** (auto-effacé chez
+  **tout** appelant, type-enforced) et efface le tableau transitoire `to_bytes()` (`security/mod.rs`).
+- `get_recovery_key` (`lib.rs`) : le hex plein-secret est `Zeroizing` (le `secret` l'est déjà via le
+  retour) — plus rien ne traîne sur le heap après la commande.
+- `pq_vault.rs` : la clé AES dérivée Argon2id (`enc_key`, create **et** unlock) est `Zeroizing` ;
+  `unlock_identity` construit `sk_arr` **depuis la slice** (plus de `.clone()` non effacé) et efface
+  `sk_arr` **et** `sk_bytes`.
+- **Tests** : `get_secret_bytes_is_self_wiping` (l'annotation `Zeroizing<Vec<u8>>` = preuve
+  **compile-time** ; échoue à compiler si on régresse en `Vec`) + `vault_create_unlock_roundtrip_after_clone_removal`
+  (round-trip create→unlock identique après suppression du clone + mauvais mot de passe rejeté =
+  auth non affaiblie). Les effacements locaux (`enc_key`, `sk_arr`) sont couverts **par revue**
+  (non observables au runtime).
+
+### §3 — MEM-BOUNDS (bornes **sûres** uniquement)
+- **`known_peers`** (table de reconnexion **locale**, jamais gossipée → pas de consensus) bornée :
+  helper pur testable `register_known_peer` (cap `MAX_KNOWN_PEERS = 1024`, réclame d'abord une
+  entrée **exhausted** terminale, sinon refuse l'overflow sans jamais évincer un pair vivant) +
+  **GC** des entrées exhausted dans `cleanup_dead_peers` (`willow_node.rs`). **Test**
+  `known_peers_table_stays_bounded` (cap tenu, pair vivant jamais évincé, slot exhausted réclamé).
+- **🛑 Renvoyés en §4 (non bundlés)** :
+  - **Registre `@pseudo`** (`username.rs`) : `apply()` est **commutatif/ordre-indépendant**
+    (convergence gossip) ; un cap par-owner naïf est **ordre-dépendant** (quels N pseudos survivent
+    dépend de l'ordre) → **casse la convergence**. L'audit lui-même le qualifie de « choix
+    anti-spam économique/consensus ». = **décision d'Alexandre + spec convergence-preserving**.
+  - **Mempool** (`pending`) : la politique d'éviction **affecte le consensus** (ce qui entre en
+    bloc) — explicitement hors passe.
+  - **`peer_country_reports`, `peer_info`** : insertion dans **`dispatcher.rs`** (intact) → bornes
+    à faire dans le spec qui touchera le dispatcher.
+
+### §4 — TEST-TEETH (donner des dents aux tests vacueux nommés)
+- `s3_replay_tx_rejected` : **rejoue** désormais la tx signée via `replay_remote_tx` et asserte
+  rejet (dedup `seen_tx_hashes`) **+ soldes inchangés** (avant : une seule tx, jamais de replay).
+- `s5_negative_balance_impossible` / `p1_balance_never_negative` : ajout de l'assertion de
+  **conservation** (`Σ soldes + burned == minted`) + résidu exact (avant : `let _balance` jeté).
+- `int2_balance_cache_matches_full_scan` : comparaison **symétrique** des ensembles de clés
+  non-nulles + total (avant : itérait les clés du scan seul → un compte fantôme du cache passait).
+- `proptest_transfer_with_burn_*` : assertion de **post-état** (conservation indépendante de la
+  formule du burn ; rejet ⇒ solde inchangé). `boundary_amounts` n'avait **aucune** assertion.
+- `test_shapley_score_is_the_weighted_sum_of_fractions` (**nouveau**) : épingle le score
+  **pré-normalisation** contre une somme pondérée **calculée à la main** (4 fractions distinctes),
+  là où `test_shares_sum_to_one` est une **tautologie** de normalisation.
+- **Flake résolu** : `d1_fork_resolution_deterministic` et `int1_three_nodes_converge` dépendaient
+  d'un `thread::sleep` (collision même-timestamp→même-hash, ~1/5 d'échec). Rendus **content-distinct**
+  (mineurs/récompenses différents → hash distinct **par contenu**) ; sleeps retirés. **6 runs de
+  suite complète consécutifs verts** confirment la fin du flake.
+- **Déjà clos par FORK-CAP** : `sim-emission-count-only` → le backstop montant `Violation::EmissionAmount`
+  couvre désormais la dimension montant de l'invariant d'émission.
+
+### Auto-revue §3
+- **Pas de masquage** : chaque panique/DoS est **corrigée** (slice char-safe → `Err`, pas avalée) ;
+  chaque test renforcé asserte une propriété **réelle** (conservation, rejet de replay, score
+  pré-norm) ; aucun test mou.
+- **Diff logique seule, sections séparables** : 8 fichiers, `dispatcher.rs` **intact**,
+  `cipher.rs`/`username.rs` **non touchés** (username renvoyé en §4) ; pas de nightly-fmt.
+- **Constitution** : zeroize sur tout secret exporté ; **zéro** `unwrap/expect/panic` hors
+  `#[cfg(test)]` ajouté ; `known_peers` borné sans effet consensus ; locks `peer_info` et
+  `known_peers` pris **séparément** dans `cleanup_dead_peers` (pas de chevauchement → pas de
+  deadlock).
+
+### Porte d'acceptation
+`cargo test --lib` **vert et stable** (**266/0**, +6 nouveaux : 2 slice, 2 zeroize, 1 mem-bounds,
+1 shapley ; + 7 tests **renforcés** ; flake éliminé, **6 stress runs verts**) ·
+`cargo clippy --lib` et `--lib --tests` **propres** · build **non-test** compile · `src/sm/`
+sans-IO **propre** · **C1 vert** · **sweep par défaut vert** · `git diff` **logique seule** ·
+**`dispatcher.rs` intact**.
+
+> **Renvoyés en specs dédiés (§4).** SLICE dispatcher (`env.sender`/`peer_id`) → avec **PRESIG-ORDER**.
+> Cap registre `@pseudo` **convergence-preserving** = décision d'Alexandre. Borne **mempool** =
+> décision d'éviction consensus. Bornes `peer_country`/`peer_info` = avec le spec dispatcher.
+> **TX-AUTH-NONCE**, **CRDT** (borner/retirer), **convergence des deux chemins** = inchangés, à venir.
+> Commit d'un baseline git propre = **manuel, Alexandre**.
+
+## PRESIG-ORDER — vérifier la signature AVANT toute mutation d'état par-expéditeur (clos, 2026-06-22)
+
+> 🔴 Ferme **NONCE-MEM** (critique) + **SLICE-SENDER/PEERID** (critique/haute) de HARDEN-AUDIT-1.
+> **Première modification de `dispatcher.rs`** (le pipeline de sécurité, jusqu'ici intact) — la
+> garde « dispatcher intact » des passes précédentes ne s'applique pas ici, c'est l'objet même du
+> spec. Changement **contenu à `dispatcher.rs`** (réemploie `short` de HYGIENE).
+
+### §1 — Réordonnancement (la classe « état muté avant la signature »)
+- **Avant** : `dispatch_incoming` écrivait les maps par-expéditeur `rate_counters` (rate-limit) et
+  `last_nonces` (nonce) — toutes deux `.entry(env.sender).or_insert(...)` — **avant** la vérif
+  Ed25519. `env.sender` étant **non authentifié et usurpable**, un attaquant **sans clé** faisait
+  croître ces maps sans borne (OOM distant, **NONCE-MEM**).
+- **Après** : la vérif de signature (`verify_envelope_signature`) est déplacée **avant** rate-limit
+  et nonce. Nouvel ordre : taille → JSON → ban → dedup → compta NET-9 → fraîcheur → **SIGNATURE** →
+  rate-limit → nonce → dispatch. Seul un expéditeur ayant **réellement signé** atteint les maps ;
+  un sender usurpé est droppé à la signature **sans rien muter**. Aligne le code sur le principe
+  **B1 « Verify-Before-Process »** déjà documenté en tête de fichier.
+- **Filtres bon marché en amont préservés** (taille/JSON/ban/dedup/fraîcheur) → un flot bad-sig est
+  écrémé **avant** de payer la vérif (seuls les messages uniques+frais la paient).
+- **Bonus** (relevé par la revue) : ferme aussi un **empoisonnement de nonce** — sous l'ancien ordre
+  un attaquant usurpait `env.sender=victime` avec un nonce haut, poussant le high-water de la
+  victime et faisant **rejeter ses vrais messages** ; désormais seul un envelope **signé** avance
+  le high-water.
+
+### §2 — Slicing char-safe (les 2 sites dispatcher différés de HYGIENE)
+- Les **27** slices d'octets sur champs `String` télécommandés (`env.sender`, `sender`, `peer_id`,
+  `sender_pk`, `from`, `peer_id_clone`) → `short()` (helper char-safe de HYGIENE, `pub(crate)`).
+  **Zéro** slice d'octet brut restant dans `dispatcher.rs` (grep `[..]` = ∅). Ferme
+  **SLICE-SENDER** (critique) + **SLICE-PEERID** (haute) : plus de panic multioctet → nœud sourd.
+
+### §3 — Test comportemental (pilote le vrai pipeline)
+- `presig_bad_signature_writes_no_per_sender_state` (`#[tokio::test]`) : construit un `AppState`
+  in-memory, livre une enveloppe **bad-sig à sender usurpé** (fraîche, id unique, non bannie → elle
+  traverse réellement ban/dedup/fraîcheur), appelle `dispatch_incoming`, et asserte
+  `last_nonces` **ET** `rate_counters` **vides**. **Dents prouvées** : en simulant l'ancien ordre
+  (écritures avant vérif), le test **échoue** (le sender usurpé crée une entrée).
+- `presig_valid_signature_is_admitted_and_tracked` : une enveloppe correctement signée est admise
+  et **enregistrée** (high-water nonce = 1, bucket rate présent) → la voie légitime n'est pas cassée.
+
+### Vérification adverse indépendante
+Workflow 3 lentilles (lecture seule) : **reorder-correctness = `sound`** (aucun contrôle sauté ;
+anti-replay nonce identique, juste déplacé ; `ban→ReportPeer` intact ; filtres bon marché bien en
+amont), **dos-tradeoff = `sound`** (dedup LRU 100K + fraîcheur ±90s écrèment le flot → coût CPU
+borné par le transport, **net gain** vs croissance mémoire non bornée ; NET-9 = `get_mut` seul, pas
+d'insertion), **antireplay-and-slices = `sound`** (anti-replay intact ; **0** slice brut ; test
+**non-vacueux**). **Zéro problème de fond.** Seul **nit** (2 lentilles) : commentaires « ±5 min »
+périmés vs ±90s réel → **corrigés** (`dispatcher.rs:233`, `:293`).
+
+### §4 — Renvoyé en spec dédié (non bundlé)
+- **Cap des maps `last_nonces`/`rate_counters`** : après réordonnancement, le vecteur **gratuit**
+  (sender usurpé, sans clé) est **fermé** ; il reste un résidu **Sybil** (N keypairs valides → N
+  entrées, borné par le coût de keygen + le transport). Le combler proprement = **éviction
+  par-péremption ≥90s** (anti-replay-safe : un message ré-émis après éviction serait de toute façon
+  périmé à la fraîcheur), ce qui exige d'ajouter un **last-seen par entrée à `NonceTracker`** →
+  touche la sémantique anti-replay = **décision + spec dédié** (couplé à **TX-AUTH-NONCE**).
+- **Compromis CPU assumé** : la vérif après dedup/fraîcheur est bornée ; documenté.
+
+### Porte d'acceptation
+`cargo test --lib` **vert** (**268/0**, +2 : `presig_bad_signature_writes_no_per_sender_state`,
+`presig_valid_signature_is_admitted_and_tracked`) · `cargo clippy --lib` et `--lib --tests`
+**propres** · build **non-test** compile · `src/sm/` sans-IO **propre** · **C1 vert** · **sweep par
+défaut vert** · `git diff` **contenu à `dispatcher.rs`** (+ réemploi `ledger::short`).
+
+> **Renvoyés.** Cap maps nonce/rate (anti-replay-safe) + **TX-AUTH-NONCE** (le hang ~2⁶⁴ + censure,
+> niveau ledger) = spec dédié. **CRDT**, **convergence des deux chemins de validation** = à venir.
+> Commit d'un baseline git propre = **manuel, Alexandre**.
+
+## TX-AUTH-NONCE-1 — authentifier et borner le nonce et le hash de tx (clos, 2026-06-22)
+
+> 🔴 CRITIQUE. Le **nonce** et le **hash** d'une tx vivaient **hors du préimage signé** →
+> falsifiables sur une tx signée (griefing/censure), et une boucle de gap de nonce pouvait être
+> poussée à **~2⁶⁴ sous le lock du ledger** (hang global). Changement **profond** (le préimage
+> signé). Pré-genèse → **aucune migration**. Diff logique seule ; **C1 préservé**.
+
+### Étape 0 — cartographie FORK-CAP (rapportée, verbatim)
+Relecture de la §3 FORK-CAP : la branche reorg vérifie, **via le `validate_block_against_prev`
+partagé** (`:1103`), la **signature par tx** (`verify_tx`, parité), le **merkle** recalculé, le
+**hash de bloc** recalculé (BLK-HASH-1), et la structure coinbase — **tous en parité**. Après
+FORK-CAP elle applique aussi l'émission (`:1120`). **« Résultat : aucune divergence de validation
+résiduelle. »** → la branche reorg ne saute **que l'émission** (close), **jamais la signature ni la
+structure** → **PROCÉDER** (pas d'escalade vers la convergence des chemins).
+
+### §1 — Borner le hang (le DoS immédiat, indépendant de l'auth)
+- `apply_verified_remote_tx` rejette `nonce > current + MAX_NONCE_GAP` **avant** d'appliquer
+  (mutation nulle), et l'avance du high-water passe de la boucle `for _ in current..new_hw` (qui,
+  avec `nonce≈u64::MAX`, itérait **~2⁶⁴ sous le lock ledger**) à `raise_nonce_high_water` (**set
+  O(1)** monotone). C'est **l'unique** avance partagée → couvre **tous** les appelants, dont
+  l'appel **direct** du dispatcher (`dispatcher.rs:858`). **§4 — valeur de borne** :
+  `MAX_NONCE_GAP = 1_024` (tolère le réordonnancement gossip) = **choix de politique signalé**
+  (l'**existence** de la borne est requise ; la **valeur** est d'Alexandre). Rejet logué (debug).
+
+### §2 + §3 — Préimage signé + recalcul du hash
+- **Un seul** helper `tx_signing_preimage(id,from,to,amount,ts,type,nonce)` = ancien préimage
+  6-champs **+ `:nonce`**. Utilisé **identiquement** aux **3 sites** : création (`next_tx_at`),
+  récompense NETWORK (`coalesce_block_rewards`, nonce 0), vérification (`verify_tx`). La signature
+  **couvre** désormais le nonce → un tiers ne peut plus l'altérer.
+- **§3** : `verify_tx` **recalcule** le hash depuis le contenu et **rejette** (`Ok(false)`) si
+  `tx.hash` du fil ≠ recalculé → plus de malléabilité (le dedup `seen_tx_hashes` est clé sur
+  `tx.hash`).
+- **BLK-HASH-1** : le merkle de bloc (`tx_content_bytes`) liait **déjà** le nonce + la signature,
+  **indépendamment** de `tx.hash` → blocs **inchangés**, deux nœuds à jour acceptent exactement les
+  mêmes blocs (pas de split). `tx.hash` ne sert que d'identité/dedup.
+
+### §4 — Cap anti-replay-safe des maps `NonceTracker` (différé de PRESIG-ORDER)
+- `NonceTracker` gagne `last_seen` + `note_activity_and_prune` : **péremption** (évince les entrées
+  oisives `≥ NONCE_ENTRY_TTL_SECS = 120s`, **> la fenêtre de fraîcheur ±90s** → un rejeu d'une
+  entrée évincée est **déjà périmé**, droppé à la fraîcheur **avant** la porte nonce =
+  **anti-replay-safe**) **ET** **borne de taille absolue** (`MAX_TRACKED_SENDERS = 100_000`,
+  éviction du plus ancien quand pleine). O(1) sous le cap ; le prune O(n) ne tourne qu'au-dessus.
+  Les 3 maps restent synchrones (sous-ensembles de `last_seen`).
+- **🛑 Garde-fou « `dispatcher.rs` intact » vs §4** : le §4 **exige** le cap sur `NonceTracker`
+  (qui vit dans `dispatcher.rs`). **Résolution rapportée** : seules les **internes de
+  `NonceTracker`** sont touchées ; le **pipeline `dispatch_incoming` est byte-identique** (vérifié
+  par diff — l'ordre PRESIG-ORDER est intact).
+- **§4 — politiques signalées (décisions d'Alexandre)** : valeurs exactes `MAX_TRACKED_SENDERS`,
+  `NONCE_ENTRY_TTL_SECS` (contrainte : `> 90s`) et **l'ordre d'éviction par taille**. **Résidu
+  documenté** : sous un flood Sybil **rapide** (>100K clés fraîches en <120s), la borne de taille
+  peut évincer une entrée `< TTL` et rouvrir brièvement sa fenêtre de nonce — **mitigé** par le
+  dedup `seen_messages` (id d'enveloppe, LRU 100K) + les enveloppes **signées** (PRESIG). Acté
+  comme tradeoff §4, **non tranché en dur en silence**.
+
+### Vérification adverse indépendante
+Workflow 3 lentilles (lecture seule) : **preimage-determinism = `sound`**, **hang-and-auth =
+`sound-with-notes`**, **cap-antireplay = `sound`**. Confirmé : hang éliminé pour **tout** appelant ;
+**un seul** préimage (grep arbre = aucun site manqué hors helper ; blocs distincts corrects) ; C1
+byte-identique (préimage = fonction pure, uniforme) ; **aucun** chemin d'admission ne contourne
+`verify_tx` ; maps synchrones + bornées ; pipeline PRESIG intact ; tests `s12_*` inchangés. Nits
+traités : log de rejet de gap **ajouté** ; test du **chemin borne-taille** (tout-frais) **ajouté**.
+**Décision relevée (à Alexandre)** : le changement de préimage modifie le `tx.hash` des tx
+**utilisateur** ; au redémarrage, une chaîne persistée contenant des tx user **ancien-format** est
+rejetée par `verify_chain` → **repart de la genèse**. **Conforme au spec** (« pré-genèse, aucune
+migration »), mais `TORUS_PROTOCOL_VERSION` reste **2** → **bump de version wire** (pour signaler le
+changement de format) = **décision d'Alexandre** (non faite ici : choix de protocole).
+
+### Auto-revue §3
+- **Pas de masquage** : le hang et la falsifiabilité se ferment **à la racine** (borne O(1) +
+  préimage signé + recalcul de hash), jamais par un test mou ; les 6 tests assertent des propriétés
+  réelles, dents prouvées (désactiver la borne fait **échouer** l'anti-hang).
+- **Diff logique seule** : `ledger.rs` +204 (§1/§2/§3/§5), `dispatcher.rs` +97 (`NonceTracker` §4 +
+  test) ; **pipeline `dispatch_incoming` byte-identique** ; `sm/sim.rs` et `ledger_types.rs`
+  **inchangés** ; pas de nightly-fmt.
+- **Constitution** : `Result/?`, **zéro** `unwrap/expect` hors `#[cfg(test)]` ajouté ; `saturating_*`
+  partout ; aucun float consensus ; nonce **désormais** dans le préimage signé + recalculé.
+
+### Porte d'acceptation
+`cargo test --lib` **vert** (**274/0**, +6 : `txauth_far_ahead_nonce_rejected_no_hang`,
+`txauth_forged_nonce_breaks_signature`, `txauth_malleable_hash_rejected`,
+`txauth_valid_signed_tx_verifies_and_hash_binds_nonce`,
+`txauth_nonce_tracker_eviction_is_bounded_and_anti_replay_safe`,
+`txauth_nonce_tracker_size_bound_holds_when_all_fresh`) · `cargo clippy --lib` et `--lib --tests`
+**propres** · `src/sm/` sans-IO **propre** · **C1 vert** · **sweep par défaut vert** · `git diff`
+**logique seule** (`ledger.rs` + `NonceTracker`) · **pipeline `dispatch_incoming` intact**.
+
+> **Renvoyés / décisions d'Alexandre.** `MAX_NONCE_GAP`, `MAX_TRACKED_SENDERS`, `NONCE_ENTRY_TTL_SECS`,
+> ordre d'éviction par taille + son résidu Sybil-rapide ; **bump `TORUS_PROTOCOL_VERSION`** (format
+> de préimage changé, pré-genèse). **CRDT** (borner/retirer), **convergence des deux chemins de
+> validation** = derniers items du backlog, à venir. Commit baseline git = **manuel, Alexandre**.
+
+## CRDT-BOUND-1 — retirer ou borner le ledger CRDT fantôme (clos, 2026-06-23)
+
+> 🟠 Dernier item de HARDEN-AUDIT-1. **Audit d'abord** : vivacité = un fait dans le code.
+> Verdict : **vestige référencé mais inerte** → biais conservateur + garde-fou → **borner** (pas
+> retirer), escalader **garder-vs-retirer** à Alexandre. Diff **contenu à `consensus.rs`** ;
+> `dispatcher.rs` **intact**.
+
+### §1 — Constat de vivacité (le fait, avec preuves — vérifié indépendamment)
+- **`ConsensusEngine::merge_peer` : ZÉRO appelant** en prod (seuls la déf `consensus.rs` + un
+  `.merge()` dans `simulation.rs` qui est `#[cfg(test)]`). → **le CRDT n'est jamais synchronisé
+  entre nœuds** ; sa raison d'être (convergence) est **morte**.
+- **`CrdtLedger::balance_of` : ZÉRO consommateur** (grep arbre vide). → les **valeurs** de solde
+  CRDT ne sont **jamais lues**. L'état autoritatif est **exclusivement** le `balance_cache` du
+  ledger linéaire (soldes, conservation, validation, fork — tous le linéaire).
+- **Seule lecture prod** : `account_count()` (`lib.rs:393`, stat frontend `get_consensus_stats`).
+  Écritures : `dispatcher.rs:847-848` (Transfer distant), `mining_loop.rs:86-87` (minage local),
+  `lib.rs:645-646` (transfert local). `snapshot/restore` ne lit qu'un **count** (non load-bearing).
+- **Verdict** : c'est le **double-ledger « Phase 3 » vestigial** de l'ère social/marketplace.
+  **Référencé** (account_count + persistance + écritures) → **non mort proprement** ; et le retrait
+  **toucherait `dispatcher.rs`** (l'écriture `:847`). **Biais conservateur §3 + garde-fou
+  `dispatcher.rs` intact → BORNER (§2b), pas retirer.**
+
+### §2b — Corriger les deux bugs (vivant → on ne retire pas)
+- **Boucle O(montant) → O(1)** : `for _ in 0..clamped { inc/dec; apply }` (jusqu'à **10M itérations
+  par tx sous le lock consensus** = DoS CPU) remplacée par `PNCounter::inc_many/dec_many` (crdts 7,
+  `pncounter.rs:125/133`). **Sémantiquement identique** (vérifié contre la source : `inc_many(N)`
+  produit le **même** Op final que N `inc()` — `merge()` et `balance_of` inchangés).
+- **Croissance bornée** : cap dur `MAX_CRDT_ACCOUNTS = 100_000` via `admit(addr)` — garde les
+  **K clés lexicographiquement les plus petites** (évince le max courant si l'entrant est plus
+  petit). Politique **ordre-indépendante** (ensemble gardé = fonction pure du SET, pas de l'ordre →
+  « pas un compteur dépendant de l'ordre », la contrainte du cap `@pseudo`). `merge()` **la méthode**
+  reste commutative/idempotente (la borne est sur le chemin d'écriture, pas dans `merge`).
+- **Bonus SLICE-CLASS** : les 2 slices d'octets `&recipient/&sender[..min(12)]` (`consensus.rs:46/65`,
+  panic multioctet dans le log de cap, manqués par HYGIENE) → `short()`.
+
+### §4 — Décisions renvoyées à Alexandre (non tranchées)
+- **Garder-vs-retirer (le vrai arbitrage)** : le CRDT est **retirable** — merge mort, soldes non
+  lus. La vérif adverse a même trouvé que **`get_consensus_stats` (sa seule lecture prod) n'a aucun
+  invocateur frontend vivant** (grep `src/` = ∅) → **même `account_count` est UI-mort** → l'argument
+  penche vers **retirer** (du code mort = surface d'attaque). **Mais** le retrait touche
+  `dispatcher.rs` + recâble la persistance + 6 fichiers = **refonte comptable = décision
+  d'Alexandre** (garder-borné, fait ici, vs supprimer le double-ledger). **Non refactoré en silence.**
+- **Politique** : valeur `MAX_CRDT_ACCOUNTS`, ordre d'éviction (lex-smallest-K).
+- **Caveat merge** : l'éviction **perd** l'état d'un PN-Counter, irrécupérable par `merge` — **sans
+  effet aujourd'hui** (merge mort), mais si la **sync CRDT inter-nœuds est ressuscitée**, une borne
+  dure sur une map PN-Counter mergée est un **vrai choix de conception** à revisiter.
+
+### Vérification adverse indépendante
+2 lentilles (lecture seule) : **liveness = `sound`** (les 4 faits confirmés ; aucun consommateur
+manqué ; bornage-pas-retrait correct), **bound-correctness = `sound`** (`inc_many ≡ N·inc` prouvé
+contre la source crdts 7.3.2 + le test du crate ; borne mémoire réelle + ordre-indépendante ;
+**aucune régression** au ledger autoritatif/conservation/consensus — stores `consensus` et `ledger`
+séparés). **Zéro problème de fond** ; nits : `get_consensus_stats` UI-mort (renforce le verdict
+vestige → ajouté à l'escalade §4), le slice `debit` était défensif (le `credit`/recipient était le
+vrai site joignable).
+
+### Auto-revue §3
+- **Pas de masquage** : la boucle et la croissance se ferment **à la racine** (O(1) + cap
+  ordre-indépendant) ; le no-op `admit` ne touche **que** le shadow-ledger non autoritatif (soldes
+  non lus) — **jamais** le ledger linéaire/la conservation. Dents prouvées (cap désactivé → la map
+  monte à 100050, le test échoue). Pas de demi-retrait/squelette neutralisé.
+- **Diff logique seule** : **un seul fichier**, `consensus.rs` (+102) ; `dispatcher.rs`, `lib.rs`,
+  `willow_node.rs` **inchangés** ; pas de nightly-fmt.
+- **Constitution** : `Result`/no-panic (que `unwrap_or`) ; `tokio` non concerné ; aucun float
+  consensus ; le CRDT reste non autoritatif.
+
+### Porte d'acceptation
+`cargo test --lib` **vert** (**276/0**, +2 : `crdt_large_amount_is_o1_no_loop_dos`,
+`crdt_balances_bounded_and_kept_set_is_order_independent`) · `cargo clippy --lib` et `--lib --tests`
+**propres** · `src/sm/` sans-IO **propre** · **C1 vert** · **sweep + conservation verts** ·
+`git diff` **logique seule** (`consensus.rs` seul) · **`dispatcher.rs` intact**.
+
+> **Dernier verrou de l'audit posé.** Reste de la phase de durcissement : la **convergence des deux
+> chemins de validation** (petite — la cartographie FORK-CAP a montré qu'ils partagent déjà le cœur
+> `validate_block_against_prev` + `validate_block_emission_against`). Décisions d'Alexandre :
+> garder-vs-retirer le CRDT, le bump `TORUS_PROTOCOL_VERSION`, les valeurs de politique, et le
+> gadget de finalité (ADR-001). Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## ADR-005 — Agrégation des votes & certificats de finalité (cadré, **non tranché**) (2026-06-23)
+
+> Spec `QUANTA_ADR_005_AGGREGATION.md`. **Pas une tâche de code** : c'est une **décision de
+> conception** (ligne 6-9 de la spec) dont l'implémentation est explicitement **différée à des
+> specs ultérieures, après ratification**. Tout y est **§4 hard-stop**. Action faite : **landé le
+> brouillon comme ADR canonique** au registre `docs/decisions/`, **câblé les deux index**, et
+> **remonté les paramètres à Alexandre sans en trancher aucun**. Status gravé : **proposé / open**.
+
+### Ce qui a été fait (documentation seule, zéro code)
+- **Record canonique créé** : `docs/decisions/ADR-005 — Agrégation des votes & certificats de
+  finalité.md`, en **style maison** (frontmatter `type: adr` / `id: ADR-005` / `status: open` /
+  `decision-class: 🛑 hard-stop` / `updated: 2026-06-23` ; fil d'Ariane `← [[README|Registre ADR]]` ;
+  callout `[!info] PROPOSÉ`). Contenu **fidèle** au brouillon (contexte BLS-vs-ML-DSA, décision
+  hybride proposée, modèle de sécurité « finalité PQ-**ancrée** », séquencement étape 1 PQ-direct →
+  étape 2 BLS+ancrage, alternatives, conséquences, questions ouvertes).
+- **Index câblés** :
+  - `docs/decisions/README.md` : ligne ADR-005 ajoutée à la table « Les ADR » (classe 🛑, statut
+    **PROPOSÉE**) ; méta-décision **§7 « Signatures »** de l'umbrella passée de ⬜ *OUVERTE* à 🟡
+    *cadrée par ADR-005* ; `updated:` → 2026-06-23.
+  - `docs/00 — Pilotage QUANTA.md` : la ligne « Signatures (agrégation votes) » pointe désormais
+    sur `[[ADR-005 …]]` au lieu de `README §7`, statut **PROPOSÉE — hybride BLS + ancrage PQ**.
+- **Brouillon racine** `QUANTA_ADR_005_AGGREGATION.md` **conservé** (la spec/source qui a piloté la
+  tâche, comme tous les `QUANTA_*.md` au root ; le livrable est le record canonique sous
+  `docs/decisions/`, à l'identique du couple `QUANTA_HARDENING_AUDIT.md` → `docs/AUDIT_HARDENING_PHASE0.md`).
+
+### §4 — Renvoyé à Alexandre (non tranché ici)
+Le statut reste **proposé** ; **aucun** paramètre n'est résolu par Claude (règle §4 : cadrer +
+remonter, pas trancher). À ratifier :
+- **K** (intervalle d'ancrage PQ) — borne la fenêtre où un futur adversaire quantique pourrait
+  forger la finalité *récente* ; compromis sécurité/coût.
+- **Taille de comité** + **seuil de quorum** (tolérance byzantine ⅓).
+- **Format de certificat** (agrégat BLS + clés agrégées ; structure de l'ancre PQ d'époque).
+- **Courbe BLS** (p. ex. BLS12-381) + **schéma PQ d'ancrage** (ML-DSA, cohérent tx).
+- **Arbitrage de fond** : tolérer une primitive **non-PQ** (BLS) sur la finalité récente, ou
+  exiger **100 % hybride PQ** (= étape 1 PQ-pur indéfiniment). C'est la méta-décision **§7
+  Signatures** du `DESIGN-CONSENSUS-DAG-BFT`, même axe que l'ECVRF d'ADR-004.
+- **Articulation slashing↔agrégat** (attribuer une faute dans un agrégat BLS) → à la conception du
+  gadget, dépend d'ADR-003.
+
+### Auto-revue §3
+- **Rien tranché en silence** : le record est gravé **PROPOSÉ/open**, jamais `accepted` ; la
+  décision hybride y est une **recommandation cadrée** (options + conséquences + ce-dont-j'ai-
+  besoin-de-toi), exactement le rôle Claude du registre ADR — la ratification reste à Alexandre,
+  comme ADR-002/004.
+- **Honnêteté préservée** : modèle de sécurité formulé « finalité PQ-**ancrée** » (pas « PQ pure »),
+  note d'honnêteté whitepaper conservée ; les tx restent signées PQ de bout en bout.
+- **Diff documentation seule** : 1 fichier créé (`docs/decisions/ADR-005 …`) + 2 index touchés
+  (`README.md`, `00 — Pilotage QUANTA.md`) ; **zéro `.rs` touché**, `dispatcher.rs`/ledger/`src/sm/`
+  **intacts** → pas de porte de tests Rust applicable (rien de compilé n'a changé). Suite, C1,
+  sweep, conservation **non impactés** (aucun code).
+
+### Porte d'acceptation (ADR = record + escalade, pas code)
+ADR-005 **gravé** au registre canonique avec frontmatter maison · **2 index** cohérents (README +
+Pilotage) · **status proposé**, tous les 🛑 listés et **renvoyés en §4** · brouillon source conservé ·
+**aucune décision résolue par Claude**.
+
+> **Débloque, une fois ratifié**, la **conception protocolaire du gadget de finalité** (machine à
+> états des votes, époques, ancrage, certificats) — le gros morceau restant de la trajectoire
+> consensus (Option 1, [[docs/decisions/ADR-001 — Fork-choice|ADR-001]]). Côté durcissement, ne
+> reste que la **convergence des deux chemins de validation**. Décisions d'Alexandre en attente :
+> ratification ADR-005 (K/comité/quorum/courbe), ADR-003 (slashing), ADR-004 (aléa), garder-vs-
+> retirer le CRDT, bump `TORUS_PROTOCOL_VERSION`. Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## ADR-005 (révision) — Alexandre tranche : **post-quantique pur, par époque** (supersède l'hybride) (2026-06-23)
+
+> Spec `QUANTA_ADR_005_AGGREGATION_1.md`. Alexandre a **tranché** la méta-décision §7 « Signatures » :
+> au lieu de l'hybride BLS + ancrage PQ que l'ADR-005 *proposait*, la finalité sera **post-quantique
+> pure (ML-DSA), finalisée par époque**. L'ADR-005 était **OUVERTE/proposée** (jamais acceptée) → flux
+> normal `OUVERTE → il tranche → ACCEPTÉE` : **mise à jour en place** (même ID, même fichier), l'hybride
+> devient une **alternative rejetée** au sein d'ADR-005. **Toujours pas de code** (décision de conception).
+
+### Le renversement (et pourquoi il tient)
+La tension « BLS compact mais non-PQ » vs « ML-DSA PQ mais lourd » **se dissout** sous deux faits :
+1. **Vote éphémère ≠ tx éternelle** : l'urgence PQ est sur ce qui doit rester infalsifiable des années
+   (les **tx**, déjà PQ) ; un vote de finalité ne vit que dans sa fenêtre de décision → pas de
+   « harvest-now-forge-later » dessus → l'argument « trou BLS acceptable » tombe.
+2. **Coût = granularité** : « N × 3,3 Ko » n'est vrai que **bloc-par-bloc**. **Par époque** → un cert
+   par lot ; ≈ 50 validateurs ⇒ ≈ **165 Ko/époque**, amortis + élagables. Gérable.
+→ **PQ pur viable et préférable** à comité modeste, derrière une **abstraction de certificat** (BLS/SNARK
+restent un remplacement **local** futur, pas une réécriture).
+
+### Ce qui a été fait (documentation seule, zéro code)
+- **`docs/decisions/ADR-005 — …`** réécrit : titre `(post-quantique pur, par époque)` ; frontmatter
+  `status: accepted` + `decided: 2026-06-23` + `ratification: à confirmer formellement (Alexandre)` +
+  `supersedes-proposal: hybride BLS + ancrage PQ`. Callout `[!success] DÉCISION`. Sections refondues
+  (contexte = les 2 observations ; décision PQ pur/époque + abstraction ; modèle « PQ pur **sans
+  astérisque** » ; pourquoi-pas-l'hybride ; hybride **rejeté** en alternatives ; évolution SNARK différée).
+- **Index** : `README.md` → ligne ADR-005 **ACCEPTÉE** (PQ pur/époque) + méta-décision §7 « Signatures »
+  passée ⬜/🟡 → **✅ tranchée** (PQ pur, ratif. formelle en attente). `00 — Pilotage` → ligne Signatures
+  **ACCEPTÉE** (PQ pur ML-DSA par époque).
+- **Entrée tracker précédente conservée** (log append-only) : elle décrivait fidèlement la *proposition*
+  hybride au moment où elle a été landée ; cette entrée-ci en **acte le renversement**.
+- **Spec source** `QUANTA_ADR_005_AGGREGATION_1.md` conservée au root.
+
+### §4 — Encore renvoyé à Alexandre (non tranché ici)
+La **direction** est tranchée *par Alexandre* (je grave, je ne tranche pas). Restent **🛑** : **taille de
+comité** + **seuil de quorum** (⅓) ; **longueur d'époque** ; **niveau ML-DSA** (65 probable) ; **format
+du certificat d'époque** + **stratégie d'élagage** ; et la **ratification formelle** elle-même. Surveillé
+(pas à résoudre) : le **seuil de comité** au-delà duquel l'agrégation redeviendrait nécessaire.
+
+### Auto-revue §3
+- **Rien tranché en silence, rien sur-réclamé** : `accepted` reflète le statut **qu'Alexandre a écrit**
+  dans la spec (« accepté »), tandis que `ratification: à confirmer formellement` + le callout gardent
+  le **caveat** honnête ; je n'ai inventé aucune valeur de paramètre (tous listés 🛑).
+- **Convention ADR respectée** : on **ne réécrit pas une ADR *acceptée*** — celle-ci était **proposée**,
+  donc l'update en place est le cycle de vie normal ; l'hybride survit comme **alternative rejetée**
+  tracée (pas d'effacement de l'historique : tracker précédent intact + `supersedes-proposal`).
+- **Diff documentation seule** : 0 `.rs` ; `dispatcher.rs`/ledger/`src/sm/` intacts ; pas de porte de
+  tests Rust applicable (rien de compilé n'a changé) ; C1/sweep/conservation non impactés.
+
+### Porte d'acceptation (ADR = record + escalade, pas code)
+ADR-005 **regravé ACCEPTÉE** (PQ pur/époque) avec caveat ratification · **2 index** cohérents (méta-
+décision §7 **tranchée**) · hybride **rejeté & tracé** · sous-paramètres 🛑 **renvoyés en §4** · spec
+source conservée · **aucune valeur résolue par Claude**.
+
+> **Débloque** la **conception protocolaire du gadget** sans dépendance crypto résiduelle : on construit
+> **en ML-DSA dès l'étape 1**, finalisation **par époque** (propriété structurante). Reste, côté
+> durcissement, la **convergence des deux chemins de validation**. Décisions d'Alexandre en attente :
+> ratification formelle ADR-005 + ses sous-paramètres, ADR-003 (slashing), ADR-004 (aléa), garder-vs-
+> retirer le CRDT, bump `TORUS_PROTOCOL_VERSION`. Commit baseline git = **manuel, Alexandre**.
+
+## Gadget de finalité — conception gravée (style Casper FFG, PQ, par époque) (cadré, **non tranché**) (2026-06-23)
+
+La suite naturelle d'ADR-005 : la **conception protocolaire** du gadget de finalité, raisonnée de
+bout en bout **avant** tout code. Spec source : `QUANTA_FINALITY_GADGET_DESIGN.md`. Ce n'est **pas**
+une tâche de code — c'est l'**orfèvrerie** (le protocole), à valider avant transcription.
+
+**Choix d'architecture (d'Alexandre, je grave) :** ancrage **Casper FFG** (gadget de finalité
+d'Ethereum, sûreté responsable démontrée), adapté à Quanta — **points de contrôle aux frontières
+d'époque**, votes **ML-DSA** (socle [[ADR-005 — Agrégation des votes & certificats de finalité]]),
+règle **justification/finalisation en deux temps** (⅔ de l'enjeu × 2 époques liées), **certificat
+par époque** (≈165 Ko / 50 validateurs, élagable) derrière l'abstraction ADR-005, **fork-choice
+conscient de la finalité**, et **deux conditions de slashing** (pas de double vote, pas de vote
+enveloppant) d'où **découle** [[ADR-003 — Slashing (accountable safety)]].
+
+### Ce qui a été fait (documentation seule)
+- **Créé** `docs/DESIGN-FINALITY-GADGET.md` — record canonique des 14 sections en style vault
+  (frontmatter `type: design` / `status: proposé (à valider — Alexandre)` ; breadcrumb umbrella +
+  socle ADR-001→005 ; callouts `[!abstract]`/`[!success]` théorème de sûreté responsable /
+  `[!warning]` honnêteté vivacité / `[!question]` §12 🛑 / `[!info]` cible d'acceptation harnais).
+  Wikilinks réparés vers les **noms de fichiers ADR réels**.
+- **Index** : `docs/decisions/README.md` (Cadre → pointeur vers le protocole détaillé sous le
+  périmètre Option 1) ; `docs/00 — Pilotage QUANTA.md` (Carte → Consensus futur = umbrella +
+  gadget) ; `docs/DESIGN-CONSENSUS-DAG-BFT.md` (Phase 1 Option 1 → pointeur conception détaillée +
+  note que les 4 méta-décisions §7 sont depuis cadrées en ADR-001→005).
+- **Spec source** `QUANTA_FINALITY_GADGET_DESIGN.md` conservée au root.
+
+### Ancrage d'honnêteté radicale — la cible d'acceptation existe **déjà** dans le code
+Le « test 2b » que la conception invoque est **réel** :
+`t0_8_multiblock_partition_currently_diverges_gadget_deferred` (`src-tauri/src/sm/sim.rs:2932`).
+Son docstring se nomme lui-même « **the acceptance target for the finality gadget** » et asserte
+**aujourd'hui** la divergence de sûreté (trou ADR-001, marqué *gadget-deferred*, pas d'escalade car
+attendu) ; quand le gadget arrive on **inverse** vers `tips[a] == tips[b]`. Le garde **§4 reste** :
+une rupture **conservation/émission** au heal = **panic** (bug NEUF), jamais un *gadget-deferred*.
+La conception est donc fidèle au harnais, pas une promesse en l'air.
+
+### §4 — Renvoyé à Alexandre (non tranché ici)
+La **règle d'arrêt §4** ([[QUANTA_AGENT_CONSTITUTION]]) nomme explicitement « **quel modèle de
+finalité, faut-il du slashing et comment** » : je **cadre**, je ne tranche pas. Restent **🛑** :
+**`E` longueur d'époque** (latence de finalité) ; **seuil de quorum** (⅔ à confirmer) ; **variante
+exacte de fork-choice** conscient de la finalité (simple → LMD-GHOST si besoin) ; **montants +
+fenêtre de slashing** des deux conditions ([[ADR-003 — Slashing (accountable safety)]]) ;
+**pénalité d'inactivité** éventuelle (*inactivity leak*). Ces choix recoupent les sous-paramètres
+ouverts d'ADR-002/003/004/005. **La validation de la conception elle-même** (« à valider ») est
+aussi d'Alexandre.
+
+### Auto-revue §3
+- **Rien tranché en silence** : `status: proposé (à valider — Alexandre)` (pas `accepted`) ; le
+  modèle Casper FFG est la **direction qu'Alexandre a écrite** dans la spec, marquée « à valider » ;
+  aucun paramètre §12 inventé (tous listés 🛑).
+- **Honnêteté §13 préservée** : §7/§8 explicitement des **esquisses, pas des preuves** ;
+  formalisation + audit externe **devant** ; « architecture de départ, pas un théorème clos ».
+- **Diff documentation seule** : 0 `.rs` modifié ; `dispatcher.rs`/ledger/`src/sm/` intacts ; pas de
+  porte de tests Rust applicable (rien de compilé n'a changé). Citation `sim.rs:2932` **vérifiée**.
+
+### Porte d'acceptation (conception = record + escalade, pas code)
+Gadget de finalité **gravé canoniquement** (`DESIGN-FINALITY-GADGET.md`, 14 sections fidèles) ·
+**3 index** pointent vers lui · cible d'acceptation harnais **citée et vérifiée** (`sim.rs:2932`) ·
+paramètres §12 🛑 **renvoyés en §4** · honnêteté §13 **conservée** · spec source gardée · **aucune
+valeur ni validation résolue par Claude**.
+
+> **Débloque** l'implémentation par étapes du §14 (squelette d'époque + invariant de sûreté de
+> finalité **d'abord**, chaque pièce falsifiée par le harnais DST avant la suivante) — **une fois
+> la conception validée et les 🛑 du §12 tranchés par Alexandre**. Décisions d'Alexandre en
+> attente : validation du modèle de finalité + ses paramètres §12, ratification formelle ADR-005,
+> ADR-003 (slashing), ADR-004 (aléa). Commit baseline git = **manuel, Alexandre**.
+
+## GADGET-1 — socle époque/point de contrôle + invariant de sûreté de finalité (avec dents) (2026-06-23)
+
+Première **pièce de code** du gadget de finalité (`QUANTA_GADGET_PIECE1.md`, conception §2/§4/§11/§14
+de [[DESIGN-FINALITY-GADGET]]). Le **bedrock** : découper la chaîne en époques, nommer les points de
+contrôle, suivre l'ensemble finalisé (genèse seule), et poser l'invariant de **sûreté de finalité**
+dans le harnais **avec ses dents**. **Rien ne finalise encore** (la règle justify/finalize est
+GADGET-3) ; on pose la fondation et le crochet de vérification. Diff logique seule, déterministe.
+
+### Ce qui a été fait
+- **`src-tauri/src/sm/finality.rs`** (NEW, pur, sans-IO) :
+  - `EPOCH_LENGTH_BLOCKS` — **placeholder marqué 🛑** (E = décision §12 d'Alexandre ; valeur
+    provisoire 32 façon Casper, **non tranchée**). Toutes les fonctions prennent `epoch_len` en
+    **paramètre** → squelette **paramétrique**, correct pour tout `E ≥ 1` ; fixer la vraie valeur =
+    une ligne, **aucune logique à revoir**.
+  - `Checkpoint { epoch, height, hash }` ; fonctions **pures** `epoch_of_height`, `is_epoch_boundary`,
+    `checkpoint_at_epoch`, `checkpoints` (aucune horloge ni entropie ; `E=0` clampé → pas de
+    div-by-zero, panic-free). 7 tests unitaires (division d'époque, frontières, genèse, tip, `E=0`).
+  - `FinalizedSet` (clé = époque, `BTreeMap` déterministe) `genesis_only(hash)` = `{genèse}`, `get`,
+    `iter`, `insert` (le **crochet** où GADGET-3 se branchera — *pas* de logique de finalisation ici).
+- **`sm/node.rs`** : champ `finalized: FinalizedSet` init `{genèse}` dans les 3 constructeurs (hash
+  du bloc 0 via `first()`, panic-free) ; accessor `finalized()` ; `record_finalized_for_test`
+  (**`#[cfg(test)]`** — injection de test uniquement, hors chemin de finalisation réel).
+- **`sm/sim.rs`** : `Violation::FinalitySafety { seed, epoch, node_a, hash_a, node_b, hash_b }`
+  (miroir de `Safety`, `epoch` au lieu d'`index`) ; invariant câblé dans `check_invariants` (donc
+  dans `run_checked`/sweep par défaut) : **jamais deux points de contrôle finalisés en conflit à la
+  même époque**, itération à clés triées (nœuds `BTreeMap` × époques `BTreeMap`) → 1ʳᵉ violation
+  reproductible.
+- **`sm/mod.rs`** : `pub mod finality;` + re-export.
+
+### Preuve que l'invariant a des dents (anti-vacuité §4 — crucial)
+Comme **rien ne finalise** (genèse seule), l'invariant serait **vacueusement vrai** : c'est le piège
+« test qui passe quoi qu'il arrive ». Donc **violation plantée** :
+`gadget_1_finality_safety_invariant_has_teeth` injecte dans deux nœuds **deux checkpoints finalisés
+en conflit à l'époque 1** (hash différents, hors de tout chemin réel) et asserte que
+`check_invariants` **mord** en `FinalitySafety{epoch=1, seed}`. Doublé d'un test **anti-faux-positif**
+`gadget_1_finality_safety_accepts_matching_checkpoints` (mêmes checkpoints → reste **vert**) qui
+prouve que l'invariant fire sur le **conflit**, pas sur la simple présence. Le vérificateur mord
+**dès maintenant**, avant que la finalisation existe.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **285 / 0** (dont +9 GADGET-1 : 7 unitaires finality + dents + anti-faux-pos).
+- `cargo clippy --lib -- -D warnings` **propre** ; **bare `cargo clippy -- -D warnings` propre** aussi.
+- **C1 vert** (`determinism_meta_test_128_runs_are_byte_identical`) — `fingerprint` ne lit pas
+  `finalized`, init déterministe, rien ne change dans `handle` ⇒ trace inchangée.
+- **Sweep par défaut vert** (`t0_8_clean_default_sweep` + 12 `t0_8`) : l'invariant tourne à chaque
+  pas ; genèse seule finalisée partout ⇒ accord d'époque 0 ⇒ jamais déclenché en sweep honnête.
+- `sm/` **sans-IO** préservé (finality.rs pur ; init `finalized` déterministe) ; `src/sm/` C1 intact.
+- **Diff logique seule** : 4 fichiers (finality.rs NEW + node/sim/mod), siblings clock/effect/event/rng
+  **intacts**, `dispatcher.rs` **intact**, aucun reformatage.
+
+### §4 — décision ouverte signalée (non tranchée)
+**`E` (longueur d'époque) = 🛑 décision d'Alexandre.** Le squelette est **paramétrique** ; la
+constante `EPOCH_LENGTH_BLOCKS` est un **placeholder marqué** (32 provisoire, façon Casper), pas une
+valeur arrêtée — gravée comme telle dans la docstring + ici. Rien d'autre du §12 n'est figé.
+
+### Auto-revue §3
+- **Pas de masquage, pas de test vacueux** : l'invariant est **prouvé mordant** (violation plantée)
+  AVANT toute finalisation — exactement l'exigence §4 du spec. L'anti-faux-positif le borne par le
+  haut (accord ≠ violation).
+- **Honnête sur le périmètre** : **rien ne finalise** (pas de règle justify/finalize — c'est
+  GADGET-3) ; `record_finalized_for_test` est `#[cfg(test)]` pour ne pas exposer une finalisation
+  sans règle sur la surface prod. `E` non inventé en dur (placeholder marqué, §4).
+- **Note clippy honnête (hors périmètre)** : `cargo clippy --all-targets` (code de test seul)
+  signale un `result_large_err` **pré-existant** sur `run_checked_steps` — la taille de `Violation`
+  est **inchangée** (fixée par le variant `Safety` pré-existant, 2×`String`+2×`PeerId` = 112 o, que
+  mon `FinalitySafety` ne fait qu'**égaler** après trim des `height_a/height_b` redondants). Non
+  introduit par GADGET-1, hors de la porte du spec (`--lib`) ; **pas de `#[allow]` posé** (ce serait
+  masquer un lint pré-existant hors scope). Signalé, pas dissimulé.
+- **Déterminisme** : itération à clés triées partout ; `BTreeMap` pour `finalized` ; aucune lecture
+  d'horloge/entropie. C1 + sweep le confirment.
+
+> **Suite** (en attente de la validation de la conception + de `E` par Alexandre) : **GADGET-2**
+> (votes ML-DSA + certificat d'époque derrière l'abstraction ADR-005), puis **GADGET-3** (la règle
+> justify/finalize en deux temps — là où la finalité devient réelle et où l'invariant **cesse d'être
+> vacueux**), puis le fork-choice conscient de la finalité et la **bascule du test 2b**
+> (`t0_8_multiblock_partition_currently_diverges_gadget_deferred`, intact aujourd'hui). Commit
+> baseline git = **manuel, Alexandre**.
+
+## STAKE-WEIGHT-1 — poids du comité = enjeu on-chain seul (implémente ADR-002) (2026-06-23)
+
+Audit-d'abord (`QUANTA_STAKE_WEIGHT.md`), prérequis de soundness pour GADGET-2 (le certificat
+d'époque mesure ⅔ de l'**enjeu** — n'a de sens que si le poids EST l'enjeu seul). ADR-002 (accepté)
+a **déjà tranché** : poids consensus = **enjeu on-chain seul**, réputation hors du chemin de sécurité.
+
+### §1 — Constat d'audit (le poids était **teinté de réputation**)
+- `Validator::weight()` (`pos_consensus.rs`) calculait `stake + min(reputation × 10_000, stake)` — la
+  **réputation entrait dans le poids** (jusqu'à **doubler** le poids d'élection). C'est le bonus
+  plafonné de l'audit 3.4, désormais **superséé par ADR-002**.
+- Consommateurs : `elect_leader` + `elect_fallback_leader` (somme cumulée de `weight()`) → **toute
+  l'élection** était réputation-pondérée. `is_valid_proposer` passe par l'élection.
+- **La faille de soundness** : la réputation est **mesurée localement** (`mining_loop.rs:212`
+  construit le set depuis `leaderboard` local — `trust_score` par nœud). Deux nœuds honnêtes à
+  réputations locales différentes ⇒ poids différents ⇒ **leaders différents au même slot ⇒ fork**
+  (exactement « le vrai trou » d'ADR-002).
+- **Unique consommateur** du champ `Validator.reputation` = `weight()` (aucune autre lecture
+  `validator.reputation` dans le code). Shapley n'est **pas** dans le chemin d'élection (distribution
+  d'émission seulement) — confirmé.
+
+### §2b — Conversion en enjeu-seul (action)
+- **`Validator::weight()` → `self.stake`** (enjeu on-chain SEUL), conforme au 1ᵉʳ bullet d'ADR-002
+  (« retirer le bonus réputation `min(rep×10_000, stake)` »). Détache la réputation de **tout** le
+  chemin (élection + futur quorum) en **un seul point** (le chokepoint `weight()`).
+- **Champ `reputation` conservé** (le spec le permet : « ne la supprime pas forcément ») mais
+  re-documenté **signal applicatif à effet consensus NUL**, avec ⚠️ « ne JAMAIS réintroduire un
+  terme non-enjeu ici » sur `weight()`. Diff minimal : aucun des 30 sites `Validator{…}` (tous
+  `reputation: 0`) ni `reputation.rs` ni le harnais ne sont touchés.
+- **Docs honnêteté** alignées sur le code : module-doc `pos_consensus.rs`, **CLAUDE.md** (`Poids =
+  stake`), **WHITEPAPER.md** + **WHITEPAPER_FR.md** (formule `stake + reputation·10_000` retirée).
+
+### §3 — Propriété anti-divergence (prouvée, avec dents)
+- `weight_is_stake_only_reputation_has_no_effect` : `weight() == stake` quelle que soit la réputation.
+- `weight_and_election_are_identical_across_nodes_despite_local_reputation` (**la propriété ADR-002**) :
+  deux nœuds, **mêmes stakes** mais **réputations locales divergentes** → (a) poids identiques par
+  validateur, (b) **même leader élu sur 2 000 slots**. **Dents/anti-vacuité** : le test calcule en
+  ligne l'ancienne formule `stake + min(rep×10_000, stake)` et **asserte qu'elle AURAIT divergé** sur
+  ces entrées — donc l'accord prouvé n'est pas dû à des entrées identiques, mais à la suppression du
+  terme réputation. Test unitaire déterministe (pas besoin du harnais : le poids/élection se testent
+  directement, plus net).
+
+### §4 — Reste d'ADR-002 = travail dérivé plus grand, sous-décisions OUVERTES (non tranché ici)
+ADR-002 liste d'autres dérivés **au-delà** de « poids = enjeu » : **snapshot de stake on-chain par
+epoch** (remplace `build_validator_set` qui source aujourd'hui le stake depuis le **leaderboard
+local**), **tx `Stake`/`Unstake`** + comptabilité du stake au ledger, quorum 2f+1. Ceux-ci ont des
+**sous-décisions ouvertes** (longueur d'epoch = §12, format des tx, délai d'unbonding) → **signalés,
+pas tranchés** (règle §4). **Honnêteté** : cette tâche retire le **terme réputation** du poids (la
+part décidée et indépendante du §12) ; la détermination pleine inter-nœuds exige encore que la
+**source du stake** devienne un objet on-chain (l'epoch snapshot) — c'est le prochain dérivé, pas
+celui-ci. La propriété §3 prouve précisément ce qui est clos : *à stakes donnés, la réputation ne
+fait plus diverger l'élection*.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **286 / 0** (16 pos_consensus dont le test de poids déterministe §3 ; le test
+  3.4 `reputation_bonus_capped_at_stake` **réécrit** en `weight_is_stake_only_…` ; overflow whale
+  **rebasé** sur des stakes qui somment > u64::MAX en poids-stake-seul).
+- `cargo clippy --lib -- -D warnings` **propre** + **bare `cargo clippy` propre**.
+- **C1 vert** + **sweep par défaut vert** (aucun changement de comportement du harnais : tous ses
+  Validators étaient déjà `reputation: 0` ⇒ `weight()=stake` y tenait déjà).
+- **Diff logique seule** : **1 fichier code** (`pos_consensus.rs`) + 3 docs d'honnêteté (CLAUDE/WP) ;
+  `reputation.rs`/`sm/`/`dispatcher.rs` **intacts** ; aucun reformatage.
+
+### Auto-revue §3
+- **Pas de masquage** : c'était une **vraie** faille de soundness (poids réputation-pondéré, mesuré
+  localement) — corrigée à la racine (`weight()`), pas neutralisée par un test mou ; le test §3 a des
+  **dents** (prouve que l'ancien chemin divergeait).
+- **Pas de sur-portée** : je n'ai tranché ni taille de comité ni quorum ni epoch length (§12 /
+  GADGET-2 = Alexandre) ; le principe (enjeu seul) était **déjà décidé** par ADR-002, pas rediscuté.
+- **Honnête sur le résiduel** : la source du stake reste locale jusqu'au snapshot on-chain par epoch
+  (dérivé ADR-002 suivant, sous-décisions ouvertes) — explicitement signalé, pas dissimulé.
+
+> **Débloque GADGET-2** sur une base saine (le poids est l'enjeu). GADGET-2 (votes ML-DSA + certificat
+> d'époque) reste **en attente de la validation de la conception + des §12 d'Alexandre** (E, taille de
+> comité, quorum). Prochain dérivé ADR-002 (indépendant de ce spec) : **snapshot de stake on-chain par
+> epoch** + tx `Stake`/`Unstake` (sous-décisions ouvertes). Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## ONCHAIN-STAKE-1 — sourcer l'enjeu depuis la chaîne (ferme la 2ᵉ moitié du vecteur de fork) (2026-06-23)
+
+Suite directe de STAKE-WEIGHT-1 §4 (`QUANTA_ONCHAIN_STAKE.md`). STAKE-WEIGHT-1 a retiré la
+**réputation** du poids ; mais l'enjeu lui-même restait **lu localement** (`build_validator_set`
+sourçait le stake depuis le **leaderboard** local). Deux nœuds pouvaient donc **encore** diverger,
+non plus par la réputation mais par l'enjeu. Ce spec ferme la **seconde moitié** : l'enjeu devient
+un **état du ledger**, identique sur tous les nœuds.
+
+### §1 — État d'enjeu dans le ledger (block-index-anchored)
+- Nouveaux états ledger : `staked: HashMap<pk,u64>` (enjeu **bondé** = poids consensus) et
+  `unbonding: HashMap<pk, Vec<UnbondEntry{amount, unlock_height, tx_hash}>>`.
+- Le solde se scinde en **dépensable** / **staké** / **en-déverrouillage**. Le poids bondé est
+  **dérivé de la chaîne**, ancré à `block.index` (commit au scellage via `apply_block_stake_effects`),
+  donc une **fonction pure de la chaîne** : un nœud live, restauré (`rebuild_cache`) ou synchronisé
+  calcule des maps **byte-identiques**. `UNBONDING_PERIOD_BLOCKS` = **10 080** (🛑, ~2 sem. de blocs,
+  contrainte gravée `≥ fenêtre de slashing` ADR-003) ; `MIN_VALIDATOR_STAKE` reste 🛑 (§12).
+
+### §2/§3 — tx Stake / Unstake (pas de nouveau type gossip, `dispatcher.rs` intact)
+- `Stake`/`Unstake` sont des `Transaction` signées (`from=pk`, `to="STAKE"`), propagées par le
+  `BroadcastTx` **existant** + admises par `apply_remote_tx_checked` existant → **zéro** changement
+  de `dispatcher.rs` / wire. `verify_tx` n'exempte pas `STAKE` (≠ `NETWORK`/`ESCROW`) → on ne peut
+  pas forger l'enjeu d'autrui.
+- **Unstake** : `staké → en-déverrouillage`, `unlock = block.index + UNBONDING_PERIOD_BLOCKS`
+  (indexé **par hauteur**, jamais l'horloge). Maturation = retour `STAKE→dépensable` à la hauteur
+  d'unlock.
+
+### §4 — Rewire `build_validator_set` (le cœur du fix)
+- `mining_loop.rs` source désormais l'enjeu depuis **`ledger.validator_stakes()`** (état on-chain),
+  **plus** le leaderboard ; `reputations` = map vide (réputation hors chemin, ADR-002). Le poids
+  d'un validateur est une **fonction pure de la chaîne**, identique partout.
+
+### 🛑 Revue adversariale → 1 **CRITIQUE** trouvé et corrigé (HARDEN-STAKE-1)
+Une revue multi-agents (6 dimensions × find→verify) a trouvé une **vraie faille de conservation**
+dans ma 1ʳᵉ implémentation : un `Stake` **en attente ne verrouillait pas** les fonds (effet appliqué
+au scellage seulement). Course honnête : `stake_tx(100)` puis `transfer(50)` des mêmes pièces →
+`balance_of` ne baissait pas → au scellage le cache passait **négatif**, le clamp `.max(0)` le
+masquait, et `Σ dépensable + enjeu + brûlé` **dépassait `miné`** (µQTA fabriqués). Variante pire :
+un `Stake` **forgé** `amount ≫ solde` fabriquait du **poids consensus** depuis rien.
+- **Fix (HARDEN-STAKE-1)** : un `Stake` est désormais un mouvement **neutre en solde** `pk → puits
+  "STAKE"`, appliqué au **mempool** (`cache_apply_tx`, chemin générique ; `STAKE` n'est PAS synthétique
+  → le puits est crédité, rien n'est détruit). Les fonds **se verrouillent à l'admission** → la course
+  transfert est **rejetée**, le cache ne passe jamais négatif, conservation exacte à chaque pas. Le
+  **poids bondé** (map `staked`, consommée par `validator_stakes`) est committé **séparément au bloc**
+  → un Stake en attente verrouille mais ne pèse qu'une fois scellé (donc **pas de fork** depuis le
+  mempool : le poids reste chaîne-seul).
+- **Conservation (harnais)** = `Σ all_balances(dépensable, hors STAKE) + locked_stake_total
+  [= solde du puits STAKE] + brûlé == miné`. `all_balances` exclut `STAKE`.
+- **Re-vérif adversariale du fix** (4 contrôles ciblés) : double-dépense **CLOSED**, déterminisme
+  **vérifié** (poids chaîne-seul, `rebuild` byte-identique), intégrité du puits en **reorg** saine,
+  **aucune** nouvelle rupture de conservation.
+
+### §7/§5 — propriétés prouvées (avec dents)
+- `onchain_stake_weight_identical_across_nodes_despite_local_leaderboards` (§7) : deux nœuds **même
+  chaîne** → **mêmes poids** + **même leader sur 2 000 slots**, malgré des leaderboards locaux
+  divergents. **Dents** : l'ancienne source (leaderboard local) AURAIT divergé sur ces entrées.
+- `onchain_stake_conservation_through_stake_unstake_unlock` (§5) : Stake → Unstake → déblocage
+  **conserve à chaque pas** ; fonds dépensables **seulement** à la hauteur d'unlock (verrou testé à
+  `unlock-1`, libéré à `unlock`).
+- `harden_stake_pending_stake_locks_funds_no_double_spend` (**régression du CRITIQUE**) : `stake_tx`
+  verrouille → transfert concurrent **rejeté** → cache **jamais négatif**, conservation tenue.
+- `onchain_stake_state_survives_snapshot_restore_byte_identical` : live ≡ restauré (puits + maps).
+- `onchain_stake_harness_conservation_counts_locked_stake` : le vérificateur du harnais compte le
+  puits (dents : l'ancienne formule `dépensable + brûlé` le **rejetait** faussement).
+
+### §4 (Constitution) — signalé, **non tranché**
+- **Validation de couverture au bloc** : un `Stake` (ou `Transfer`) **forgé** `amount > solde`
+  (contournant le builder) fait passer le cache négatif et — pour un Stake — **fabrique du poids**.
+  C'est la **même** lacune pré-existante de **non-validation des soldes au scellage** qui touche
+  **aussi les transferts** (`verify_tx` ne vérifie que les signatures). Fabrication **déterministe**
+  (identique sur tous les nœuds → sybil/économique, **pas un fork**). Régler ça (couverture au bloc,
+  solde chaîne-seul, application leader-only à l'intégration) est un **choix de conception consensus**
+  (lié à ADR-003) → **signalé, pas tranché**. Le HONNÊTE est posé : ONCHAIN-STAKE-1 ne **dégrade pas**
+  la conservation vs le comportement transfert pré-existant ; la course **honnête** est, elle, **close**.
+- Reorg **mono-bloc** (≤1 de profondeur) et `UNBONDING_PERIOD_BLOCKS ≫ 1` ⇒ aucun reorg ne peut
+  enjamber une maturation (la maturation n'est volontairement **pas** annulée au pop).
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **291 / 0** (incl. §5, §7, régression CRITIQUE, live≡restauré, harnais).
+- `cargo clippy --lib -- -D warnings` **propre** + **bare clippy 0 warning**.
+- **C1 vert** + **sweep par défaut vert** (aucune tx d'enjeu dans le sweep ⇒ `locked_stake_total=0`
+  ⇒ conservation inchangée pour les scénarios existants).
+- **Diff logique seule** : **3 fichiers code** (`ledger.rs`, `mining_loop.rs`, `sm/sim.rs`) + docs
+  (CLAUDE.md, WHITEPAPER×2 déjà à « on-chain stake ») ; `dispatcher.rs`/`reputation.rs`/`pos_consensus.rs`/
+  `sm/node.rs` **intacts**.
+
+> **Vecteur de fork entièrement fermé** : réputation hors du poids (STAKE-WEIGHT-1) **et** enjeu sourcé
+> de la chaîne (ici). Le poids consensus est une **fonction pure de l'état**, identique partout — le
+> socle dont GADGET-2 a besoin pour mesurer ⅔ de l'enjeu. **Reste à trancher (Alexandre)** : validation
+> de couverture au bloc (couvre transferts + stakes ; lié ADR-003), valeurs 🛑 `UNBONDING_PERIOD_BLOCKS`
+> / `MIN_VALIDATOR_STAKE` (§12), validation conception finalité + §12 (GADGET-2). Commit baseline git =
+> **manuel, Alexandre**.
+
+---
+
+## COVER-1 — Validation de couverture au bloc (on ne dépense pas ce qu'on n'a pas)
+
+> Résout l'item **« Validation de couverture au bloc »** que ONCHAIN-STAKE-1 §4 avait **signalé,
+> non tranché**. Alexandre a tranché le **principe** (pas un choix §4) : tout bloc rejette une
+> dépense ou un stake **non couvert** par le solde **on-chain**. Indépendant d'ADR-003/slashing
+> (règle fondamentale, pas une pénalité). **Dernier trou de validation** avant le gadget.
+
+### §1 — Où : la validation PARTAGÉE (leçon FORK-CAP)
+- Le contrôle vit dans **`validate_block_against_prev`** — l'unique validateur que **les deux**
+  chemins traversent : intégration **linéaire** (`validate_remote_block` → l. 1249) **et**
+  **fork-reorg** (l. 1532). Un seul contrôle, sur le chemin partagé ; aucun chemin ne peut le sauter
+  (exactement comme FORK-CAP a paramétré `validate_block_emission_against` pour les deux chemins).
+- Nouveau pur **`onchain_spendable_before(prev)`** : solde dépensable **avant le bloc**, **fonction
+  pure de la chaîne** jusqu'à `prev`, **jamais le mempool local** (sinon verdict divergent). Miroir
+  exact de la sémantique du ledger — mouvements génériques (`cache_apply_tx`), le verrou `pk→STAKE`
+  d'un Stake, l'absence d'effet dépensable d'un Unstake, et la **maturation** indexée par hauteur
+  (`mature_unbonding`). Garde anti-dérive `#[cfg(test)]` : le replay == cache live (chaîne sans pending).
+- Reorg : la couverture du **gagnant** est jugée contre la chaîne **SANS le tip** qu'il remplace
+  (`prev_for_remote = chain[tip.index-1]`) — le « avant le bloc » correct pour un bloc de remplacement.
+
+### §2/§3 — Le contrôle : couverture SÉQUENTIELLE + crédits intra-bloc
+- Rejoue les tx du bloc **dans l'ordre** sur un solde courant initialisé depuis `onchain_before`.
+  Chaque tx à expéditeur **réel** (Transfer **ou** Stake) exige `solde_courant ≥ montant` ; sinon
+  **bloc INVALIDE**. L'ordre est déterministe ⇒ tous les nœuds tranchent identiquement.
+- **Expéditeurs synthétiques exemptés** (`NETWORK`/`ESCROW` mintent ; `BURN` n'est qu'une
+  destination) — régis par les règles d'émission, pas par un solde.
+- **Crédits intra-bloc comptent (§3)** : une récompense `NETWORK→mineur` créditée plus tôt dans le
+  **même** bloc finance une dépense ultérieure (testé : Alice 0 reçoit 5, en dépense 3, **accepté**).
+- **Unstake** : aucun débit dépensable (reclasse des coins déjà bondés) ⇒ rien à couvrir ici ; le
+  sur-déliement reste borné par le `saturating_sub` du poids bondé à l'application du bloc.
+
+### §4 — Sort du clamp `.max(0)` : **CONSERVÉ** (branche « ne force pas »)
+- **Investigué, non retiré** — le retrait a de **vrais effets de bord** (le spec anticipe : « si le
+  retrait a d'autres effets, signale-le, ne force pas ») :
+  1. Le cache est **pending-inclus**. L'admission d'une tx **distante** (`replay_remote_tx`) **n'a
+     aucun garde de couverture** — et lui en ajouter un risquerait de rejeter une arrivée
+     **hors-ordre** dont la tx de financement n'a pas encore atterri, cassant la convergence
+     **AUDIT-TX-2** (raison pour laquelle §5 garde la couverture mempool **optionnelle**). Une tx
+     **pending** non couverte peut donc encore rendre une entrée du cache transitoirement négative.
+  2. `i128 as u64` d'un négatif **enroule** vers un solde colossal fabriqué — **pire** que clamper.
+- COVER-1 ferme le non-couvert **au bloc** (état scellé jamais négatif) ; le clamp ne garde plus que
+  le **transitoire mempool** + la sûreté de cast. Un vrai négatif **on-chain** (un bug) reste
+  **bruyant** : il n'atteint jamais le cache (rejeté à la validation), et tout résidu **gonfle** la
+  somme de conservation (`Σ ≠ minted`) au lieu d'être caché. Commentaire posé sur `balance_of`.
+
+### §6 — Tests adverses (tous verts)
+- `cover1_uncovered_transfer_block_rejected` : transfert `50 > 10` on-chain ⇒ **bloc rejeté**.
+- `cover1_uncovered_stake_block_rejected` : Stake `50 > 10` ⇒ **rejeté** (aucun poids forgé).
+- `cover1_sequential_coverage_within_block` : `[→Bob 50, →Carol 60]` **rejeté** (2ᵉ jambe non
+  couverte) ; `[→Bob 50, →Carol 40]` **accepté** — preuve que c'est la **déplétion séquentielle**,
+  pas la présence de deux tx.
+- `cover1_both_paths_reject_uncovered` (**les deux chemins**) : **la même** tx non couverte est
+  rejetée en **linéaire** (height +1) **ET** en **fork-reorg** (gagnant à hash supérieur, jugé sans le
+  tip) ; chaîne **non tronquée** (AUDIT-BLK-2 préservé), conservation intacte.
+- `cover1_valid_block_with_intra_block_credit_passes` : bloc **couvert** (récompense finance la
+  dépense même-bloc, §3) **accepté** — pas de régression de vivacité.
+- `cover1_rejected_uncovered_preserves_conservation` : après rejet, `Σ dépensable+locked+brûlé ==
+  minted`, solde **intact**, **aucune** entrée de cache négative — classe « non-couvert casse/masque
+  la conservation » **fermée à la validation**.
+- `cover1_onchain_replay_matches_live_cache_no_drift` : `onchain_spendable_before` == cache live.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **298 / 0** (291 + 7 COVER-1).
+- `cargo clippy --lib -- -D warnings` **propre**. `--lib --tests` : seule subsiste la lacune
+  **pré-existante** `result_large_err` de `sm/sim.rs:601` (`run_checked_steps`, enum `Violation` —
+  GADGET-1, **pas** COVER-1) ; suivant le précédent GADGET-1, **pas de `#[allow]`** (no-masquage).
+- **C1 vert** (`determinism_meta_test_128_runs_are_byte_identical`) + **sweep par défaut vert** +
+  conservation verte (le sweep honnête ne produit aucune dépense non couverte ⇒ contrôle transparent).
+- **Diff logique seule** : **1 fichier code** (`ledger.rs`) + ce tracker + CLAUDE.md ;
+  `dispatcher.rs`/`pos_consensus.rs`/`sm/*`/`mining_loop.rs`/`reputation.rs` **intacts** (0 réf COVER-1
+  hors `ledger.rs`). `src/sm/` **sans-IO** préservé.
+
+> **Dernier trou de validation fermé** : aucune dépense ni aucun stake non couvert n'est plus
+> **finalisé**, sur les **deux** chemins. La couverture est une **fonction pure de la chaîne** ⇒ verdict
+> identique partout (pas un nouveau vecteur de fork). **Reste à trancher (Alexandre)** : valeurs 🛑
+> `UNBONDING_PERIOD_BLOCKS` / `MIN_VALIDATOR_STAKE` (§12), GADGET-2 (conception finalité + §12 : E,
+> comité, quorum). Commit baseline git = **manuel, Alexandre**.
+
+### Auto-revue — vérification adverse (5 lentilles indépendantes, refute-by-default)
+- **false-accept (inflation)** — *sound* : aucun sur-paiement réel ne passe (i128 signé, check avant
+  mise à jour du running, recalcul chaîne-seul, Stake couvert comme transfert, synthétiques exemptés).
+- **déterminisme** — *sound* : verdict = fonction pure de la chaîne ; aucune dépendance à l'ordre
+  d'itération HashMap (maturation collectée en Vec, soldes additifs), au mempool, ni à l'horloge. C1 vert.
+- **drift** — *sound* : `onchain_spendable_before` == cache live (test no-drift) ; tous types de tx,
+  puits STAKE, maturation byte-identiques à `cache_apply_tx`+`mature_unbonding`.
+- **false-reject « frontière de maturation »** — **RÉFUTÉ** (lentille trop zélée). La maturation
+  `mature_unbonding(block.index)` s'exécute **après** les tx du bloc (`apply_block_stake_effects` est
+  appelé après `cache_apply` ; confirmé `seal_block_at` l. 1131-1134 et integrate). Donc la maturation
+  de hauteur N **n'est pas** disponible aux tx de N — **ni** en couverture (mature jusqu'à `prev.index`)
+  **ni** à l'application. Les deux sont **cohérents**. Pas de divergence : tout nœud *intégrant* calcule
+  `onchain_spendable_before` à l'identique et rejette à l'identique (déterministe). Le flux **honnête**
+  ne produit jamais le cas : le builder `transfer_with_burn` vérifie `balance_of` à **l'admission**, et
+  le crédit de maturation n'entre dans le cache qu'au **scellage** de N → l'utilisateur ne voit ses
+  fonds mûris qu'**après** N → sa dépense atterrit en N+1+, où la couverture les inclut correctement.
+  Rejeter une dépense de fonds mûrissant dans **le même** bloc est conforme au spec (« solde *avant* le
+  bloc » = jusqu'au parent) et à l'intention de tuer le masquage par négatif transitoire.
+- **complétude des chemins de finalisation** — **SIGNALÉ (réel, hors-périmètre §1/§5)** : `seal_block_at`
+  **ne** passe **pas** par `validate_block_against_prev`. Scénario : un pair malveillant gossipe une tx
+  non couverte → `replay_remote_tx` l'admet au mempool **sans garde de couverture** (volontaire, pour les
+  arrivées hors-ordre — **§5 laisse cette couche optionnelle**, car la garder risquerait la convergence
+  AUDIT-TX-2) → si **ce** nœud scelle, le bloc entre dans **sa** chaîne sans contrôle. **Mais** : (a) tout
+  nœud *intégrant* le **rejette** (le contrôle autoritaire d'intégration fait son travail) ⇒ **jamais
+  accepté au niveau réseau**, zéro inflation ; (b) c'est **strictement plus sûr** que l'avant-COVER-1, où
+  la **même** tx était **acceptée partout** (inflation silencieuse réseau) ; (c) borné (NET-14 TTL mempool)
+  et auto-réparé ~50 % au prochain reorg (départage par hash). Le **but** du spec — « aucune dépense non
+  couverte **acceptée sur les deux chemins** [d'intégration] » — est **tenu**. La racine (admission
+  `replay_remote_tx` + scellage local sans contrôle) est une **sous-question de conception consensus**
+  délibérément laissée ouverte (§5 optionnel) — **même item** que le « contrôle de couverture leader-only
+  au scellage / admission » déjà signalé. Constitution §4 : **signalé, non tranché** (options : garde au
+  scellage en excluant les tx non couvertes ; ou garde d'admission en acceptant le risque hors-ordre ;
+  ou statu quo). → **décision Alexandre**, liée à ADR-003 / GADGET.
+
+> **Bilan adverse** : le **livrable du spec** (couverture sur le validateur partagé des deux chemins
+> d'intégration) est **sound** sur les 3 lentilles de correction + la frontière de maturation (réfutée).
+> La seule réserve réelle (`seal_block_at`/admission) est **hors du périmètre explicite §1/§5**,
+> **safety-positive** vs l'existant, et **signalée** pour décision.
+
+---
+
+## COVER-2 — Couverture au seal (construire un bloc valide, pas en rejeter un)
+
+> Résout l'item **`seal_block_at` bypasse la couverture** que la revue adverse de COVER-1 a
+> signalé (auto-corruption locale). Alexandre a tranché le **mécanisme** : au seal on n'**rejette**
+> pas (on fabrique le bloc), on **exclut** les tx non couvertes ⇒ bloc **valide par construction**.
+> Symétrie : **rejet** à la réception (COVER-1), **exclusion** à la production (COVER-2).
+
+### §1 — Une seule source de vérité (réutilisation, pas duplication)
+- Extraction de la règle de couverture séquentielle dans **`uncovered_tx_indices(onchain_before,
+  txs) -> Vec<usize>`** — l'unique implémentation. Deux consommateurs : `validate_block_against_prev`
+  (COVER-1) **rejette** le bloc si non-vide ; `seal_block_at` (COVER-2) **exclut** exactement ces
+  index. Rejet et exclusion **ne peuvent plus diverger** (sinon un bloc auto-scellé serait rejeté par
+  les pairs — l'auto-corruption). `onchain_spendable_before` (COVER-1) réutilisé tel quel.
+
+### §2 — Exclusion séquentielle au seal
+- `seal_block_at` : solde **avant le bloc** = `onchain_spendable_before(prev)` (chaîne-seule,
+  déterministe). Sur les candidats (post-coalesce des récompenses), `uncovered_tx_indices` marque les
+  tx non couvertes (expéditeur réel, solde courant insuffisant) ; **crédits intra-bloc comptés** ;
+  synthétiques + `Unstake` exemptés. Une tx non couverte est une tx d'un expéditeur réel dont la tx
+  effet a **déjà** été appliquée au cache à l'admission (`replay_remote_tx`/builder) ⇒ on
+  **`cache_revert_tx`** pour garder `cache == chaîne+pending`, puis on **drop**. Le bloc scellé ne
+  contient **que** des tx couvertes.
+
+### §3 — L'invariant qui ferme le trou (testé directement)
+- **Tout bloc produit par `seal_block_at` passe `validate_block_against_prev`.** Prouvé par
+  `cover2_self_sealed_block_always_validates` (mempool couvert / entièrement non couvert → bloc vide
+  valide / mixte) et par chaque test COVER-2 (helper `seal_and_validate`). Un nœud ne peut donc plus
+  **ni propager ni sceller** une dépense non couverte ⇒ **auto-corruption locale fermée**.
+
+### §4 — Éviction des tx exclues (signalé)
+- **Défaut appliqué** : la tx exclue est **drop** du mempool + son effet cache **reverté** ; elle
+  **reste dans `seen_tx_hashes`** (donc non ré-admise par `replay_remote_tx`). **Sous-question §4
+  signalée** : une tx *honnête hors-ordre* (financement pas encore arrivé) exclue au seal n'est **pas
+  perdue au niveau réseau** — quand son financement est scellé ailleurs, ce nœud la ré-apprend via la
+  **synchro de blocs** (pas le mempool), et le bloc qui la porte passe alors COVER-1. Compromis :
+  ce nœud ne la **rescellera** pas lui-même (elle est dans `seen`). Alternative (la retirer de `seen`
+  pour ré-admission ultérieure) = plus de complexité + risque de boucle ; **défaut raisonnable =
+  exclure + évincer**, conforme au spec §4. → choix ouvert pour Alexandre s'il veut la politique de
+  rétention.
+
+### §5 — Clamp `.max(0)` : inchangé (comme demandé)
+- COVER-2 ne touche **ni** le clamp **ni** l'admission (`replay_remote_tx` garde sa concession
+  hors-ordre AUDIT-TX-2). Le clamp reste load-bearing pour le cache pending-inclus + la sûreté du
+  cast — exactement la position COVER-1 §4.
+
+### §6 — Tests (tous verts)
+- `cover2_uncovered_transfer_excluded_at_seal` : tx non couverte **absente** du bloc, bloc **valide**,
+  conservation **restaurée** (phantom d'admission annulé par le revert).
+- `cover2_uncovered_stake_excluded_at_seal` : idem Stake (aucun poids bondé).
+- `cover2_sequential_exclusion_at_seal` : 60 couvert scellé, 60 devenu non couvert exclu.
+- `cover2_auto_corruption_scenario_closed` : admet couvert + non couvert via `replay_remote_tx`,
+  scelle ⇒ bloc valide (non couvert exclu) **et un pair (node_b) l'intègre `Ok(true)`** + convergence.
+- `cover2_self_sealed_block_always_validates` (**INVARIANT §3**) : bloc auto-scellé toujours valide.
+- `cover2_covered_txs_sealed_normally_no_regression` : transfert couvert (+ burn) scellé intact.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **306 / 0** (298 + 8 COVER-2), incl. l'invariant §3.
+- `cargo clippy --lib -- -D warnings` **propre**. **C1 vert** + **sweep / reproductibilité / sweep
+  par défaut verts** (l'exclusion ne perturbe pas la convergence honnête : le sweep ne produit aucune
+  tx non couverte ⇒ aucune exclusion ⇒ comportement identique).
+- **Diff logique seule** : **1 fichier code** (`ledger.rs`) + tracker + CLAUDE.md ; `dispatcher.rs`
+  (0 réf COVER-2), `pos_consensus.rs`, `sm/*`, `mining_loop.rs`, `reputation.rs` **intacts** ;
+  `src/sm/` **sans-IO** préservé.
+
+> **Couverture symétrique complète** : rejet à la réception (COVER-1, deux chemins) + exclusion à la
+> production (COVER-2). Aucune dépense ni aucun stake non couvert n'est plus **ni propagé ni scellé**.
+> **Dernier durcissement de validation avant le gadget.** Reste, indélégable (Alexandre) : validation
+> de la conception du gadget + décisions §12 (E, taille de comité, quorum) ; valeurs 🛑
+> `UNBONDING_PERIOD_BLOCKS` / `MIN_VALIDATOR_STAKE`. Commit baseline git = **manuel, Alexandre**.
+
+### Auto-revue — vérification adverse COVER-2 (4 lentilles)
+- **cache-revert / conservation** — *sound* : `cache_revert_tx` est l'inverse arithmétique exact de
+  `cache_apply_tx` (cache seul ; minted/burned inchangés) ⇒ conservation restaurée ; tous types,
+  puits STAKE, multi-exclusions indépendantes de l'ordre. Vérifié par les tests COVER-2 + conservation.
+- **invariant §3** — *sound* : seal et validate partagent `uncovered_tx_indices` depuis le **même**
+  `onchain_before` ; la couverture séquentielle est **monotone** sous exclusion (une tx exclue
+  n'apporte pas son crédit, donc une tx gardée couverte le reste) ⇒ un bloc auto-scellé passe
+  **toujours** la validation. EMIT-1 préservé (les récompenses `NETWORK` synthétiques ne sont jamais
+  exclues).
+- **déterminisme + source unique** — *sound* : exclusion = `Vec<usize>`→`HashSet` (test d'appartenance)
+  puis itération **linéaire** du `Vec` candidat ⇒ aucune fuite d'ordre HashMap dans le bloc. Le
+  refactor COVER-1 (boucle inline → `uncovered_tx_indices` + `.first()`) préserve le verdict de rejet
+  **exactement**. C1 vert.
+- **éviction / vivacité** — **RÉFUTÉ avec test** (lentille HIGH erronée). Allégation : une tx
+  **couverte hors-ordre** exclue au seal serait **perdue** si le bloc excluant gagne le fork. **Faux** :
+  la lentille **oublie AUDIT-BLK-1**. Le nœud qui **détenait** la tx couverte et l'a scellée la
+  **remet en file** au reorg (re-queue des tx du tip perdant absentes du gagnant), puis la **re-scelle**
+  une fois son financement on-chain. Causalité : le **créateur** d'une tx couverte possède forcément son
+  financement (le builder vérifie `balance_of` à la création) ⇒ il l'ordonne et la scelle correctement ;
+  les autres nœuds la ré-apprennent par **synchro de blocs** (l'intégration applique les tx d'un bloc
+  même si leur hash est dans `seen`). Prouvé end-to-end par
+  `cover2_out_of_order_covered_tx_survives_exclusion_and_reorg` (T2 re-queue → re-scellé → Carol reçoit
+  ses 20). **Aucune perte permanente.** La politique d'**éviction** (garder dans `seen` vs ré-admission
+  par gossip) reste le **choix §4 signalé** (le défaut « évincer » est sain ; alternative = retrait de
+  `seen` pour retry-via-gossip, au prix de churn) → décision Alexandre.
+
+> **Bilan adverse COVER-2** : noyau (correction / conservation / déterminisme / invariant §3) **sound**
+> sur 3 lentilles ; la 4ᵉ (perte de vivacité) **réfutée par test** (AUDIT-BLK-1 + causalité du
+> financement). Couverture **symétrique** complète et sûre.
+
+---
+
+## ADR-006 — Gouvernance & évolutivité (noyau immuable par construction)
+*(2026-06-24 · décision de **vision**, non technique · `/goal QUANTA_ADR_006_GOUVERNANCE.md`)*
+
+> Décision de **vision** (couche **au-dessus** du consensus) : Quanta n'a **pas** de gouvernance
+> on-chain ; noyau monétaire **immuable par construction** (sans porte, pas verrou) ; périphérie
+> **ajustable** (réglages, pas promesses) ; évolution par **fork volontaire + dev ouvert** ;
+> **aucun mécanisme de gouvernance dormant** (leçon du CRDT fantôme). **Rien à construire** : pas
+> de code. Livrable = l'ADR ratifiable + la **vérification** des deux claims falsifiables.
+
+### Livrables
+- **ADR formel** : `docs/decisions/ADR-006 — Gouvernance & évolutivité.md` (style maison ADR-005 ;
+  statut **proposé**, frontière à ratifier).
+- **Registre** : ligne ADR-006 ajoutée à `docs/decisions/README.md` (classe **vision**, note
+  « couche au-dessus du consensus, n'oriente pas le gadget »).
+- **Frontière proposée** gravé/ajustable (table adossée au code) — **point de départ** pour la
+  ratification d'Alexandre, **pas** une décision figée (Constitution §4 : je cadre, il tranche).
+
+### Vérification des claims falsifiables (audit lecture seule, 2026-06-24)
+- **§1 — noyau sans levier de code** : `MAX_SUPPLY_MICRO` (`reputation.rs:71`) et `EMISSION_DIVISOR`
+  (`reputation.rs:79`) sont des `pub const` ⇒ **substitués à la compilation, aucun emplacement
+  mémoire d'exécution, aucun setter exprimable**. `emission_for_tick` (`reputation.rs:85`) =
+  fonction **pure** bornée. Plafond **appliqué au consensus** sur les **deux** chemins via le
+  validateur partagé `validate_block_emission_against` (`ledger.rs:1315`, rejet `:1330`). Seul moyen
+  de changer = éditer + recompiler = **forker**. ⇒ « **absence de porte** » confirmée.
+- **§4 — aucun mécanisme dormant** : recherche `governance|referendum|ballot|proposal|param_change|
+  protocol_upgrade` sur `src-tauri/src/` ⇒ **zéro** (le seul `proposal` est `block_proposal*`, un
+  bloc de consensus). Les **2 seules** occurrences de `vote` sont des **commentaires**
+  (`consensus.rs:4` « sans leader ni votes » ; `gossip.rs:100` anti-Sybil). **Aucun levier.**
+- **Vote consensus ≠ gouvernance** : les votes (futurs) du gadget (`sm/finality.rs`, GADGET-1)
+  décident **quel bloc est final**, jamais **les règles** ⇒ mécanisme de **consensus** (ADR-005),
+  pas de gouvernance. *Rien ne finalise encore* (justify/finalize = GADGET-3) ⇒ aucune machinerie de
+  vote même active.
+- **§12 ajustables = `const` (fork-only)** : `UNBONDING_PERIOD_BLOCKS` (`ledger.rs:64`),
+  `MIN_VALIDATOR_STAKE` (`pos_consensus.rs:64`), `EPOCH_LENGTH_BLOCKS` (`finality.rs:36`).
+
+### Auto-revue — vérification adverse de l'audit lui-même (3 lentilles)
+- **« un setter caché / une voie d'écriture manquée »** — *réfuté* : un `const` Rust n'a pas
+  d'emplacement mémoire ⇒ il n'existe **pas** de voie d'écriture à manquer (garantie au niveau du
+  langage, pas du grep). Le grep confirme en plus zéro `set_*supply` / `*supply =`. La seule mutation
+  de l'**offre** est l'émission, elle-même **bornée** par le `const` (`emission_for_tick` saturé).
+- **« la promesse survend un mécanisme à deux niveaux inexistant »** — *signalé et neutralisé dans
+  l'ADR* : aujourd'hui noyau **et** périphérie sont tous deux de simples `const` (fork-only) — il n'y
+  a **pas** de tier d'exécution ajustable. L'ADR le **dit explicitement** (« nuance honnête, pas de
+  survente ») : la frontière est de **promesse/intention**, pas de mécanisme câblé ⇒ conforme à
+  « Rien à construire » + §4 (l'abstraction d'ajustement n'est **pas** un interrupteur dormant).
+- **« un module dormant oublié (re: CRDT fantôme) »** — *réfuté* : recherche exhaustive des lemmes
+  de gouvernance ⇒ rien ; les seuls « votes » du code sont des commentaires ; le seul mécanisme de
+  vote conçu (gadget) est de consensus et **inactif**. Le risque du CRDT fantôme (code non utilisé =
+  surface dormante) **ne se reproduit pas** ici puisqu'il n'y a aucun code de gouvernance à laisser
+  dormir.
+
+### Portes (doc-only)
+- **Diff logique seule, 100 % documentation** : `docs/decisions/ADR-006 …md` (nouveau) +
+  `docs/decisions/README.md` (1 ligne + note) + ce tracker. **Aucun fichier Rust touché** ⇒ aucun
+  impact tests/clippy (build inchangé) ; `dispatcher.rs` / `sm/` / consensus **intacts**.
+- **Constitution §4 respectée** : la **frontière exacte** gravé/ajustable est **cadrée, pas
+  tranchée** (ratification = Alexandre).
+
+> **Bilan ADR-006** : décision de vision **enregistrée** + les deux affirmations du code
+> (**noyau sans levier**, **zéro gouvernance dormante**) **vérifiées**, pas seulement assénées.
+> Reste indélégable (Alexandre) : ratifier la **frontière exacte** gravé/ajustable ; les valeurs
+> 🛑 §12 (E, comité, quorum, `UNBONDING_PERIOD_BLOCKS`, `MIN_VALIDATOR_STAKE`) ; la conception du
+> gadget. Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## GADGET-2 — Votes ML-DSA + certificat d'époque (la matière de la finalité)
+*(2026-06-24 · `/goal QUANTA_GADGET_PIECE2_1.md` · pièce 2 du gadget, §3/§5 de DESIGN-FINALITY-GADGET)*
+
+> On bâtit les **votes** (attestations) et le **certificat d'époque** (lien super-majoritaire ⅔),
+> derrière l'**abstraction de certificat** d'ADR-005, sur le squelette GADGET-1 (points de contrôle)
+> et l'enjeu on-chain ONCHAIN-STAKE-1. **Rien ne finalise** (la règle justifier/finaliser = GADGET-3) :
+> ici, la matière + sa **vérification pure**. Diff logique seule, déterministe, **C1 vert**.
+
+### Livrables (1 fichier neuf + 2 retouches logiques)
+- **`src-tauri/src/sm/finality_vote.rs`** (neuf) : `Vote`, `signable_bytes` (canon. longueur-préfixé +
+  domaine), `verify` (pur), trait **`FinalityCertificate`** (abstraction ADR-005, **définition unique**),
+  impl **`MlDsaCertificate`**, maths quorum intègres (`meets_supermajority`, `total_stake` checked) + 11 tests.
+- **`src-tauri/src/sm/mod.rs`** (+2 l.) : `pub mod finality_vote;` + re-export `Vote/MlDsaCertificate/FinalityCertificate`.
+- **`src-tauri/src/security/hybrid_crypto.rs`** (+5 l.) : `verify_ml_dsa` passé `pub(crate)` — **unique**
+  vérificateur ML-DSA réutilisé tel quel (aucune duplication). Signage `ml_dsa_sign_deterministic`
+  (SIGN-DET, `#[cfg(test)]`) réutilisé pour les votes en sim ; **aucun signage production ajouté**.
+
+### §1 — le vote (attestation)
+- `Vote { source, target, voting_epoch, validator, signature }`. **Vérification** (pure de `(vote, enjeu, E)`) :
+  (a) lien bien formé — `source`/`target` sont des points de contrôle (`is_epoch_boundary` + `epoch==height/E`,
+  helpers GADGET-1 réutilisés), `voting_epoch==target.epoch`, **`target.height > source.height`** (descente =
+  lien avant) ; (b) signataire = **validateur actif** (`enjeu>0`) ; (c) **signature ML-DSA-65 valide**. Le
+  **poids** = l'enjeu on-chain.
+- **Descente = structurelle** (frontière strictement postérieure), **pas** l'ancêtre-hash complet : ce dernier
+  est le travail de GADGET-3 (qui a la chaîne et raisonne la justification). On **n'anticipe pas** la règle (§5).
+
+### §2 — le certificat, derrière l'abstraction ADR-005
+- Trait **`FinalityCertificate`** = *lien super-majoritaire vérifiable* `source→target` ; le **schéma
+  d'agrégation** (aujourd'hui un `Vec<Vote>` ML-DSA ; demain BLS/SNARK) vit **derrière le trait** ⇒ remplacement
+  **local**, GADGET-3 (consommateur) intact. **Une seule** définition du concept.
+- `backing_weight` (pur) : `None` si **malformé** — vote invalide, **liens mélangés**, **votant dupliqué** ;
+  sinon Σ enjeu des votants **distincts** (checked). `is_valid` = bien formé **et** `backing*3 ≥ total*2`
+  (≥⅔, intègre `u128`, **zéro flottant**) **et** `backing>0` (un cert vide/dégénéré contre enjeu nul ne passe pas).
+
+### §4 — les dents (mordent réellement) — 6 obligatoires + 5 au niveau vote
+- `gadget2_certificate_below_quorum_is_rejected` : 100/300 ⇒ `backing=Some(100)`, **rejeté** (math, non malformé).
+- `gadget2_certificate_with_forged_vote_is_rejected` : 2 votants atteindraient ⅔, **une signature retournée** ⇒
+  `backing=None`, **rejeté**.
+- `gadget2_certificate_mixing_links_is_rejected` : vote off-link **valide sur SON lien** mais ≠ lien du cert ⇒
+  `None`, **rejeté**.
+- `gadget2_certificate_double_counting_is_rejected` : 2× le même votant **atteindrait** 200/300 si compté ⇒
+  distinction ⇒ `None`, **rejeté** (la dent mord : sans elle, faux quorum).
+- `gadget2_valid_two_thirds_certificate_is_accepted` : 200/300 = **exactement ⅔** ⇒ **accepté** (seuil ≥).
+- `gadget2_verdict_is_deterministic_across_nodes` : deux « nœuds » construisent le même snapshot d'enjeu + les
+  mêmes votes ⇒ **signatures identiques** (SIGN-DET), **backing identique**, **verdict identique**.
+- Niveau vote : valide vérifie ; non-validateur rejeté ; lien non-descendant rejeté ; point de contrôle malformé
+  (hauteur non-frontière) rejeté ; **champ signé altéré** ⇒ vérif. cassée (liaison réelle).
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **317 / 0** (306 + 11 GADGET-2), incl. les 6 dents du §4.
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`determinism_meta_test_128…`) ·
+  **`t0_8_clean_default_sweep` + `t0_8_sweep_is_reproducible` verts** · `src/sm/` **sans-IO** (la vérif. ML-DSA
+  est du calcul pur, zéro horloge/entropie/IO).
+- **Diff logique seule** : **3 fichiers** (1 neuf + 2 retouches) ; `sm/finality.rs` (GADGET-1) **intact** ⇒
+  **`FinalitySafety` inchangé** (toujours quasi-vacueux, comme exigé §5) ; `dispatcher.rs` **intact** (0 réf).
+
+### Défauts marqués (réglables, ADR-005/§12 — pas des promesses, cf. ADR-006)
+- **Quorum = ⅔** de l'enjeu (`QUORUM_NUM/DEN`, standard BFT).
+- **Comité = tous les validateurs actifs** (`validator_stakes()`, clés `enjeu>0`), **sans plafond** (ADR-005).
+- **E = `EPOCH_LENGTH_BLOCKS`** (32 provisoire, GADGET-1), paramétrique partout.
+
+### Auto-revue — vérification adverse GADGET-2 (5 lentilles)
+- **forge d'un vote pondéré (identité)** — **fermée dans le module + flag §4** : un attaquant ne peut pas
+  apparier la clé-compte d'une victime avec **sa** clé ML-DSA pour voler son poids, **parce que l'identité de
+  finalité EST la clé publique ML-DSA** (à la fois clé d'enjeu et clé de vérif.) — sans le secret, pas de
+  signature valide. La liaison publique compte→ML-DSA est **impossible** (clé PQ dérivée du *secret* Ed25519,
+  hors d'atteinte du public), donc « porter les deux clés » serait le trou ; faire de la clé ML-DSA l'identité
+  le ferme. **Reste flag §4** (indélégable, Alexandre) : réconcilier avec `validator_stakes()` keyé-compte
+  (registre de liaison **ou** validator set re-keyé ML-DSA). **Ne bloque rien** : rien ne finalise, aucun chemin
+  live câblé ; GADGET-2 écrit **agnostique** à la provenance de la clé.
+- **déterminisme / divergence inter-nœuds** — *sound* : verdict = fonction pure de `(votes, enjeu on-chain)` ;
+  sommes **commutatives** (aucun ordre HashMap dans le résultat) ; distinction par **`BTreeSet`** ; seuil ⅔
+  **intègre** `u128` (zéro flottant) ; enjeu issu de la chaîne ⇒ **même seuil, même verdict** partout ; SIGN-DET
+  reproductible (testé : signatures byte-identiques sur deux nœuds). `sm/` sans-IO + C1 verts.
+- **maths du quorum** — *sound* : `backing*3 ≥ total*2` (≥⅔ exact, `u128` ⇒ pas d'overflow ; `backing,total ≤ u64`),
+  `total` **checked_add** (refus sur overflow, jamais de wrap vers un faux quorum), garde **`backing>0`**
+  neutralisant le cert vide/dégénéré contre enjeu nul.
+- **anti-vacuité (les dents mordent)** — *sound* : chaque dent a un **contre-factuel** — le double-comptage
+  **atteindrait** 200/300 sans la distinction ; le vote forgé **atteindrait** ⅔ sans la vérif. de signature ;
+  le « below-quorum » distingue rejet **mathématique** (Some(100)) de rejet **malformé** (None). Pas de test mou.
+- **périmètre / non-anticipation** — *sound* : **rien ne finalise**, `FinalizedSet`/`FinalitySafety` **non touchés** ;
+  descente = lien-avant **structurel** (l'ancêtre-hash est GADGET-3) ; aucune règle justifier/finaliser codée.
+  Signalé : la descente structurelle est une **limite assumée** que GADGET-3 resserrera avec la chaîne.
+
+> **Bilan GADGET-2** : la **matière** (votes ML-DSA + certificat ⅔ derrière l'abstraction ADR-005) est posée et
+> **vérifiée par des dents qui mordent** ; noyau (déterminisme / quorum / anti-vacuité / périmètre) **sound** sur
+> 4 lentilles ; la 5ᵉ (forge d'identité) **fermée dans le module**, avec la **réconciliation du keying** (compte
+> ↔ clé ML-DSA) explicitement **remontée à Alexandre** (§4, Constitution). Prochaine pièce **GADGET-3** : la
+> règle justifier/finaliser qui **consomme** ces certificats — là, `FinalitySafety` cesse d'être vacueux.
+> Valeurs §12 (E, taille de comité, quorum) restent réglables. Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## CRYPTO-ID-1 — Audit identité enjeu vs finalité → **§4 STOP** (décision de portée PQ à Alexandre)
+*(2026-06-24 · `/goal QUANTA_CRYPTO_IDENTITY.md` · audit lecture seule, prérequis de GADGET-3)*
+
+> GADGET-2 a révélé deux identités **disjointes** : l'enjeu indexé par la clé **Ed25519** de compte,
+> les votes de finalité signés en **ML-DSA**. Ce spec **audite** l'état réel, puis réconcilie **si
+> trivial** (cas « comptes déjà ML-DSA »), **sinon §4 STOP**. Verdict : comptes **vraiment Ed25519**
+> ⇒ aucune réconciliation triviale ⇒ **STOP**, décision (b) à Alexandre. **Zéro code écrit.**
+
+### §1 — Rapport d'audit (faits, preuves à l'appui)
+| Question | Réponse | Preuve |
+|---|---|---|
+| Qu'est-ce qui **identifie un compte** ? | La **clé publique Ed25519** (hex 64 car.) | `security/mod.rs:45-46` `public_key_hex = hex(vk.to_bytes())`, vk = Ed25519 ; `import_keypair` part d'un secret **Ed25519** 32 B (`:56-66`) |
+| Qu'est-ce qui **signe une tx** ? | **Hybride** Ed25519 + ML-DSA — mais la **racine** est Ed25519 | `sign_hybrid` (`security/mod.rs:100`) ; `verify_tx` vérifie `verify_hybrid(tx.from(=Ed25519), pq_pk, …)` (`ledger.rs:1031`) ; `tx.signature` = « Ed25519 signature » (`ledger_types.rs:22`) |
+| La clé ML-DSA est-elle **liée** au compte ? | **NON** — auto-déclarée par tx, non liée | `tx.pq_public_key: Option<String>` **porté dans chaque tx** (`ledger_types.rs:31`) ; `verify_hybrid` = `ed_ok && pq_ok`, **aucun cross-check** pq↔ed (`hybrid_crypto.rs:129-145`) |
+| Quelle clé **indexe l'enjeu** (`validator_stakes()`) ? | La clé **Ed25519** de compte (`tx.from`) | `staked.entry(tx.from.clone())` (`ledger.rs:403`) ; `validator_stakes()` filtre `staked` (`ledger.rs:513`) |
+| Quelle clé **signe les votes** de finalité ? | La clé publique **ML-DSA** (GADGET-2) | `sm/finality_vote.rs` `Vote.validator` = ML-DSA pk hex ; vérif. `verify_ml_dsa` |
+| **Registre on-chain** compte → ML-DSA ? | **Aucun** | `pq_public_key` n'apparaît que comme champ **par-tx** (grep arbre) ; pas de map persistée |
+| Racine du **transport** (gossip) ? | **Ed25519** | `GossipEnvelope` : pubkey + signature **Ed25519** (`gossip.rs:39,42`) |
+
+**Constat-clé (honnête, sans survente).** La signature « hybride » est **réellement** calculée et
+vérifiée sur les deux couches, **mais la racine de confiance du compte reste Ed25519** :
+(i) `REQUIRE_PQ=false` autorise le repli Ed25519-seul (`hybrid_crypto.rs:58,132-140`) ; (ii) la clé
+ML-DSA est **auto-déclarée par tx et non liée** au compte. Conséquence concrète : un adversaire
+quantique qui casse Ed25519 forge `tx.signature` de la victime, **attache sa propre** clé ML-DSA en
+`pq_public_key`, signe la couche quantum avec — `verify_hybrid` passe (`ed_ok && pq_ok`). **La couche
+ML-DSA ne protège donc pas le compte contre la forge quantique** (« récolter aujourd'hui, forger
+demain » s'applique aux **comptes**, pas seulement aux tx anciennes). C'est un **vestige de
+rétro-compat**, pas un bug d'implémentation — mais « comptes post-quantiques » serait **survendre**.
+
+### §2 — Décision de portée PQ (🛑 vision, Alexandre) — cadrée avec les faits
+- **(a) Comptes Ed25519 + finalité PQ seulement** (registre de liaison). Les validateurs
+  **enregistrent on-chain** une clé de finalité ML-DSA, **signée par leur compte Ed25519** (liaison
+  vérifiable). GADGET-2 vérifie contre la clé enregistrée ; le poids se lit par le compte lié.
+  *Portée* : 1 nouveau tx/registre `compte → ml_dsa_pk` (déterministe, dérivé de la chaîne) ;
+  comptes/tx **inchangés**. *Coût* : **léger**. *Prix* : les **comptes restent vulnérables au
+  quantique** → « entièrement PQ » garde un **astérisque** (contredit ADR-005 esprit / whitepaper).
+- **(b) Tout en ML-DSA** *(recommandation du spec, à ratifier)*. L'identité de compte **devient** la
+  clé ML-DSA ; enjeu et finalité **coïncident nativement**. *Portée de migration* (l'audit la chiffre) :
+  `CryptoEngine` re-raciné ML-DSA (keygen + vault `pq_vault.rs`) ; **adresse** = hash de la pk ML-DSA
+  (la pk brute fait 1952 B → adressage par BLAKE3) ; `tx.from/to`, `verify_tx` (ML-DSA, plus de racine
+  Ed25519), builder, `validator_stakes` (devient ML-DSA-keyé ⇒ **but atteint**), registre @pseudo,
+  **persistance/soldes existants**, et **bump `TORUS_PROTOCOL_VERSION`** (tx/clé plus grandes : pk
+  1952 B, sig 3309 B). *Coût* : **lourd, migration de comptes**. *Gain* : promesse PQ **sans
+  astérisque**.
+
+### §3 → §4 STOP — pas de réconciliation triviale
+- Le re-key trivial n'est autorisé **que** si « comptes déjà ML-DSA » (spec §3). **Faux ici**
+  (comptes Ed25519, preuves §1).
+- Re-keyer `validator_stakes()` vers ML-DSA depuis la chaîne est **impossible sainement** : la seule
+  donnée ML-DSA on-chain (`tx.pq_public_key`) est **non liée et forgeable**, et un compte peut
+  attacher des clés ML-DSA **différentes** selon les tx ⇒ **aucun mapping compte→ML-DSA déterministe
+  ni sûr** à re-keyer.
+- Downgrader la finalité vers Ed25519 pour « coïncider » est **exclu** (ADR-005 : finalité PQ pure,
+  « aucune primitive classique sur le chemin de l'irréversibilité »).
+- ⇒ **§4 STOP**. **Aucun code de migration écrit** ; **aucune modification** ce goal (audit lecture
+  seule). Diff = **ce tracker seul**.
+
+### Auto-revue (§3)
+- **exhaustivité de l'audit** — *sound* : les 5 maillons d'identité (compte, tx, enjeu, finalité,
+  transport) tracés avec `fichier:ligne` ; le maillon manquant (liaison compte↔ML-DSA) **prouvé
+  absent** (pas de cross-check dans `verify_hybrid`, pas de registre on-chain).
+- **« et si un re-key trivial existait ? »** — *réfuté* : la seule source ML-DSA on-chain est
+  non liée/forgeable et non-unique par compte ⇒ pas de map déterministe sûre ; donc le cas trivial du
+  §3 est **réellement** inapplicable (pas un STOP « par confort »).
+- **pas de masquage** — *respecté* : je **n'ai pas** bricolé un pont (ex. faire confiance à
+  `tx.pq_public_key`), ce qui aurait introduit le **vecteur de forge** ci-dessus. Le constat « racine
+  Ed25519 » est **rapporté tel quel**, même s'il nuance la promesse PQ (Constitution : ne pas survendre).
+- **déterminisme / périmètre** — *respecté* : aucune clé de consensus introduite ; GADGET-2 inchangé ;
+  `FinalitySafety` intact.
+
+> **Bilan CRYPTO-ID-1** : enjeu (Ed25519) et finalité (ML-DSA) sont **disjoints parce que les comptes
+> sont Ed25519** — fait établi, preuves §1. **§4 STOP** : la coïncidence des identités passe par une
+> **décision de portée PQ** (a) registre de liaison **vs** (b) comptes ML-DSA — **à toi**. Recommandation
+> du spec : **(b)** (compte de longue vie ⇒ doit être PQ), au prix d'une **migration de comptes** dont
+> la portée est chiffrée ci-dessus. **Une fois (a)/(b) tranché**, cela mérite un **ADR** (ADR-007 ?) +
+> son spec de mise en œuvre, et **débloque GADGET-3** (pondération de vrais votes). Commit baseline git
+> = **manuel, Alexandre**.
+
+---
+
+## ADR-007 — Portée du post-quantique : comptes ML-DSA (la décision la plus fondatrice qui reste)
+*(2026-06-24 · `/goal QUANTA_ADR_007_PQ_SCOPE.md` · décision de **vision fondatrice**, suite directe de CRYPTO-ID-1)*
+
+> CRYPTO-ID-1 a escaladé la décision de portée PQ (registre (a) vs comptes ML-DSA (b)). ADR-007 la
+> **grave** : recommandation **forte (b)** (Quanta réellement entièrement post-quantique), l'**engagement**
+> au coût étant la part **§4/vision d'Alexandre**. **Aucun code de migration** avant ratification ; la
+> migration se **conçoit** ensuite (doc de conception → specs chirurgicaux). **Bloque GADGET-3.**
+
+### Livrables (documentation seule — vision, comme ADR-006)
+- **ADR formel** : `docs/decisions/ADR-007 — Portée du post-quantique (comptes ML-DSA).md` (style maison ;
+  statut **proposé**, recommandation (b)), avec une section **Vérification** adossée à CRYPTO-ID-1.
+- **Registre** : ligne ADR-007 + note dans `docs/decisions/README.md` (classe **vision fondatrice 🛑**,
+  « **bloque GADGET-3** » ; lien à ADR-006 — (b) rend l'invariant « signatures PQ » gravé **honnête** au
+  niveau du compte).
+
+### Décision cadrée (🛑 Alexandre)
+- **(a) registre de finalité** : léger, mais **astérisque permanent** (comptes forgeables au quantique) →
+  *rejetée comme recommandation*.
+- **(b) comptes tout ML-DSA** *(recommandé)* : enjeu↔finalité **coïncident nativement** (débloque GADGET-3),
+  promesse **sans astérisque** ; **lourd** (re-racinage `CryptoEngine`/vault, adresses BLAKE3 d'une pk ML-DSA
+  ~1952 o, `verify_tx`/builder/`validator_stakes`/`@pseudo`, migration des soldes, bump `TORUS_PROTOCOL_VERSION`,
+  `REQUIRE_PQ=true`, retrait du repli Ed25519).
+- L'**engagement** (payer le coût vs expédier (a) plus vite) dépend de l'horizon/ressources/tolérance du
+  fondateur — **non tranchable par l'ingénierie** (Constitution §4 : je **cadre**, il **tranche**).
+
+### Auto-revue (§3)
+- **prémisse falsifiable vérifiée** — *sound* : les faits qui fondent (b) (compte=Ed25519, `REQUIRE_PQ=false`,
+  clé ML-DSA non liée, `verify_hybrid = ed_ok && pq_ok`) sont **prouvés** par CRYPTO-ID-1 avec `fichier:ligne`,
+  cités dans l'ADR ⇒ « aucune assertion de sécurité sans vérification » (Constitution §2).
+- **§4 respectée** — *sound* : **aucun code de migration écrit** (le spec l'interdit avant ratification) ;
+  la décision d'**engagement** est **cadrée, pas tranchée** ; recommandation (b) **enregistrée**, ratification
+  = Alexandre.
+- **pas de survente** — *respecté* : l'ADR **dit** que « comptes post-quantiques » est aujourd'hui faux
+  (état de fausse promesse), au lieu de le masquer — cohérent avec « tu ne survends jamais ».
+- **diff documentation seule** — *vérifié* : 1 ADR neuf + 1 ligne/note registre + ce tracker ; **zéro fichier
+  Rust touché** ⇒ build/tests inchangés ; `dispatcher.rs` / `sm/` / consensus **intacts**.
+
+> **Bilan ADR-007** : la décision de portée PQ est **gravée comme recommandation (b)** et **remontée** ;
+> elle **bloque GADGET-3** jusqu'à ratification. Suite, **une fois (b) ratifié** : un **document de
+> conception** de la migration (re-racinage, schéma d'adresses, soldes, version protocole), **puis** des
+> specs chirurgicaux. Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## PQ-MIG-1 — re-raciner CryptoEngine + vault sur ML-DSA-65 (1ʳᵉ pièce du chantier PQ)
+*(2026-06-24 · `/goal QUANTA_PQ_MIG_1_1.md` · ADR-007 (b) ratifié · diff logique, déterministe, C1 vert)*
+
+> Première pièce, **la plus contenue**, du chantier post-quantique. On établit **ML-DSA-65 comme identité
+> primaire** générée / stockée / rechargée par le moteur crypto et le vault — **la racine PQ**. **Aucune
+> autre couche touchée** (ni `verify_tx`, ni adresses, ni enjeu, ni transport, ni genèse) : c'est
+> **additif**, Ed25519 **coexiste** intact pour les consommateurs non encore migrés (PQ-MIG-3+).
+
+### Décision de conception (la racine ML-DSA est **indépendante**)
+La racine ML-DSA est enracinée sur **sa propre** graine de 32 octets, **tirée d'`OsRng`**, **indépendante**
+de la graine Ed25519 — **pas** dérivée d'elle. C'est délibéré : dériver ML-DSA d'une clé classique
+**réintroduirait la faille exacte que CRYPTO-ID-1 a exposée** (casser Ed25519 livrerait la clé ML-DSA), or
+ADR-007 (b) existe précisément pour la **fermer**. La graine reproduit déterministiquement la paire via
+`derive_ml_dsa` (XOF BLAKE3 → keygen) ⇒ le vault persiste **32 octets** et le rechargement redonne la clé
+publique **identique**.
+
+### Livrables (moteur crypto + vault **seulement**)
+- **`security/mod.rs`** — `CryptoEngine` gagne un champ `ml_dsa_primary` (struct `MlDsaPrimary { seed:
+  Zeroizing<[u8;32]>, sk: ml_dsa_65::PrivateKey, pk_hex }`, **deux secrets zeroize-on-drop**) et les méthodes :
+  `generate_pq_identity` (graine `OsRng` → racine), `import_pq_identity` (**chemin déterministe** : reload
+  vault + sim), `pq_identity_hex`, `get_pq_seed_bytes` (`Zeroizing<Vec<u8>>` auto-effaçant, miroir de
+  `get_secret_bytes`), `sign_pq` (production **hedgée** `OsRng`), `sign_pq_det` (`#[cfg(test)]`, déterministe,
+  **physiquement absente du release**), `verify_pq` (fin wrapper sur l'**unique** `verify_ml_dsa`, zéro
+  duplication).
+- **`security/pq_vault.rs`** — `create_pq_identity` / `unlock_pq_identity` (**additifs** ; Ed25519
+  `create_identity`/`unlock_identity` **intacts**) : chiffrent / déchiffrent la **graine racine 32 o**
+  (Argon2id → AES-256-GCM, sel domaine-séparé `PQ-MIG-1`), **zeroize** des copies, **round-trip → même pk**,
+  mauvais mot de passe → **échec opaque**.
+- **6 tests `pq_mig1_*`** : signage/vérif ML-DSA **de bout en bout via le moteur** ; **round-trip vault →
+  même clé publique** (+ la clé rechargée **signe** ⇒ la clé secrète round-trip aussi) ; déterminisme
+  (même graine → même clé) ; **sim byte-reproductible vs prod hedgée** ; **indépendance vis-à-vis d'Ed25519**
+  (même graine Ed25519 ⇒ identités PQ **différentes** ; primaire ≠ couche héritée dérivée) ; **graine
+  exportée auto-effaçante** (type `Zeroizing` — une régression `Vec<u8>` nu **ne compile pas**).
+
+### Porte d'acceptation (toutes vertes)
+- `cargo test --lib` : **323 passés / 0 échec** (317 + 6) — round-trip ML-DSA + signage/vérif e2e inclus.
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`…128_runs_are_byte_identical`) · **sweep par
+  défaut vert** (`t0_8_clean_default_sweep` + `t0_8_sweep_is_reproducible` + 10 autres).
+- **Diff logique seule**, **confinée à `security/mod.rs` + `security/pq_vault.rs`** (snapshot pré-goal
+  `9d27812`) ; **purement additive** (seule « suppression » = `new()` qui initialise le nouveau champ) ;
+  `dispatcher.rs` / `sm/` / `ledger.rs` / `gossip.rs` / `lib.rs` **non touchés** ⇒ couches Ed25519 **inchangées**.
+
+### Auto-revue (§3)
+- **identité primaire ML-DSA** — *sound* : le moteur **génère, stocke (zeroize), recharge** une paire
+  ML-DSA-65 comme racine, prouvé par le round-trip vault (même pk) et le signage/vérif e2e. Racine
+  **indépendante** d'Ed25519 (test dédié) ⇒ ne répète pas la faille CRYPTO-ID-1.
+- **déterminisme (vigilance n°1)** — *sound* : génération/reload empruntent `derive_ml_dsa` (déterministe) ;
+  le signage sim passe par `sign_pq_det` (`#[cfg(test)]`, BLAKE3-RNG), la production par `sign_pq` (`OsRng`,
+  **hedgée**) ; **ML-DSA n'est pas câblée au consensus/au fingerprint** (additive), donc **C1 reste
+  byte-identique** (vérifié, 128 runs).
+- **§3 pas de fuite non déterministe** — *vérifié* : `fingerprint` (`sm/node.rs`) ne hashe que l'état
+  **observable du ledger** (hashes de blocs, soldes triés, agrégats scalaires) — **aucune clé** ; la racine
+  ML-DSA ne vit pas dans le ledger ⇒ rien à fuiter ; C1 inchangé le **prouve transitivement**.
+- **zeroize** — *respecté* : `seed: Zeroizing<[u8;32]>` + `sk` (`fips204::PrivateKey` zeroize-on-drop) effacés
+  au drop ; `get_pq_seed_bytes` rend un `Zeroizing` auto-effaçant ; le vault efface les copies déchiffrées.
+- **périmètre tenu** — *vérifié* : **2 fichiers** (moteur + vault), aucune autre couche ; **§4** non
+  déclenchée (rien d'amont n'a eu besoin de bouger pour compiler).
+- **pas de masquage** — *honnête* : les `#[allow(dead_code)]` sur le vault PQ marquent du **scaffolding non
+  encore câblé** (production à PQ-MIG-3), **testé** dès maintenant — même convention que `NodePuzzle`/
+  `solve_node_puzzle` dans le fichier ; **aucune** régression/échec masqué (clippy `-D warnings` **propre**).
+
+> **Bilan PQ-MIG-1** : la **racine ML-DSA-65 est posée** (indépendante, déterministe, zeroize, round-trip
+> prouvé), Ed25519 **coexiste** sans régression, **C1 vert**. Pièce suivante **PQ-MIG-2** : adresses =
+> `BLAKE3(pk_ml_dsa)` tronquées. Puis PQ-MIG-3 (`verify_tx` ML-DSA + liaison clé↔adresse, **retrait du repli
+> Ed25519**, câblage production du vault PQ), PQ-MIG-4 (re-clé de l'enjeu → **GADGET-3 débloqué**), PQ-MIG-5
+> (genèse PQ). Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## PQ-MIG-2 — adresses = `BLAKE3(domaine ‖ clé publique ML-DSA)` (2ᵉ pièce du chantier PQ)
+*(2026-06-24 · `/goal QUANTA_PQ_MIG_2.md` · construit sur PQ-MIG-1 · diff logique, déterministe, C1 vert)*
+
+> Deuxième pièce, **contenue**. La clé publique ML-DSA fait ~1952 o — **trop grande pour servir d'adresse**.
+> On introduit l'**adresse = hash BLAKE3 domaine-séparé de la clé publique ML-DSA**, son encodage/décodage, et
+> la **fonction de liaison** clé↔adresse que PQ-MIG-3 utilisera. On **ne câble pas** `from`/`to` ni `verify_tx`
+> (= PQ-MIG-3) : exactement comme PQ-MIG-1 a posé la clé sans la brancher. **Additif**, Ed25519 intact.
+
+### Précision vs la note d'anticipation PQ-MIG-1
+La conclusion PQ-MIG-1 anticipait des adresses « **tronquées** ». Le spec PQ-MIG-2 §1 tranche l'inverse et
+**à raison** : on garde les **32 octets** de sortie naturelle de BLAKE3, **sans troncature** (256 bits de
+résistance aux collisions). La longueur 32 o est **marquée 🛑 réglable** — raccourcissable plus tard si une
+adresse plus courte est explicitement voulue, mais par défaut on ne sacrifie pas la marge de collision.
+
+### Livrables (`security/mod.rs` **seulement**)
+- **`ADDR_DOMAIN = b"QUANTA-ADDR-V1"`** — étiquette de **séparation de domaine** préfixée au hash (même
+  discipline que `ML_DSA_DOMAIN` / `LEADER_VRF_DOMAIN`), pour qu'une adresse ne puisse **jamais** entrer en
+  collision avec un hash de bloc/tx. Marquée « ne jamais modifier ».
+- **`ml_dsa_address_bytes(pk) -> [u8;32]`** (§1) — `BLAKE3(ADDR_DOMAIN ‖ pk)`, **pure & déterministe**, aucune
+  entropie ; + `ml_dsa_address_hex` (raccourci textuel).
+- **`encode_address` / `decode_address`** (§2) — hex (encodage déjà utilisé pour les identités) ; **round-trip
+  exact** ; décodage à **erreur opaque** sur entrée malformée (hex invalide / mauvaise longueur), **jamais de
+  panique**.
+- **`address_binds_key(addr, pk) -> bool`** (§3, la fonction `lie`) — vrai **ssi** `addr == BLAKE3(ADDR_DOMAIN
+  ‖ pk)` ; + variante `address_hex_binds_key_hex(addr_hex, pk_hex)` (la forme que `verify_tx` manipulera en
+  PQ-MIG-3 ; entrée cassée ⇒ `false`, pas de contournement).
+- **`pq_address` / `pq_address_hex`** (§4) — le moteur (identité primaire PQ-MIG-1) **expose son adresse**,
+  dérivée de sa clé publique ML-DSA. Lecture seule, pure.
+- **5 tests `pq_mig2_*`** : adresse **déterministe** (vecteur connu ⇒ adresse connue **épinglée**
+  `64eb5334…d0d6e42e`, + reconstruction indépendante `BLAKE3(ADDR_DOMAIN ‖ pk)`) ; **round-trip** encode/décode
+  (+ rejet des longueurs 31/33 o et de l'hex invalide) ; **dents de liaison** (bonne clé ⇒ vrai ; **autre** clé
+  ⇒ faux ; adresse altérée d'1 bit ⇒ faux ; variantes hex) ; **séparation de domaine** (adresse ≠ `BLAKE3(pk)`
+  nu **et** ≠ hash sous un autre domaine) ; **exposition moteur** (`pq_address` cohérente, `None` sans identité).
+
+### Porte d'acceptation (toutes vertes)
+- `cargo test --lib` : **328 passés / 0 échec** (323 + 5).
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`…128_runs_are_byte_identical`) · **sweep par
+  défaut vert** (12 `t0_8_*`).
+- **Diff logique seule**, **confinée à `security/mod.rs`** : tous les symboles introduits (`ADDR_DOMAIN`,
+  `ml_dsa_address*`, `address_binds_key*`, `pq_address*`, `encode/decode_address`, module `pq_mig2_address`)
+  n'apparaissent **que** dans ce fichier (grep) ; **purement additive** (aucune ligne pré-existante supprimée/
+  reformatée par PQ-MIG-2 — les 4 suppressions du `git diff HEAD` sont **toutes** de PQ-MIG-1) ;
+  `dispatcher.rs` / `ledger.rs` (`from`/`to`/`verify_tx`) / `pos_consensus.rs` (enjeu) / `sm/` **non touchés**.
+
+### Auto-revue (§3)
+- **dérivation domaine-séparée** — *sound* : `BLAKE3(ADDR_DOMAIN ‖ pk)` ; le test de séparation **mord**
+  (adresse ≠ hash nu **et** ≠ autre domaine), donc le tag participe réellement — pas de collision possible avec
+  un hash de bloc/tx.
+- **longueur 32 o marquée réglable** — *honnête* : sortie naturelle BLAKE3, **sans troncature** (le spec a
+  corrigé la note PQ-MIG-1 « tronquées ») ; 🛑 marquée réglable dans le code, décision de raccourcissement
+  **non prise** (n'invente pas une longueur courte).
+- **fonction de liaison + dents** — *sound, pas de masquage* : `address_binds_key` est vraie **ssi** l'adresse
+  est le hash de la clé ; une **autre** clé échoue, une adresse altérée échoue, et les variantes hex à entrée
+  cassée renvoient `false` (un encodage invalide ne contourne pas la liaison). C'est la dent que `verify_tx`
+  exigera en PQ-MIG-3.
+- **déterminisme (vigilance)** — *sound* : dérivation **pure** BLAKE3, **aucune entropie** ⇒ même clé ⇒ même
+  adresse partout ; **non câblée** au ledger/fingerprint/sim (additive) ⇒ **C1 reste byte-identique** (vérifié).
+- **périmètre tenu** — *vérifié* : **1 fichier** (`security/mod.rs`) ; **§4** non déclenchée (rien d'amont —
+  `from`/`to`/`verify_tx`/enjeu/genèse — n'a eu besoin de bouger pour compiler).
+
+> **Bilan PQ-MIG-2** : le **schéma d'adresses ML-DSA est posé** — dérivation domaine-séparée 32 o (réglable),
+> encodage/décodage round-trip, **fonction de liaison `lie()` avec dents**, et le moteur **expose son adresse**.
+> Toujours **additif** : `from`/`to`/`verify_tx`/enjeu/genèse **inchangés**, **C1 vert**. Pièce suivante
+> **PQ-MIG-3** : `verify_tx` en ML-DSA, qui **exige** via `lie()` que la clé révélée hashe vers l'adresse
+> `from`, met la clé dans la préimage signée, **retire le repli Ed25519** et **câble le vault PQ en production**
+> (le scaffolding `#[allow(dead_code)]` de PQ-MIG-1 y disparaît). Puis PQ-MIG-4 (enjeu re-clé → **GADGET-3
+> débloqué**), PQ-MIG-5 (genèse PQ). Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## PQ-MIG-3 — autorité de tx en ML-DSA par **liaison on-chain** (ferme CRYPTO-ID-1) — [[ADR-008]]
+*(2026-06-24 · `/goal QUANTA_PQ_MIG_3.md` · pièce charnière · diff logique, déterministe, C1 vert)*
+
+> **La pièce la plus importante du chantier.** Elle bascule la **racine d'autorité des comptes** en
+> post-quantique et **ferme la faille CRYPTO-ID-1**. **Mais** elle n'a **pas** suivi le §1 de la spec à
+> la lettre — voir la décision de portée ci-dessous.
+
+### ⚖️ §4 STOP → décision de portée (Alexandre) — voir **[[ADR-008]]**
+En implémentant, un fait du code **invalide** le découpage PQ-MIG-3 → PQ-MIG-4 de la spec : l'**identifiant
+de compte est unifié** — le **même** `tx.from` (clé pub Ed25519) est le solde, la **cible de minage**, la
+clé d'**enjeu/validateur** (`staked`/`validator_stakes` indexent sur `from`), le **@pseudo** et l'identité
+de **transport**. Faire de `from` une **adresse ML-DSA** (spec §1) **re-clé donc inévitablement l'enjeu et le
+minage** — le livrable de **PQ-MIG-4**, interdit par le garde-fou §4 de PQ-MIG-3. Arbitrage non tranché par
+la constitution ⇒ **§4 STOP**, escaladé. **Alexandre a tranché : Option B** — garder `from` = Ed25519, **lier**
+une clé ML-DSA au compte par **registre on-chain immuable** (la **voie (a)** d'ADR-007, *astérisque permanent*
+assumé ; ADR-007(b) « comptes tout ML-DSA » **différé**).
+
+### Conception (Option B — ferme la faille sans re-clé)
+- **Clé liée = identité primaire indépendante** (PQ-MIG-1, graine `OsRng` propre), **jamais** la couche
+  héritée dérivée de la graine Ed25519 — sinon casser Ed25519 reconstruirait la clé liée (la faille même).
+- **Registre `from → clé_ML-DSA`** = **fonction pure de la chaîne** (`pq_bindings_before`, premier-vu
+  **immuable**, comme `staked`) — **aucun état persistant ajouté**, aucun changement de `LedgerSnapshot`.
+- **Autorité** = signature **ML-DSA** valide de la clé révélée **+** Ed25519 co-facteur (qui autorise la
+  **première** liaison, anti-front-running) ; la **clé ML-DSA est dans la préimage** signée (§2) ; **plus
+  aucun repli Ed25519 seul**. La moitié **statique** (crypto) est dans `verify_tx` ; la moitié **étatique**
+  (clé == clé liée, immuable) est `binding_violations`, **source unique** que la **validation rejette** et
+  le **seal exclut** (symétrie COVER-1/COVER-2).
+
+### Livrables
+- **`security/mod.rs`** — `sign_tx_authority` / `sign_tx_authority_det` (`#[cfg(test)]`) : signent Ed25519 +
+  **primaire** ML-DSA sur la préimage liante.
+- **`p2p/ledger.rs`** — préimage + feuille de Merkle lient `pq_public_key` ; `build_signed_tx_at` signe via le
+  primaire ; **`verify_tx` réécrit** (ML-DSA + Ed25519 stricts, **fallback retiré**) ; `pq_bindings_before` +
+  `binding_violations` (registre pur) ; **validation** (`validate_block_against_prev`, les 2 chemins) **rejette**
+  et **seal** (`seal_block_at`) **exclut** les clés non liées.
+- **`sm/node.rs` + `sm/sim.rs`** — `seeded_identity` établit le **primaire** depuis une graine **domaine-séparée**
+  (reproductible C1, structurellement indépendante de la graine Ed25519).
+- **`lib.rs` (production) + `security/pq_vault.rs`** — `create_identity`/`unlock_identity` **câblent** le vault PQ :
+  graine racine ML-DSA chiffrée, persistée dans `state_snapshots` (KV générique — **pas** de migration de schéma,
+  **transparent au frontend**), restaurée à l'unlock (TOFU si absente pour une identité héritée). Les
+  `#[allow(dead_code)]` de `create_pq_identity`/`unlock_pq_identity` **supprimés** (réellement appelés en prod).
+
+### Les dents (§4) — `pqmig3_*` (5 tests)
+- **`pqmig3_unbound_key_rejected_closes_crypto_id_1`** — **LE** test : un attaquant détenant la clé Ed25519 de
+  la victime (rupture simulée) mais attachant **sa propre** clé ML-DSA valide ⇒ `verify_tx` **passe** (les deux
+  signatures sont valides — c'est toute la prémisse) **mais** la **liaison mord** (clé ≠ clé liée) ⇒ rejeté par
+  `binding_violations` **et** par `validate_block_against_prev`. CRYPTO-ID-1 **fermé**.
+- substitution de clé rejetée · signature ML-DSA invalide rejetée · **Ed25519-seul rejeté** (fallback mort) ·
+  chemin nominal accepté + intégré.
+
+### Porte d'acceptation (toutes vertes)
+- `cargo test --lib` : **333 passés / 0 échec** (328 + 5 dents) — couverture/conservation/sweep **non régressés**.
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** · **sweep par défaut vert** (12 `t0_8_*`).
+  *(Note : `clippy --all-targets` signale 1 `result_large_err` **préexistant** sur `(u64, sm::sim::Violation)`
+  — harnais DST, `sim.rs:601`, **hors périmètre** PQ-MIG-3 ; la porte est `--lib`, propre.)*
+- **Diff logique seule** ; `dispatcher.rs` **intact** ; `#[allow(dead_code)]` du vault PQ **supprimé** (câblé prod).
+
+### Auto-revue (§3)
+- **fermeture CRYPTO-ID-1** — *sound, prouvé* : liaison **immuable** d'une clé ML-DSA **indépendante** ; le test
+  des dents montre qu'une clé non liée est rejetée **même quand la crypto statique passe** (la vraie attaque).
+- **§4 respecté** — *escaladé, non deviné* : l'incohérence compte-unifié vs découpage 3/4 a déclenché un **STOP**
+  et une décision d'Alexandre ([[ADR-008]]), pas un choix unilatéral.
+- **honnêteté (§2 « ne survends jamais »)** — *assumée* : **astérisque permanent** documenté — ce n'est **pas**
+  « comptes entièrement post-quantiques » ; `from` reste Ed25519, qui co-signe et **bootstrappe** la 1ʳᵉ liaison ;
+  un compte jamais lié avant la rupture reste vulnérable (limite intrinsèque d'une migration PQ).
+- **déterminisme** — *sound* : vérification pure ; signage sim déterministe (SIGN-DET) ; primaire sim domaine-séparé ;
+  ML-DSA hors fingerprint ⇒ **C1 byte-identique** (vérifié).
+- **périmètre** — *tenu* : enjeu/minage/validateur/genèse **inchangés** ; registre = **fonction pure de la chaîne**,
+  zéro état persistant ajouté ; transport Ed25519 **non touché** (§4).
+- **pas de masquage** — *honnête* : `verify_tx` durci (pas adouci) ; les dents **mordent** ; aucun test affaibli.
+
+> **Bilan PQ-MIG-3** : la **racine d'autorité des comptes est post-quantique** (liaison ML-DSA indépendante,
+> immuable) et **CRYPTO-ID-1 est close** — avec l'**astérisque** d'ADR-008 (voie (a), `from` Ed25519). Pièce
+> suivante **PQ-MIG-4** : aligner l'enjeu/validateur sur la **clé de vote de finalité** ML-DSA → **GADGET-3
+> débloqué** (n.b. : le re-`from` des tx d'enjeu **n'a pas lieu** ici — il n'a jamais été fait). Puis PQ-MIG-5
+> (genèse PQ) ; et, si l'astérisque doit tomber un jour, le **re-adressage complet** ADR-007(b) (PQ-MIG-2 est
+> posé pour ça). Commit baseline git = **manuel, Alexandre**.
+
+---
+
+## PQ-MIG-3B — `from`/`to` = adresse ML-DSA **partout** (termine le tout-PQ, lève l'astérisque) — [[ADR-008]] reversé
+
+> **ADR-007 (b) réalisé, sans astérisque.** PQ-MIG-3 avait fait la voie (a) (`from` reste Ed25519 + clé liée,
+> astérisque ADR-008). PQ-MIG-3B **complète** : `from`/`to` deviennent l'**adresse ML-DSA** (PQ-MIG-2,
+> `BLAKE3(ADDR_DOMAIN ‖ clé)`), ce qui re-clé **du même geste** solde, récompense, enjeu, validateur et
+> `@pseudo`. L'**identité unifiée** — que PQ-MIG-3/ADR-008 lisait comme un blocage — est en fait ce qui rend (b)
+> une **unique bascule cohérente** : « tout bascule ensemble, c'est voulu ». **Transport Ed25519 différé** (§4,
+> non touché). **Diff logique seule, déterministe.**
+
+### Livrables
+- **`p2p/ledger.rs`** — **`verify_tx` modèle (b)** : autorité **pur ML-DSA** = `lie(from, clé)` (la clé révélée
+  doit hasher vers `from`) **+** signature ML-DSA valide ; le **co-facteur Ed25519 quitte le chemin d'autorité**
+  (vestigial, wire-compat, simple présence vérifiée). CRYPTO-ID-1 fermé **intrinsèquement** (sans état :
+  une clé ≠ ⇒ un `from` ≠) ; le registre de liaison de PQ-MIG-3 **conservé** comme filet redondant.
+- **`p2p/mining_loop.rs`** (production) — **split valeur/transport** : `mine_tx` crédite l'**adresse** ; CRDT
+  miroir = adresse ; `pos_seal_if_leader`/`seal_and_broadcast` reçoivent `(addr, pk)` — **élection + seal** sur
+  l'**adresse** (le set de validateurs est indexé par adresse via `validator_stakes()`), **enveloppe** signée par
+  le `pk` **transport** Ed25519. La réputation/Shapley reste en espace **transport** (`uptime_tick(&pk, …)`,
+  hors chemin de sécurité, ADR-002).
+- **`sm/node.rs`** (cœur) — `propose_block_at` : miner-reward + clé d'élection = `pq_address_hex()` (valeur) ;
+  `sign_envelope` garde le `pk` transport. **`src/sm/` sans-IO** : seules des dérivations **pures** BLAKE3 ajoutées.
+- **`lib.rs`** (commandes) — `ledger_transfer` : `from` = adresse (tx + miroir CRDT), enveloppe = `transport_pk` ;
+  `get_public_key` expose l'**adresse** (identité wallet : solde / adresse de réception / `@pseudo`).
+- **`p2p/username.rs` + `commands_v3.rs`** — **@pseudo re-clé** : `UsernameRecord.owner_pk` = **adresse**,
+  champ **`owner_key`** (clé ML-DSA révélée), signature **ML-DSA** ; `verify_sig` = `lie(owner_pk, owner_key)` +
+  `verify_pq` ; `connection_code` dérivé de l'adresse (cohérent avec `verify_connection`). `claim_username`
+  signe en ML-DSA. **`dispatcher.rs` intact** (serde absorbe le champ).
+
+### Les dents (§3)
+- **faille toujours fermée** — `pqmig3_unbound_key_rejected_closes_crypto_id_1` (réécrit modèle b) + nominal
+  `pqmig3b_nominal_address_tx_accepted` (`from`=adresse ⇒ `verify_tx` Ok(true), red→green : l'ancien `verify_tx`
+  rejetait l'adresse faute de signature Ed25519 valide) ; **@pseudo** : `rejects_unbound_key_closes_pseudo_hijack`
+  (revendiquer l'adresse d'autrui avec sa propre clé ⇒ `lie` faux ⇒ rejet) + `rejects_owner_mismatch` (ML-DSA).
+- **enjeu re-clé** — `staked`/`validator_stakes()` indexés par adresse (tx `Stake` `from`=adresse) ; tests stake
+  ledger + `onchain_stake_harness_conservation_counts_locked_stake` (sim) verts sur identité ML-DSA.
+- **récompense re-clé** — `mine_tx` crédite l'adresse ; soldes lus sous l'adresse (sm/sim/ledger).
+- **conservation/couverture** — cycle mine → transfer → stake conserve ; COVER-1/2 + `Σ(…)+brûlé==miné` verts.
+
+### Porte d'acceptation (toutes vertes)
+- `cargo test --lib` : **335 passés / 0 échec** — couverture/conservation/sweep **non régressés** ; +1 dent
+  `@pseudo`. **C1 vert** (`determinism_meta_test_128_runs_are_byte_identical`) — l'adresse est une fonction pure.
+- `cargo clippy --lib -- -D warnings` **propre**.
+  *(Note : `clippy --tests` signale 1 `result_large_err` **préexistant** sur `(u64, sm::sim::Violation)` — harnais
+  DST, **hors périmètre**, `0` occurrence dans le diff PQ-MIG-3B ; la porte est `--lib`, propre.)*
+- **Diff logique seule** ; `dispatcher.rs` **intact** ; **transport Ed25519 inchangé** (enveloppes / PeerId / sign).
+- **ADR-008 reversé/réécrit** (rétablit ADR-007 (b)) ; README ADR à jour ; entrée tracker + auto-revue §3.
+
+### Auto-revue (§3)
+- **faille fermée — *renforcée*** : la liaison passe d'un **état** (registre) à une **fonction sans état**
+  (`from == BLAKE3(ADDR_DOMAIN ‖ clé)`). La dent nominale est le vrai red→green (l'ancien code **rejetait**
+  l'adresse, le neuf l'**accepte** via `lie`) ⇒ le test prouve la bascule, pas une tautologie.
+- **valeur vs transport — *séparation nette, non devinée*** : tout ce qui est **valeur** (solde, récompense,
+  enjeu, validateur, `from`/`to`, `@pseudo`, wallet) = **adresse** ; tout ce qui est **transport** (enveloppe
+  gossip, PeerId, `signable_envelope_bytes`) = **Ed25519**. La réputation reste en espace transport (cohérent
+  avec `peer_info`/`uptime_tick`) — pas de mélange furtif.
+- **déterminisme — *sound*** : adresse = BLAKE3 pure ; signage ML-DSA sim déterministe ; **C1 byte-identique**
+  re-vérifié. `src/sm/` reste **sans-IO** (aucune horloge/`OsRng`/ordre de `HashMap` introduits).
+- **périmètre — *tenu*** : transport **non touché** (§4) ; `dispatcher.rs` intact ; le re-`from` ne change que la
+  **clé d'indexation**, jamais la **valeur** (conservation/couverture invariantes).
+- **honnêteté (§2) — *l'astérisque tombe*** : ce **n'est plus** « entièrement PQ\* » mais **entièrement PQ** au
+  niveau du **compte** ; la seule couche encore Ed25519 (le **transport**) est **explicitement** différée et
+  **hors chemin de valeur** — déclaré, pas masqué.
+- **pas de masquage — *honnête*** : `verify_tx` durci (autorité = ML-DSA seul) ; les dents **mordent** (binding
+  + signature, côté tx **et** côté `@pseudo`) ; le test de typestate corrige une **fausse-dent** (tamponner la
+  signature Ed25519 ne mordait plus en modèle (b) — on tamponne désormais la signature **ML-DSA**, l'autorité réelle).
+
+> **Bilan PQ-MIG-3B** : l'**identité de compte est entièrement ML-DSA** (solde, récompense, enjeu, validateur,
+> `@pseudo`), **sans astérisque** ; l'autorité est **pur ML-DSA + `lie`**, CRYPTO-ID-1 close **par construction**.
+> Identité d'enjeu = identité de finalité ⇒ **GADGET-3 débloqué**. Restent **PQ-MIG-5** (genèse PQ) et, si un
+> jour voulu, le **transport** PQ (la dernière couche Ed25519). Commit = **manuel, Alexandre**.
+
+---
+
+## GADGET-3 — la règle justifier/finaliser (la finalité devient RÉELLE)
+*(2026-06-25 · `/goal QUANTA_GADGET_PIECE3.md` · pièce 3 du gadget, §4/§11/§14 de DESIGN-FINALITY-GADGET ; débloquée par PQ-MIG-3B)*
+
+> On applique la **règle en deux temps** (Casper FFG) qui **consomme** les certificats de GADGET-2 :
+> un point de contrôle devient **justifié** par un lien super-majoritaire depuis un point déjà justifié,
+> puis **finalisé** quand son **enfant direct** est justifié par un lien partant de lui (deux époques
+> consécutives liées). **`FinalitySafety` cesse d'être vacueux** : l'ensemble finalisé **grandit
+> vraiment** au-delà de la genèse. **Ni** fork-choice (GADGET-5) **ni** slashing (GADGET-4) ici.
+> Diff logique seule, **règle pure**, **C1 vert**.
+
+### Livrables (1 fichier neuf + 3 retouches logiques)
+- **`src-tauri/src/sm/finality_rule.rs`** (neuf) : **§1** `JustifiedSet` (init `{genèse}`, `is_justified`
+  = égalité exacte époque+hash) ; **§2** `FinalityState` (justifié + finalisé) + **`apply_certificate`**
+  (la règle en deux temps, pure de `(certificat, enjeu, E)`) ; `StepOutcome` (ce que le pas a avancé) +
+  8 tests (§4).
+- **`src-tauri/src/sm/node.rs`** (retouche) : champ `finalized: FinalizedSet` → **`finality: FinalityState`**
+  (justifié **et** finalisé, init genèse) ; `finalized()` inchangé (renvoie `self.finality.finalized()`,
+  **harnais intact**) ; nouveaux `justified()` + **`apply_finality_certificate`** (le **vrai** chemin
+  d'enregistrement que GADGET-1 réservait) ; `record_finalized_for_test` re-câblé sur `FinalityState`.
+- **`src-tauri/src/sm/mod.rs`** (+2 l.) : `pub mod finality_rule;` + re-export `FinalityState/JustifiedSet/StepOutcome`.
+- **`src-tauri/src/sm/sim.rs`** (+1 test) : `gadget_3_finality_safety_guards_real_finalized_checkpoints`.
+
+### §1/§2 — la règle (deux temps)
+- **Justifier** : recevant un certificat **valide** (⅔, GADGET-2) pour `source → cible`, **si `source`
+  est justifié**, alors `cible` devient justifiée (idempotent, ≤1 par époque).
+- **Finaliser** : si en plus `cible` est l'**enfant direct** (`cible.epoch == source.epoch + 1`), alors
+  `source` devient finalisé. **Append-only** (jamais d'écrasement d'une époque déjà finalisée —
+  irréversibilité). Un certificat **sous le quorum** *ou* une `source` **non justifiée** ⇒ **rien**.
+- **Pure** : aucune horloge, aucune entropie, aucun ordre de `HashMap` dans le verdict (`BTreeMap`
+  époque-ordonné). L'enjeu est **fourni par l'appelant** : sa **provenance** (re-keyer
+  `validator_stakes()` vers l'identité de vote) est la **réconciliation §4 de GADGET-2**, *non* tranchée
+  ici, aucun chemin gossip live câblé (comme GADGET-2).
+
+### §4 — les dents (mordent ; surtout « deux temps pas un »)
+- `gadget3_quorum_link_from_justified_source_justifies_target` : ⅔ depuis source justifiée ⇒ **cible justifiée**.
+- `gadget3_unjustified_source_justifies_nothing` : source **non** justifiée ⇒ `StepOutcome::default` (**rien**).
+- `gadget3_subquorum_certificate_justifies_nothing` : 1/3 < ⅔ ⇒ **rien justifié**.
+- **`gadget3_justified_alone_is_not_finalized_two_step_not_one`** (le cœur) : `c1` justifié seul **n'est
+  PAS finalisé** ; il l'est **seulement** au second lien `c1→c2` (son enfant direct). Un seul temps ne finalise pas.
+- `gadget3_skip_link_justifies_but_never_finalizes` : lien à trou `g(0)→c2(2)` justifie `c2` mais **ne finalise rien**
+  (époques non consécutives) — renforce « deux temps pas un ».
+- `gadget3_honest_path_finalizes_expected_checkpoints` : suite `g→c1→c2→c3` finalise **`g, c1, c2`** (`c3`
+  justifié mais pas finalisé — pas de lien vers son enfant). L'ensemble finalisé **grandit** (compte = 3).
+- `gadget3_honest_rule_finalizes_no_conflicting_checkpoints` : un certificat **conflictuel** à l'époque 1
+  (source ≠ `c1` justifié) est **inerte** ⇒ l'époque 1 **reste** finalisée à `c1` (aucun conflit honnête).
+- `gadget3_rule_is_deterministic_across_nodes` : mêmes certificats + même enjeu ⇒ **`FinalityState` byte-identique** sur deux nœuds.
+- **Harnais** `gadget_3_finality_safety_guards_real_finalized_checkpoints` : deux nœuds appliquent la **même**
+  chaîne honnête via `apply_finality_certificate` ⇒ finalisent **`{g, c1, c2}` réels** (compte = 3, > genèse) ⇒
+  `check_invariants()` **vert** : `FinalitySafety` garde enfin de **vrais** points. La **violation plantée de
+  GADGET-1** (`gadget_1_finality_safety_invariant_has_teeth`) **mord toujours** ⇒ ni vacueux ni tampon de caoutchouc.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **344 / 0** (335 + 9 GADGET-3 : 8 `finality_rule` + 1 harnais), incl. les dents §4
+  (surtout « deux temps pas un » + `FinalitySafety` réel).
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`determinism_meta_test_128…`) ·
+  **`t0_8_sweep_catches_planted_violation` / `t0_8_conservation_under_burn` / `t0_8_coverage_transfers_and_burns` verts** ·
+  `src/sm/` **sans-IO** (règle = calcul pur, zéro horloge/entropie/IO).
+- **Diff logique seule** : **4 fichiers** (1 neuf + 3 retouches) ; `dispatcher.rs` **intact** (0 réf) ;
+  **test à violation plantée de GADGET-1 toujours vert**.
+
+### Défauts marqués (réglables, hérités GADGET-1/2, ADR-005/§12)
+- **E = `EPOCH_LENGTH_BLOCKS`** (32 provisoire), paramétrique. **Quorum = ⅔**, **comité = validateurs actifs** (GADGET-2).
+
+### Auto-revue — vérification adverse GADGET-3 (5 lentilles)
+- **deux temps pas un (le cœur)** — *sound* : la finalisation est gardée par `cible.epoch ==
+  source.epoch+1` **ET** `source` justifié ; un point justifié seul, ou justifié par un **lien à trou**,
+  n'est **jamais** finalisé (deux dents distinctes le prouvent par contre-factuel). Pas de raccourci un-temps.
+- **pas de justification frauduleuse** — *sound* : `is_valid` (⅔, GADGET-2) **et** `is_justified(source)`
+  sont des **préconditions dures** ; sous-quorum *ou* source inconnue ⇒ `StepOutcome::default`, état inchangé.
+- **sûreté / pas de conflit finalisé** — *sound* : finalisation **append-only** (jamais d'écrasement) +
+  `is_justified` exige l'**égalité de hash** (un hash différent à l'époque = conflit, pas correspondance) ⇒
+  un certificat conflictuel est inerte. Le harnais confirme l'accord inter-nœuds sur des points **réels** ;
+  la violation **plantée** de GADGET-1 mord toujours. *(La preuve qu'on **ne peut pas** forger un conflit
+  sans recouvrement ⅔ est le **théorème de slashing = GADGET-4**, hors périmètre — §4 STOP respecté.)*
+- **déterminisme** — *sound* : règle pure ; `BTreeMap` époque-ordonné (aucun ordre `HashMap` dans le
+  verdict) ; signage ML-DSA sim déterministe (SIGN-DET) ; **C1 byte-identique** re-vérifié ; `sm/` sans-IO.
+- **périmètre — *tenu*** : **ni** fork-choice **ni** slashing ; on **réutilise** GADGET-1 (`FinalizedSet`,
+  points de contrôle) et GADGET-2 (trait `FinalityCertificate`) sans les redéfinir ; l'enjeu reste **fourni**
+  (réconciliation d'identité = §4 GADGET-2, non tranchée). `dispatcher.rs` intact.
+
+> **Bilan GADGET-3** : la finalité **vit**. La règle en deux temps **consomme** les certificats de
+> GADGET-2 ; l'ensemble finalisé **grandit vraiment** (`{g, c1, c2}` dans le harnais) et `FinalitySafety`
+> garde enfin de **vrais** points — la dent plantée de GADGET-1 mord toujours, donc l'invariant n'est ni
+> vacueux ni décoratif. **« Deux temps pas un »** est verrouillé par deux dents. Restent **GADGET-4**
+> (slashing : les deux conditions, d'où *découle* la sûreté), **GADGET-5** (fork-choice conscient de la
+> finalité) et **PQ-MIG-5** (genèse PQ). La réconciliation enjeu↔identité-de-vote (GADGET-2 §4) reste à
+> trancher avant le câblage live. Commit = **manuel, Alexandre**.
+
+---
+
+## REPUT-ID-1 — nettoyer le mix transport/adresse dans la réputation (hygiène, hors consensus)
+*(2026-06-25 · `/goal QUANTA_REPUTATION_ID_NIT.md` · NIT de la revue adverse PQ-MIG-3B · run séparé, après GADGET-3)*
+
+> Après le re-keying PQ-MIG-3B, le moteur de réputation **mélangeait** encore clé de **transport**
+> (Ed25519) et **adresse** (ML-DSA) : le minage remplissait la réputation sous la clé transport
+> (`uptime_tick(&pk,…)`) tandis qu'un transfert créditait le destinataire sous son **adresse** (`to`) —
+> deux seaux qui ne se réconciliaient jamais. **Décision** (§1) : l'identité de réputation est l'**adresse
+> ML-DSA** (l'**acteur économique**), pas la clé de transport éphémère. **Cosmétique** (réputation hors
+> chemin de sécurité, ADR-002/STAKE-WEIGHT-1), mais l'incohérence est levée avant qu'elle ne morde.
+
+### §1 — Audit (où transport vs adresse)
+- **Moteur** `reputation.rs` : `users: HashMap<String, UserReputation>` **agnostique** à la clé — le mix
+  vivait dans les **appelants**.
+- **Mix constaté** : `mining_loop` `uptime_tick(&pk=transport)` remplit ; `lib.rs ledger_transfer`
+  `transfer(&transport_pk, &to=adresse)` crédite (côtés **dépareillés**) ; commandes réputation
+  (`get_my_reputation`/`transfer_atn`/`stake_atn`/`get_network_health`) lisaient par **transport** ;
+  `gossip_tasks` (Hello) lisait l'uptime local par **transport**.
+- **Hors mix (intrinsèquement transport, documenté)** : `peer_info` + map de contributions **Shapley**
+  (les pairs sont des entités **réseau** identifiées par leur pubkey transport) ; l'**enveloppe** gossip.
+
+### §2 — Re-clé sur l'adresse (identité cohérente) — 4 appelants, 1 doc
+- **`mining_loop.rs`** : `uptime_tick(&addr, …)` (l'acteur local mine **sous son adresse**). `peer_contribs`
+  reste transport-keyé (intrinsèque) ; Shapley somme des **valeurs**, jamais des identités ⇒ aucun mix.
+- **`lib.rs ledger_transfer`** : `transfer(&from=adresse, &to=adresse)` — **les deux côtés** en adresse, donc
+  un crédit reçu atterrit dans le **même** seau que celui que le destinataire mine. `transport_pk` ne sert
+  plus qu'à l'**enveloppe** (inchangé).
+- **`lib.rs`** commandes réputation (×4) : identité locale `public_key_hex` → **`pq_address_hex()`**.
+- **`gossip_tasks.rs`** (Hello) : uptime local lu par **adresse** ; `pk` transport gardé pour `peer_info`.
+- **`reputation.rs`** (doc seule) : contrat d'identité gravé sur `ReputationEngine` + `UserReputation.public_key`
+  (= **adresse** ML-DSA ; nom de champ conservé pour la **compat snapshot/frontend**).
+
+### §3 — zéro effet consensus (vérifié)
+- La réputation **ne feed pas** l'élection : `mining_loop.rs:237` passe une map `reputations` **vide** à
+  `build_validator_set` ; le poids = **enjeu on-chain seul** (`validator_stakes()`, STAKE-WEIGHT-1/ADR-002 ;
+  `pos_consensus` : « Do not re-introduce any non-stake term »). **Aucun re-couplage** introduit.
+- `pos_consensus.rs` `Validator.reputation` = champ d'**affichage**, sans rapport avec le `ReputationEngine`.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **344 / 0** (inchangé — re-key d'appelants, aucun test cassé).
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`determinism_meta_test_128…`) ·
+  `t0_8_clean_default_sweep` / `t0_8_conservation_under_burn` / `t0_8_coverage_transfers_and_burns` **verts** ·
+  `src/sm/` **sans-IO** (intouché — la réputation n'est pas dans le cœur déterministe).
+- **Audit** : grep `reputation` × `public_key_hex|transport_pk|get_identity` dans
+  `lib.rs`/`mining_loop.rs`/`gossip_tasks.rs` ⇒ **vide** (plus aucune clé transport ne feed la réputation).
+- **Diff logique seule**, confinée à **`reputation.rs` + 3 appelants directs** ; `dispatcher.rs` **intact** ;
+  consensus (poids/quorum/élection) **inchangé**.
+
+### Auto-revue — vérification adverse REPUT-ID-1 (4 lentilles)
+- **cohérence d'identité — *résolue*** : une **seule** notion (adresse ML-DSA) ; minage, transfert (2 côtés),
+  commandes et Hello convergent ; le seul transport restant (peer-contribs Shapley, enveloppe) est
+  **intrinsèque** et **documenté** (« sauf cas où le transport est la bonne clé », §1 du spec).
+- **effet consensus — *nul*** : `build_validator_set` reçoit une map réputation **vide** ; rien re-couplé.
+  Sweep/conservation/C1 verts ⇒ le cœur déterministe n'a pas bougé.
+- **Shapley correct — *sound*** : re-keyer l'acteur local (adresse) dans une map de pairs (transport) ne
+  change pas la **valeur** de sa part (Shapley = fonction des contributions, pas des clés) ; clés distinctes ⇒
+  `shares.get(addr)` récupère bien la sienne.
+- **migration / transitoire — *signalé, bénin*** : sur **mise à niveau** d'un nœud existant, l'entrée
+  réputation transport-keyée d'un **snapshot antérieur** est **orpheline** ; le nœud ré-accumule sous son
+  adresse (uptime repart de 0 ⇒ multiplicateur anti-sybil **localement** plus bas quelques ticks). **Sans
+  effet consensus** (le multiplicateur est un throttle **local** ; l'émission reste bornée par
+  `validate_block_emission`) et **sans perte de valeur** (la réputation n'est **pas** la monnaie — le solde
+  réel vit dans le **ledger**, déjà adresse-keyé). Les commandes `*_atn` legacy sont désormais cohérentes
+  (adresse) bien que vestigiales (retrait = travail futur, hors périmètre).
+
+> **Bilan REPUT-ID-1** : le mix transport/adresse est **levé** — la réputation a **une** identité,
+> l'**adresse ML-DSA** (l'acteur économique), cohérente avec le ledger et le minage ; le transport ne
+> subsiste que là où il est **intrinsèque** (pairs réseau, enveloppe), **documenté**. **Zéro** effet
+> consensus (map réputation vide vers l'élection), C1/sweep/conservation verts, périmètre **strict**
+> (réputation + 3 appelants). Pur nettoyage d'hygiène. Commit = **manuel, Alexandre**.
+
+---
+
+## GADGET-4 — slashing : détecter les **deux** fautes (la sûreté devient RESPONSABLE)
+*(2026-06-25 · `/goal QUANTA_GADGET_PIECE4.md` · pièce 4 du gadget, §7 de DESIGN-FINALITY-GADGET ; [[ADR-003 — Slashing]] ; bâtie sur GADGET-2 (votes) + GADGET-3 (finalité))*
+
+> GADGET-3 a rendu la finalité **réelle** ; il ne l'a pas rendue **responsable**. Le théorème de
+> sûreté responsable dit : si **deux** points de contrôle en **conflit** sont finalisés, alors des
+> validateurs détenant **≥ ⅓** de l'enjeu ont enfreint l'une de **deux** règles — et **leurs propres
+> votes signés le prouvent**. On le rend **exécutable** : **détection** des deux conditions +
+> **preuve** non répudiable (signatures ML-DSA) + **mécanique** de pénalité (enjeu réduit, slashé
+> **brûlé** par défaut, conservation préservée). On **n'invente pas** de règles : elles *découlent* du
+> théorème. **Pas** de fork-choice (GADGET-5) — la sûreté responsable n'en a pas besoin (§7 STOP).
+> Diff logique seule, **tout pur**, **C1 vert**.
+
+### Livrables (1 fichier neuf + 1 retouche d'export + 1 test harnais)
+- **`src-tauri/src/sm/finality_slashing.rs`** (neuf) : **§1** `Fault` (DoubleVote/Surround) +
+  **`detect_fault`** (pur, structurel) ; **§2** `FaultProof` + **`verify_proof`** (sigs ML-DSA +
+  même validateur + condition de faute) ; **§3** `SlashOutcome` + **`apply_slash`** /
+  **`slash_for_proof`** (vérifier-puis-slasher, conservant) ; **§4** **`slashable_weight`** (la mesure
+  ≥ ⅓) ; constantes **🛑 marquées** ; 12 tests (§5).
+- **`src-tauri/src/sm/mod.rs`** (+5 l.) : `pub mod finality_slashing;` + re-export
+  `Fault/FaultProof/SlashOutcome/detect_fault/verify_proof/apply_slash/slash_for_proof/slashable_weight`.
+- **`src-tauri/src/sm/sim.rs`** (+1 test) : `gadget_4_accountable_safety_finalized_conflict_leaves_a_third_slashable`.
+
+### §1/§2/§3 — détection, preuve, pénalité (tout pur, réutilise GADGET-2/3)
+- **§1 détection** : `detect_fault(a,b)` — **DoubleVote** si `cible.epoch(a)==cible.epoch(b)` et liens
+  distincts ; **Surround** si un intervalle `(source,cible)` en **entoure** strictement un autre
+  (source antérieure **et** cible postérieure, dans un sens ou l'autre) ; sinon `None`. **Structurel**
+  (n'examine **pas** l'identité ni les sigs — c'est le rôle de `verify_proof`) ⇒ un détecteur scanne
+  les paires candidates à bas coût, puis prouve.
+- **§2 preuve** : `FaultProof = (vote_a, vote_b)`. `verify_proof` = **même** validateur **ET** chaque
+  vote individuellement valide (lien bien-formé + validateur **actif** + **sig ML-DSA** valide, via
+  `Vote::verify` de GADGET-2) **ET** `detect_fault ≠ None`. **Pas de fausse accusation** : sig forgée,
+  paire inter-validateurs, ou votes **légaux** ⇒ faux.
+- **§3 pénalité** : `apply_slash` réduit l'enjeu de `SLASH_NUM/SLASH_DEN` ; le slashé est **brûlé**
+  (`SLASH_BURN`). **Conservation structurelle** : `stake_before == remaining + slashed` et
+  `burned == slashed` — rien créé, rien perdu. `slash_for_proof` = **vérifier-puis-slasher** (jamais
+  slasher sur une accusation non prouvée). **Pures**, déterministes (`BTreeMap`/`BTreeSet`, entiers
+  `checked`, aucun ordre `HashMap` dans le verdict).
+- **§4 mesure** : `slashable_weight(votes, enjeu, E)` = somme de l'enjeu des validateurs **distincts**
+  dont les votes **prouvent** une faute (chacun compté **une** fois) — la quantité que le théorème
+  borne à **≥ ⅓**.
+
+### §4/§5 — les dents (mordent ; surtout la sûreté responsable ≥ ⅓)
+- `gadget4_double_vote_is_detected_and_proven` · `gadget4_surround_is_detected_and_proven` :
+  détectées **et** prouvées (sig ML-DSA valides du même validateur).
+- `gadget4_legal_votes_same_source_are_not_a_fault` · `gadget4_legal_chain_extension_is_not_a_fault` ·
+  `gadget4_same_vote_twice_is_not_a_fault` : **pas de fausse accusation** (même source, époques
+  différentes sans entourage, ou re-publication) ⇒ `detect_fault = None`, `verify_proof = faux`.
+- `gadget4_forged_proof_is_rejected` : une preuve dont une sig ML-DSA est **forgée** (octet flippé) ⇒
+  rejetée. `gadget4_cross_validator_pair_is_not_a_proof` : deux **validateurs distincts** ⇒ pas la
+  faute d'**un** validateur ⇒ rejetée (le garde d'identité de `verify_proof`).
+- `gadget4_slash_burns_and_conserves` · `gadget4_unproven_accusation_slashes_nothing` : une preuve
+  valide **réduit** l'enjeu, le slashé est **brûlé**, **conservation** (`remaining+slashed==before`) ;
+  une accusation non prouvée laisse l'enjeu **intact**.
+- `gadget4_slashable_weight_covers_at_least_one_third` · `gadget4_honest_votes_leave_nothing_slashable`
+  (pur) + **harnais** `gadget_4_accountable_safety_finalized_conflict_leaves_a_third_slashable` :
+  **comité byzantin** — `{1,2}` finalisent le fork A sur le nœud A, `{2,3}` le fork B sur B (via la
+  règle GADGET-3) ⇒ **(i)** `check_invariants()` lève **`FinalitySafety`** à l'époque 1 (finalité
+  **rompue, observable**), **(ii)** le validateur **2** (intersection des deux quorums ⅔, ⅔+⅔−1=⅓) a
+  **double-voté** ⇒ `slashable_weight = 100 = ⅓` de 300, `slashable·3 ≥ total`. **Casser la finalité
+  laisse une preuve d'au moins un tiers fautif.**
+- `gadget4_detection_and_penalty_are_deterministic` : pipeline complet (votes→détection→preuve→slash→
+  mesure) **byte-identique** sur deux constructions (SIGN-DET + verdicts entiers purs).
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **357 / 0** (344 + 13 GADGET-4 : 12 `finality_slashing` + 1 harnais), incl. les
+  dents §5 (surtout **sûreté responsable ≥ ⅓** et **pas de fausse accusation**).
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`determinism_meta_test_128…`) ·
+  **`t0_8_sweep_catches_planted_violation` / `t0_8_conservation_under_burn` /
+  `t0_8_coverage_transfers_and_burns` verts** · `src/sm/` **sans-IO** (détection/preuve/pénalité =
+  calcul pur, zéro horloge/entropie/IO ; SIGN-DET reste `#[cfg(test)]`).
+- **Diff logique seule** : **3 fichiers** (1 neuf + export + 1 test) ; `dispatcher.rs` **intact**
+  (0 réf GADGET-4) ; **invariants de finalité GADGET-1/3 toujours verts** (la violation **plantée** de
+  GADGET-1 mord toujours).
+
+### Défauts marqués (🛑 Alexandre, §12 / ADR-003 — constantes réglables)
+- **`SLASH_NUM/SLASH_DEN`** = **1/1** (slash **plein** par défaut : l'équivocation qui rompt la
+  finalité est la faute la plus grave ⇒ dissuasion maximale, la plus simple ; alternative = slash
+  partiel/corrélé). **`SLASH_BURN`** = **true** (brûlé : le plus simple et le plus sain
+  monétairement ; conservation tient aussi en redistribution). **`SLASH_EVIDENCE_WINDOW_BLOCKS`** =
+  `UNBONDING_PERIOD_BLOCKS` (le **maximum** : une preuve doit arriver **avant** que le fautif ne
+  déverrouille et retire son enjeu ; contrainte `≤ unbonding` **gravée** par un `const _: () =
+  assert!(…)` ⇒ erreur de **compilation** si retunée au-delà — la faille *unstake-and-run* d'ONCHAIN-STAKE-1 §3).
+
+### Auto-revue — vérification adverse GADGET-4 (5 lentilles)
+- **détection (les deux, et deux seulement) — *sound*** : `Fault` est un enum **clos** ; DoubleVote
+  (même époque-cible, liens distincts) et Surround (entourage **strict** des deux côtés) sont les
+  conditions de §7 ; tout le reste (extension de chaîne, saut, re-publication) ⇒ `None` (trois dents
+  par contre-factuel). Inventer une 3ᵉ condition punirait l'honnête — *non fait*.
+- **preuve (anti-fausse-accusation) — *sound*** : `verify_proof` exige **même validateur** ∧ **deux
+  sigs ML-DSA valides** (`Vote::verify`, GADGET-2) ∧ une faute structurelle ; sig forgée, paire
+  inter-validateurs, ou votes légaux ⇒ **faux** (dents dédiées). La preuve est **vérifiable par
+  quiconque** (sigs non répudiables), aucune partie de confiance.
+- **pénalité (conservation) — *sound*** : `apply_slash` est **fraction-générique** et **checked**
+  (`u128`, clamp ≤ enjeu) ; `stake_before == remaining + slashed` et `burned == slashed` tiennent pour
+  **toute** fraction marquée ; `slash_for_proof` ne slashe **que** sur preuve vérifiée ; un fautif
+  pleinement slashé **quitte** l'ensemble actif. *(Le câblage sur l'**enjeu on-chain réel** — un
+  mouvement `STAKE → BURN` qui ferait mordre l'invariant de conservation du harnais via le vrai
+  `locked_stake`/`burned` — est la **même** réconciliation identité/ledger différée que GADGET-2 §4,
+  laissée à Alexandre ; aucun chemin gossip live, comme GADGET-2/3.)*
+- **sûreté responsable ≥ ⅓ — *prouvée*** : le harnais **injecte** une finalisation conflictuelle (deux
+  quorums ⅔), `FinalitySafety` **mord** (finalité rompue, observable), et `slashable_weight` récupère
+  **exactement** l'intersection (≥ ⅓, ici 100/300) via le double-vote du validateur partagé. Théorème
+  rendu exécutable : **casser la finalité laisse une preuve d'au moins un tiers**.
+- **déterminisme / périmètre — *tenu*** : tout pur (`BTreeMap`/`BTreeSet`, entiers), aucun ordre
+  `HashMap` dans le verdict ; SIGN-DET `#[cfg(test)]` ; **C1 byte-identique** re-vérifié ; `sm/`
+  sans-IO. **Réutilise** GADGET-2 (`Vote`/`Vote::verify`) et GADGET-3 (`apply_finality_certificate`)
+  sans les redéfinir ; **ni** fork-choice **ni** ledger live touchés ; `dispatcher.rs` intact.
+
+> **Bilan GADGET-4** : la sûreté est **responsable**. Les **deux** fautes — et deux seulement — sont
+> détectées sur les votes ML-DSA, la **preuve** est non répudiable et vérifiable par quiconque, la
+> **pénalité** réduit l'enjeu en conservant le bilan (slashé **brûlé**). Le harnais prouve le théorème :
+> une finalité **rompue** (`FinalitySafety` mord) laisse une preuve couvrant **≥ ⅓** de l'enjeu. Restent
+> **GADGET-5** (fork-choice conscient de la finalité, résout la partition), **PQ-MIG-5** (genèse PQ), et
+> la réconciliation enjeu↔identité-de-vote + le **câblage live** du slashing sur le ledger (mouvement
+> `STAKE→BURN`, nouvelle tx/gossip) — avant lesquels les **montants §3 (🛑)** sont à figer au §12. Commit
+> = **manuel, Alexandre**.
+
+---
+
+## GADGET-5A — fork-choice LMD-GHOST conscient de la finalité (le moteur seul)
+*(2026-06-25 · `/goal QUANTA_GADGET_PIECE5A.md` · pièce 5A du gadget, §9 de DESIGN-FINALITY-GADGET ; bâtie sur GADGET-2 (votes) + GADGET-3 (justifié/finalisé) + enjeu on-chain)*
+
+> La plus-longue-chaîne est la mauvaise règle pour une chaîne votée par l'enjeu : elle ignore **qui** a
+> soutenu une branche. GHOST suit, à chaque embranchement, l'enfant au **plus de poids de votes** —
+> rendu **conscient de la finalité** (façon Gasper) : **ancré au dernier point justifié** (GADGET-3) et
+> **plancher au dernier finalisé**, il ne peut **jamais** défaire l'histoire irréversible. Cette pièce
+> est le **moteur seul** ; la **résolution de partition** (bascule du test `…gadget_deferred`) est
+> **GADGET-5B**. Diff logique seule, **tout pur**, **C1 vert**. Pas de slashing vivant ici (§9 STOP).
+
+### Livrables (1 fichier neuf + 1 retouche d'export)
+- **`src-tauri/src/sm/fork_choice.rs`** (neuf) : **§1** `LatestVotes` (LMD **ordre-indépendant**,
+  réutilise `Vote` de GADGET-2) ; `BlockTree` (substrat parent/enfant, `is_descendant` **borné** =
+  anti-boucle) ; **§2** `branch_weights` (poids = Σ enjeu des derniers votes qui **descendent** du
+  bloc, privé) ; **§3** **`ghost_head`** (part du justifié, descend l'enfant de plus grand poids,
+  départage **plus petit hash**, **plancher de finalité absolu** + repli) + **`anchors`** (extrait
+  `(dernier justifié, dernier finalisé)` d'un `FinalityState` de GADGET-3) ; 9 tests (§4).
+- **`src-tauri/src/sm/mod.rs`** (+2 l.) : `pub mod fork_choice;` + re-export
+  `BlockTree/LatestVotes/ghost_head/anchors`.
+
+### §1/§2/§3 — LMD, poids de branche, règle GHOST ancrée
+- **§1 LMD** : `LatestVotes::observe` ne garde que le **dernier** vote par validateur (clé = **adresse
+  ML-DSA**, cohérente depuis le re-keying) — remplace ssi **époque cible strictement supérieure**,
+  départage d'égalité sur le **plus petit hash cible** ⇒ **ordre-indépendant** (deux nœuds, même
+  ensemble de votes dans n'importe quel ordre ⇒ même état).
+- **§2 poids** : `branch_weights` attribue l'enjeu de chaque dernier vote à sa **cible et tous ses
+  ancêtres jusqu'à l'ancre** ; un vote hors du sous-arbre ancré, ou d'un validateur à enjeu 0, **ne
+  pèse rien**. Pur, sommes entières commutatives (`BTreeMap`, aucun ordre `HashMap` dans le verdict).
+- **§3 GHOST ancré** : `ghost_head` part de l'**ancre justifiée**, descend à l'enfant de **plus grand
+  poids** (départage **plus petit hash**, `BTreeSet` trié) jusqu'à une feuille. **Plancher de finalité
+  absolu** : le résultat **descend toujours** du finalisé ; ancre inconnue ou hors-plancher ⇒ **repli
+  sur le plancher** (jamais sous la finalité).
+
+### §4 — les dents (mordent ; surtout poids-prime-longueur et plancher)
+- **`gadget5a_weight_beats_length`** (le cœur) : branche **courte mais lourde** `R→X` (200) **bat** la
+  branche **longue mais légère** `R→Y1→Y2→Y3` (100) — le poids décide à l'**embranchement**, pas la
+  longueur. `gadget5a_branch_weight_sums_supporting_stake` : §2 direct (poids = Σ enjeu, propagé à la racine).
+- **`gadget5a_latest_vote_replaces_old_one`** : `a` vote X puis re-vote Y (époque ↑) ⇒ l'ancien vote ne
+  compte plus (poids(X)=0), la tête **bascule** vers Y. `gadget5a_stale_vote_does_not_replace` : un vote
+  d'époque **inférieure** est ignoré.
+- **`gadget5a_finality_floor_is_absolute`** : une branche **hors-plancher** `Z→C` **trois fois plus
+  votée** est **ignorée** ; la tête reste sur la branche finalisée (`H`, descend de `F`), jamais `C`.
+  `gadget5a_anchor_off_floor_falls_back_to_floor` : ancre hors-plancher / inconnue ⇒ **repli sur F**.
+- **`gadget5a_anchors_track_last_justified_not_genesis`** : `anchors` d'un état genèse = `(genèse,
+  genèse)` ; après un certificat ⅔ `g→c1` (réutilise GADGET-2/3), l'ancre **avance à `c1`** (dernier
+  justifié), le plancher **reste** genèse (c1 justifié, pas finalisé — deux-temps) ; GHOST depuis `c1`
+  **ignore** un frère conflictuel `c1'` hors-ancre.
+- **`gadget5a_equal_weight_tie_breaks_on_smallest_hash`** + **`gadget5a_head_is_deterministic_across_observation_order`** :
+  poids égal ⇒ **plus petit hash** ; mêmes votes observés en **3 ordres** (forward/shuffled/reversed),
+  incluant un re-vote ⇒ **même tête** (LMD ordre-indépendant — C1 en miniature).
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **366 / 0** (357 + 9 GADGET-5A), incl. les dents §4 (surtout
+  **poids-prime-longueur** et **plancher de finalité**).
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`determinism_meta_test_128…`) ·
+  **`t0_8_sweep_catches_planted_violation` / `t0_8_conservation_under_burn` /
+  `t0_8_coverage_transfers_and_burns` verts** · `src/sm/` **sans-IO** (moteur = calcul pur, zéro
+  horloge/entropie/IO ; tie-break = ordre total déterministe ; walks **bornés** = anti-boucle).
+- **Diff logique seule** : **2 fichiers** (1 neuf + export) ; `dispatcher.rs` **intact** (0 réf
+  GADGET-5A) ; **invariants de finalité GADGET-1/3/4 toujours verts**.
+
+### Auto-revue — vérification adverse GADGET-5A (5 lentilles)
+- **LMD (latest-message) — *sound*** : `observe` ne retient que l'époque cible **strictement
+  supérieure**, départage d'égalité au **plus petit hash** ⇒ **ordre-indépendant** (test 3-ordres) ;
+  un re-vote **déplace** tout le poids du validateur ; un vote périmé est inerte. Clé = adresse ML-DSA
+  (identité de vote/enjeu cohérente).
+- **poids de branche — *sound*** : `branch_weights` = Σ enjeu des derniers votes **descendant** du
+  bloc, propagé aux ancêtres jusqu'à l'ancre ; enjeu 0 ou hors sous-arbre ⇒ **0** ; sommes entières
+  commutatives (`saturating_add`), `BTreeMap` ⇒ aucun ordre `HashMap` ne fuit.
+- **règle GHOST ancrée — *sound, le cœur*** : la décision se prend à l'**embranchement** par le poids
+  (dent poids-prime-longueur), la descente choisit le max-poids/plus-petit-hash jusqu'à la feuille ; le
+  départ est l'**ancre justifiée** (`anchors`, dent dédiée), **pas** la genèse.
+- **plancher de finalité — *prouvé absolu*** : `ghost_head` ne descend **que** depuis l'ancre (qui
+  descend du plancher) ⇒ la tête **descend toujours** du finalisé ; ancre incohérente ⇒ **repli sur le
+  plancher**. Une branche conflictuelle, même bien plus lourde, n'est **jamais** choisie (dent qui mord).
+- **déterminisme / périmètre — *tenu*** : tout pur (`BTreeMap`/`BTreeSet`, entiers), walks **bornés**
+  par le nombre de nœuds (panic/boucle-freedom) ; **réutilise** GADGET-2 (`Vote`) et GADGET-3
+  (`FinalityState` via `anchors`), enjeu on-chain ML-DSA — **rien redéfini** ; **moteur seul** — ni
+  résolution de partition (GADGET-5B), ni slashing vivant, **aucun** câblage `Node`/`dispatcher`
+  (intact), **aucun** invariant du harnais touché. §9 STOP respecté.
+
+> **Bilan GADGET-5A** : le **moteur** de fork-choice conscient de la finalité **existe**. GHOST suit le
+> **poids de votes** (l'enjeu), pas la longueur — verrouillé par `poids-prime-longueur` ; il est **ancré
+> au dernier justifié** et **plancher au finalisé** — verrouillé par `plancher absolu` + `ancrage` ; LMD
+> et tête sont **ordre-indépendants** (C1 en miniature). Tout **pur**, **réutilise** GADGET-2/3 + enjeu
+> on-chain, `sm/` sans-IO, `dispatcher.rs` intact. Reste **GADGET-5B** : la **résolution de partition**
+> qui consomme ce moteur pour faire basculer le test 2b (`…gadget_deferred`) de **diverge** à
+> **réconcilie**, avec **conservation globale au heal** (défaire l'émission des branches perdantes non
+> finalisées) — l'aboutissement du gadget. Puis **PQ-MIG-5** (genèse PQ) + réconciliation
+> clé-de-vote↔clé-d'enjeu pour le câblage vivant. Commit = **manuel, Alexandre**.
+
+---
+
+## GADGET-5B — résolution de partition (l'aboutissement du gadget)
+*(2026-06-25 · `/goal QUANTA_GADGET_PIECE5B.md` · pièce 5B, §9 de DESIGN-FINALITY-GADGET ; consomme le moteur GADGET-5A, résout le trou ADR-001)*
+
+> Pièce **finale** du gadget. À la guérison d'une partition, le moteur GHOST (5A) choisit la branche au
+> plus de poids descendant du dernier justifié, **plancher de finalité absolu**, et les nœuds
+> **convergent**. Le test multi-blocs `…gadget_deferred`, semé il y a des sessions comme **cible**,
+> **bascule** de **diverge** à **réconcilie**. Exigence n°1 : au heal la **conservation globale** tient —
+> l'émission d'une branche perdante **non finalisée** est **défaite** proprement (sinon on rouvre la
+> classe double-mint d'EMIT-1, à l'échelle de la partition). Diff logique seule, **tout déterministe**,
+> `dispatcher.rs` intact, pas de slashing vivant (§4 STOP).
+
+### Livrables (2 fichiers logique + 2 tests, 1 retouche de doc)
+- **`src-tauri/src/p2p/ledger.rs`** : `#[derive(Clone)]` sur `Ledger` (sert le **validate-before-commit**)
+  + **`reorg_to_fork(winners, floor_index)`** (réorg multi-blocs **conservant** : pop la branche
+  perdante en **reversant** cache + enjeu, **re-met en file** ses tx **utilisateur** absentes du
+  gagnant — AUDIT-BLK-1 —, **largue** ses récompenses synthétiques — EMIT-1 §4.1 —, applique le
+  gagnant via le **même** `integrate_remote_block` linéaire ⇒ couverture/émission/sig/binding
+  identiques ; **plancher de finalité absolu** : refuse de toucher un bloc ≤ `floor_index` ; **essai
+  sur clone**, un seul gagnant invalide **annule tout** — la chaîne vive reste intacte) +
+  `pop_above(keep_index)` (privé) ; **2 dents** ledger.
+- **`src-tauri/src/sm/node.rs`** : **`reconcile_fork(competing)`** (construit l'**arbre union** chaîne∪segment,
+  lance `ghost_head` ancré au justifié / planché au finalisé, reconstruit la chaîne gagnante par un
+  **walk de parents borné**, appelle `Ledger::reorg_to_fork`) ; `on_chain_segment` **collecte tout le
+  segment** et reconcilie sur tout bloc non-linéaire (au lieu du `break` AUDIT-SYNC-1 — un gap décline
+  à la réconciliation, pas par rejet dur). Pur : **aucune** horloge/entropie, **aucun ordre `HashMap`
+  dans le verdict** (la décision passe par le moteur `BTree` de 5A).
+- **`src-tauri/src/sm/sim.rs`** : test 2b **inversé** (cf. §3) ; **`src-tauri/src/sm/fork_choice.rs`** :
+  doc-module mise au présent (5B a atterri).
+
+### §1/§2/§3 — réconciliation, conservation globale, bascule du test 2b
+- **§1 réconciliation (via 5A)** : `reconcile_fork` bâtit l'arbre union des deux côtés, `ghost_head`
+  donne la **tête commune** (sans votes câblés — différé —, le tie-break **plus-petit-hash** + le
+  plancher + l'enjeu décident, et le moteur weighte dès que les votes arriveront). **Deux nœuds, mêmes
+  blocs ⇒ même tête** (déterminisme 5A) ⇒ ils **convergent**.
+- **§2 conservation globale (le point délicat — EMIT-1 revient)** : `reorg_to_fork` **reverse** l'état
+  ET l'**émission** de la branche perdante (pop + `cache_revert_tx` + `revert_block_stake_effects`),
+  **re-met en file** ses tx utilisateur absentes du gagnant, **largue** ses récompenses (jamais
+  re-mintées). Invariant **`Σ(dépensable+staké+déverrouillage)+brûlé == miné`** tenu **globalement**,
+  exactement comme hors partition. Une histoire **finalisée** n'est **jamais** défaite (plancher).
+- **§3 bascule du test 2b** : `t0_8_multiblock_partition_currently_diverges_gadget_deferred` →
+  **`t0_8_multiblock_partition_reconciles_at_heal`** : il assertait la **divergence** (marquée
+  gadget-deferred), il asserte désormais **`tips[a] == tips[b]`** (convergence + déterminisme),
+  hauteurs égales, conservation+émission par nœud, `check_invariants() == Ok` (sûreté+conservation
+  **globales**), **plus** la conservation chirurgicale (seul le mineur gagnant porte l'émission d'**une**
+  branche : 99 QTA, l'autre = 0). **Marquage gadget-deferred retiré.**
+
+### §4 — les dents (mordent ; surtout réconciliation + conservation + plancher)
+- **réconciliation** (`t0_8_multiblock_partition_reconciles_at_heal`) : deux forks **multi-blocs**
+  divergents (A & B scellent chacun 2 blocs sous partition) ⇒ au heal, via sync bidirectionnel, **une
+  seule tête commune** (`tips[a] == tips[b]`), hauteur 3 des deux côtés. Déterminisme C1 : chaque nœud,
+  voyant les mêmes blocs, choisit le **même** gagnant.
+- **conservation globale au heal (load-bearing)** : la même inversion vérifie `Σ balances + brûlé ==
+  miné` par nœud **et** `check_invariants() == Ok` ; surgical — `total_minted == 99 QTA` (une branche),
+  le mineur perdant à **0** : si l'émission perdante n'était **pas** défaite, `Σ balances > miné` et
+  l'invariant **casserait** (la preuve plantée que le revert mord). Doublé au niveau ledger par
+  **`gadget5b_reorg_reverts_loser_emission_and_requeues_user_tx`** (minté retombe à 107, pas 112).
+- **transactions re-mises en file** (`gadget5b_reorg_reverts_loser_emission_and_requeues_user_tx`) : la
+  tx **utilisateur** (transfert + burn) de la branche perdante, absente du gagnant, est **re-mise en
+  file** (AUDIT-BLK-1) ; sa récompense de minage **n'est pas** re-mise (pas de double-mint, EMIT-1 §4.1).
+- **finalité préservée** (`gadget5b_reorg_to_fork_refuses_below_finalized_floor`) : un fork qui
+  remplacerait un bloc **finalisé** (`floor_index = 2`, fork enraciné à l'index 1) est **refusé**
+  (`Ok(false)`, chaîne intacte) ; contrôle positif — au-dessus du plancher (`floor_index = 1`) le
+  **même** fork réorganise. Le plancher protège **exactement** ce que la finalité protège.
+- **déterminisme** : convergence identique des deux nœuds (C1) ; tout pur, walks **bornés**, verdict via
+  le moteur `BTree` de 5A.
+
+### Portes d'acceptation — toutes vertes
+- `cargo test --lib` : **368 / 0** (366 + 2 dents ledger ; le test 2b **inversé** réconcilie+conserve
+  au lieu de diverger).
+- `cargo clippy --lib -- -D warnings` **propre** · **C1 vert** (`determinism_meta_test_128…`) ·
+  **`t0_8_sweep_catches_planted_violation` / `t0_8_conservation_under_burn` /
+  `t0_8_coverage_transfers_and_burns` verts** · `src/sm/` **sans-IO** (réconciliation pure : zéro
+  horloge/entropie ; arbre depuis des `Vec` ordonnés ; verdict via `ghost_head` `BTree` ; walks bornés).
+- **Diff logique seule** : `dispatcher.rs` **intact** (0 réf GADGET-5B) ; **marquage gadget-deferred
+  retiré** du test 2b ; **invariants de finalité GADGET-1/3/4 toujours verts**.
+
+### Auto-revue — vérification adverse GADGET-5B (5 lentilles)
+- **réconciliation (via 5A) — *sound*** : `reconcile_fork` ne redéfinit **rien** — il bâtit l'arbre
+  union et délègue la **décision** à `ghost_head` (moteur 5A : ancré justifié, plancher finalisé). Le
+  segment **entier** alimente l'arbre (correction subtile : un tip de fork au **hash plus petit** est
+  *avalé* par le chemin single-block `Ok(false)` — le reconstruire des seuls `Err` le raterait). Deux
+  nœuds, mêmes blocs ⇒ même tête ⇒ convergence (C1).
+- **conservation globale — *prouvée, n°1*** : le pop **reverse** cache + enjeu **et** retire l'émission
+  perdante de la chaîne (donc de `total_minted`, recalculé chaîne+pending) ; les tx utilisateur
+  re-mises sont neutres au bilan, les récompenses larguées **disparaissent** des deux côtés (balances ↓,
+  miné ↓). `Σ(dépensable+staké+déverr.)+brûlé == miné` tenu — vérifié par nœud, globalement, et
+  chirurgicalement (mineur perdant à 0). La dent plantée mord.
+- **finalité préservée — *absolue*** : `reorg_to_fork` **refuse** tout fork enraciné `< floor_index`
+  (jamais de pop d'un bloc finalisé) ; le plancher 5A garantit déjà que `ghost_head` ne sort pas du
+  finalisé — **ceinture + bretelles**. Par la sûreté responsable (GADGET-4), deux finalisés en conflit
+  exigent ⅓ slashable, donc les préfixes finalisés **coïncident**.
+- **validate-before-commit — *tenu*** : l'essai sur **clone** rejoue le **même** `integrate_remote_block`
+  linéaire (couverture/émission/sig/binding pleines) ; un seul gagnant invalide **annule tout**, la
+  chaîne vive intacte (AUDIT-BLK-2 généralisé à N blocs — un fork malformé ne tronque jamais). Le clone
+  ne coûte qu'à un **rare** reorg de heal.
+- **déterminisme / périmètre — *tenu*** : tout pur (`Vec` ordonnés → arbre `BTree` → tête ; aucun ordre
+  `HashMap` dans le verdict), walks **bornés** ; **réutilise** moteur 5A + finalité 3/4 + conservation
+  du harnais — **rien redéfini** ; **pas** de slashing vivant, **aucun** câblage `dispatcher` (intact).
+  §4 STOP respecté.
+
+> **Bilan GADGET-5B** : le **gadget de finalité est complet**. Finalité **réelle** (GADGET-3),
+> **responsable** (GADGET-4), et **résolution de partition** (GADGET-5A moteur + 5B heal). Le trou
+> multi-blocs traîné depuis des sessions est **fermé** : deux partitions multi-blocs **convergent** au
+> heal sur une seule tête, l'émission perdante est **défaite**, la **conservation globale** tient, et la
+> finalité est un **plancher absolu**. Le test 2b semé jadis comme cible **bascule** enfin. Restent, hors
+> gadget : **PQ-MIG-5** (genèse PQ) et la réconciliation **clé-de-vote ↔ clé-d'enjeu** pour le câblage
+> vivant (slashing + votes réels en production — vote gossip non encore branché ici, `LatestVotes` vide,
+> le tie-break/plancher/enjeu décident en attendant). Commit = **manuel, Alexandre**.
+
+---
+
+## PQ-MIG-5 — genèse post-quantique (clôt le chantier crypto)
+*(2026-06-25 · `/goal QUANTA_PQ_MIG_5.md` · dernière pièce de la migration PQ ; construit sur PQ-MIG-1/2/3B)*
+
+> Le bloc de **genèse** est reconstruit sur les identités **ML-DSA** (PQ-MIG-1) et adresses **BLAKE3**
+> (PQ-MIG-2) : la machinerie encode l'**état initial** (allocation) et l'**ensemble de validateurs
+> initial** comme un **mapping déterministe** `adresse ML-DSA → (solde, enjeu)`, avec un **hash de
+> genèse lié au contenu** (le hachage de bloc canonique, domaine-séparé) et un **bump
+> `TORUS_PROTOCOL_VERSION` 2 → 3**. Diff logique seule, déterministe, **C1 vert**, conservation
+> **exacte dès le bloc 0**.
+
+### Décision produit — premine (le point délicat, tranché)
+- §2 décrit une allocation de genèse = **un premine**, qui **contredit** le pilier de mission
+  **« zéro premine »** (CLAUDE.md, règles Rust, mémoire). Le spec marque pourtant l'allocation
+  **indécise / placeholder / §12-réglable**. → **Question posée à Alexandre**, réponse :
+  **genèse par défaut VIDE** (zéro premine préservé) **+ machinerie complète testée**.
+- Donc `Ledger::new()` == `genesis_with_allocation(&[])` : **offre 0 au bloc 0**, bloc de genèse sans
+  tx, `trust_no_premine_at_genesis` **reste vert inchangé**. La vraie distribution (possiblement nulle)
+  est une décision §12 ; câbler une allocation = changer une ligne (`new()` → mapping).
+
+### Livrables
+- **§1 — genèse déterministe** (`ledger.rs`) : `genesis_with_allocation(&[(adresse, solde, enjeu)])`
+  bâtit un bloc 0 **fonction pure** du mapping. Encodage en tx : **une seule** `Mining` (mint du total
+  `Σ(solde+enjeu)` au 1ᵉʳ compte, ≤ borne d'émission/bloc à offre 0) → `Transfer`s **neutres**
+  distribuant chaque part → un `Stake` par validateur (enjeu > 0). État dérivé via `rebuild_cache`
+  (source unique = la chaîne), hashes de genèse insérés en anti-replay. `new()` = mapping vide.
+- **Hash de genèse lié au contenu** : nouveau helper **partagé** `block_hash_hex(index, prev, ts,
+  miner, txs)` — **un seul** hachage de bloc canonique pour `seal_block_at`, `validate_block_against_prev`
+  **et** la genèse (domaine-séparé par `index = 0`, `prev = 0×64`, `miner = "GENESIS"`). Les trois ne
+  peuvent plus diverger. (L'ancien littéral `BLAKE3("QUANTA_GENESIS_2026")` est retiré.)
+- **§2 — allocation placeholder 🛑** : `DEV_GENESIS_ALLOCATION` (`#[cfg(test)]`, 3 adresses ML-DSA de
+  test = adresses PQ-MIG-2 de graines figées `seeded_identity(5_000_00N)`, 2 validateurs + 1 porteur,
+  total 100 QTA) — **nominal, ne promet rien, jamais figé définitif**. N'est **pas** câblé dans `new()`.
+- **§3 — conservation au bloc 0** : `miné == Σ(solde + enjeu)` et
+  `Σ dépensable + enjeu-verrouillé + brûlé == miné`, exact dès le bloc 0 (l'enjeu **vient** de
+  l'allocation, pas créé en plus).
+- **§4 — bump version** : `TORUS_PROTOCOL_VERSION` **2 → 3** (`gossip.rs`) — la genèse PQ est une
+  rupture de protocole.
+
+### Les dents (§5) — toutes mordent
+- **genèse déterministe** (`pqmig5_genesis_hash_is_deterministic_and_frozen`) : deux constructions ⇒
+  hash **identique** ; **vecteurs figés** (vide `37bb8957…`, DEV `d13f6221…`) ; le hash **lie le
+  contenu** (vide ≠ alloué).
+- **conservation à la genèse** (`pqmig5_dev_genesis_conserves_at_block_zero`) : `miné == Σ alloc == 100
+  QTA`, `Σ == miné` au bloc 0 ; **dent négative** — planter un `Stake` de genèse **sans `Mining`
+  derrière** rend `Σ ≠ miné` (la vérif **mord**).
+- **validateurs initiaux** (`pqmig5_dev_genesis_validators_reflect_mapping`) : `validator_stakes()` au
+  bloc 0 = `{G0:10, G1:5}` exactement, indexé par **adresse ML-DSA** ; le porteur (enjeu 0) **n'est
+  pas** validateur ; soldes dépensables = colonne « solde ».
+- **adresses ↔ graines** (`pqmig5_genesis_addresses_bind_their_seeds`) : chaque adresse figée EST
+  `BLAKE3(ADDR_DOMAIN ‖ clé ML-DSA)` de sa graine (PQ-MIG-2) — pas du hex magique.
+- **enchaînement** (`pqmig5_first_block_on_pq_genesis_validates_and_conserves`) : un 1ᵉʳ bloc (récompense
+  + transfert signé dépensant la valeur de genèse de G0) **valide** chez un récepteur frais sur la même
+  genèse PQ (`Ok(true)` — couverture/émission/binding PQ-MIG-3B) et **conserve** (miné 100 → 107).
+- **déterminisme global** (`pqmig5_pq_genesis_chain_is_deterministic` + `determinism_meta_test_128`) :
+  **C1 vert** sur une chaîne partant de la genèse PQ (genèse + bloc #1 byte-identiques).
+
+### Portes (acceptation)
+- `cargo test --lib` : **374 / 0** (368 + 6 dents §5), incl. conservation au bloc 0 + genèse déterministe.
+- `clippy --lib -D warnings` **propre** · **C1 vert** · sweep + couverture + conservation verts ·
+  `src/sm/` **sans-IO** (machinerie de genèse pure, dans `p2p/ledger.rs` ; `sm/` n'a gagné que du test).
+- `git diff` **logique seule** · `dispatcher.rs` **intact** (0 réf PQ-MIG-5) · `TORUS_PROTOCOL_VERSION`
+  **2 → 3** · invariants de finalité **GADGET-1/3/4 verts** · `trust_no_premine_at_genesis` **vert**.
+  *(Note : `clippy --tests` signale un `result_large_err` **préexistant** sur `run_checked_steps`/`Violation`
+  du harnais GADGET — hors PQ-MIG-5, non introduit ici ; la porte du spec est `--lib`, propre.)*
+
+### Auto-revue — §3 (5 lentilles)
+- **genèse ML-DSA — *tenu*** : `from`/`to`/validateurs = **adresses ML-DSA** PQ-MIG-2 ; le mapping +
+  l'enchaînement signé prouvent qu'un compte de genèse se **dépense** sous autorité ML-DSA (binding).
+- **allocation placeholder marquée — *tenu*** : `DEV_GENESIS_ALLOCATION` est `#[cfg(test)]`, 🛑 §12,
+  **hors** `new()` ; le défaut est **vide** ⇒ zéro premine préservé (décision Alexandre).
+- **conservation au bloc 0 — *prouvée, n°1*** : `miné == Σ(solde+enjeu)`, `Σ dépensable+verrouillé+brûlé
+  == miné` exact ; la dent plantée (enjeu non couvert) **casse** l'égalité ⇒ aucun déséquilibre masqué.
+- **bump version — *fait*** : 2 → 3, noté ici (rupture de protocole de la genèse PQ).
+- **périmètre — *tenu*** : genèse + version **seulement** ; **pas** de gossip de votes, **pas** de
+  slashing vivant, **pas** de réconciliation clé-de-vote↔clé-d'enjeu ; réutilise identité/adresses/
+  autorité PQ-MIG-1/2/3B — **rien redéfini** ; `dispatcher.rs` intact ; diff logique seule.
+
+> **Bilan PQ-MIG-5** : la **migration post-quantique est complète** — racine (PQ-MIG-1), adresses
+> (PQ-MIG-2), autorité + enjeu (PQ-MIG-3B) **et** désormais **genèse** entièrement ML-DSA. De la genèse
+> au consensus, Quanta est réellement post-quantique. La **machinerie** de genèse d'allocation existe,
+> est déterministe (hash lié au contenu, vecteurs figés), conserve dès le bloc 0 et porte des
+> validateurs initiaux ; le **défaut reste zéro premine** (décision Alexandre), une vraie distribution
+> étant une décision **§12**. Reste, **hors migration**, le **gros morceau** : la réconciliation
+> **clé-de-vote ↔ clé-d'enjeu** pour câbler le gadget en vivant (votes par gossip, slashing sur ledger
+> réel) ; et les décisions **§12** (allocation réelle, montants) + la frontière gravé/ajustable d'ADR-006.
+> Commit = **manuel, Alexandre**.

@@ -1,6 +1,6 @@
 ---
 type: moc
-updated: 2026-06-21
+updated: 2026-06-25
 ---
 
 # 🧭 Pilotage QUANTA
@@ -19,7 +19,7 @@ Antigravity. Tape `[[` pour lier ; renomme librement, les liens se réparent.
 - **Phase 0 (en cours)** — [[QUANTA_T0_DST_HARNESS]] (harness déterministe T0.1→T0.8)
 - **Journal vivant** — [[AUDIT_QUANTA_2_PROGRESS]] (état réel, tests, auto-revues §3)
 - **Backlog clos** — [[QUANTA_PATCH_CORRECTIONS]] (C1→C8 ✅)
-- **Consensus (futur)** — [[DESIGN-CONSENSUS-DAG-BFT]]
+- **Consensus (futur)** — [[DESIGN-CONSENSUS-DAG-BFT]] (umbrella) · [[DESIGN-FINALITY-GADGET]] (Phase 1 — gadget Casper FFG, PQ, par époque ; *proposé, à valider*) · [[DESIGN-LIVE-WIRING]] (câblage du gadget en vivant — LIVE-1/2/3 ; *proposé* — gadget **prouvé en simulation**, reste l'**intégration IO**)
 - **Rareté** — [[TOKENOMICS_V2]]
 - **Cap produit** — [[ROADMAP_WEB3]] · [[BRAND_AND_TRUST]]
 - **Sécurité** — [[SECURITY]] · [[SECURITY_POC_V2]]
@@ -50,7 +50,7 @@ linéaire + vote BFT qui finalise), **stake on-chain seul** pour le comité.
 | Fork-choice | [[ADR-001 — Fork-choice]] | **résolu par le gadget** ; reste un départage stake intérim |
 | Slashing | [[ADR-003 — Slashing (accountable safety)]] | OUVERTE — brûlé vs redistribué ? montant ? fenêtre ? |
 | Aléa d'élection | [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]] | OUVERTE — beacon OK P1 ; ECVRF/VDF→P2 (sauf si tu veux + tôt) |
-| Signatures (agrégation votes) | [[docs/decisions/README\|§7]] | OUVERTE — BLS non-PQ vs 100 % hybride PQ |
+| Signatures (agrégation votes) | [[ADR-005 — Agrégation des votes & certificats de finalité]] | ✅ **ACCEPTÉE** — PQ pur (ML-DSA) par époque ; comité + quorum + longueur d'époque à fixer |
 
 > [!question] Comment on avance
 > Chaque ADR est **OUVERTE** : contexte (code réel), options + conséquences,

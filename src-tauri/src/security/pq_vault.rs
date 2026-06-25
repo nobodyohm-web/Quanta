@@ -4,7 +4,7 @@
 
 use super::{CryptoEngine, cipher};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// PQ-hardened identity (hybrid: Ed25519 + future ML-DSA-65)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +39,20 @@ pub struct PQVault;
 /// (public identity, raw public key bytes, encrypted secret key, AES-GCM nonce).
 pub type CreatedIdentity = (QuantaIdentity, Vec<u8>, Vec<u8>, Vec<u8>);
 
+// PQ-MIG-3 §3: the ML-DSA primary vault below is now **wired into production**
+// (`lib.rs` `create_identity`/`unlock_identity` persist + restore the encrypted
+// root seed), so the PQ-MIG-1 `#[allow(dead_code)]` scaffolding is removed — the
+// functions are live, and `cargo clippy -D warnings` proves they are reachable.
+
+/// PQ-MIG-1 — bundle returned when creating the **post-quantum primary** identity:
+/// (ML-DSA-65 public key hex, encrypted 32-byte root seed, AES-GCM nonce).
+pub type CreatedPqIdentity = (String, Vec<u8>, Vec<u8>);
+
+/// Domain tag binding the ML-DSA vault's Argon2id salt to its own key material —
+/// separates it from the Ed25519 vault's salt (`blake3(ed_pk)`), so the two
+/// at-rest secrets never share a derived key even under the same password.
+const PQ_VAULT_SALT_DOMAIN: &str = "QUANTA-PQ-MIG-1-vault-v1";
+
 impl PQVault {
     /// Create a new sovereign identity with Ed25519 + PQ preparation
     pub fn create_identity(
@@ -51,9 +65,10 @@ impl PQVault {
         
         // Derive encryption key from password (Argon2id)
         let salt = CryptoEngine::blake3_hash(pk.public_key_hex.as_bytes());
-        let enc_key = cipher::derive_key(password, &salt[..16])?;
-        
-        // Encrypt the secret key
+        // ZEROIZE-SWEEP: the Argon2id-derived AES key wipes on drop.
+        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
+
+        // Encrypt the secret key (encrypt_and_wipe erases `sk_bytes`)
         let enc = cipher::encrypt_and_wipe(&mut sk_bytes, &enc_key)?;
         
         let security_level = if pk.pq_public_key_hex.is_some() { "hybrid" } else { "classical" };
@@ -81,13 +96,20 @@ impl PQVault {
         created_at: &str,
     ) -> Result<QuantaIdentity, String> {
         let salt = CryptoEngine::blake3_hash(hex::encode(public_key).as_bytes());
-        let enc_key = cipher::derive_key(password, &salt[..16])?;
+        // ZEROIZE-SWEEP: the Argon2id-derived AES key wipes on drop.
+        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
         let mut sk_bytes = cipher::decrypt(encrypted_sk, &enc_key, nonce)?;
 
-        let sk_arr: [u8; 32] = sk_bytes.clone().try_into().map_err(|_| "Bad SK len")?;
+        // ZEROIZE-SWEEP: build the [u8;32] directly from the slice (no un-wiped
+        // `.clone()` Vec), then erase BOTH the decrypted Vec and the stack copy.
+        // Previously `sk_bytes.clone().try_into()` left an un-wiped clone and
+        // `sk_arr` behind — a brother of the fixed Ed25519 export hole.
+        let mut sk_arr: [u8; 32] = sk_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "Bad SK len")?;
         let pk = engine.import_keypair(&sk_arr)?;
-
-        // Zeroize decrypted secret key immediately
+        sk_arr.zeroize();
         sk_bytes.zeroize();
 
         let security_level = if pk.pq_public_key_hex.is_some() { "hybrid" } else { "classical" };
@@ -100,6 +122,65 @@ impl PQVault {
             security_level: security_level.to_string(),
             pq_public_key_hex: pk.pq_public_key_hex,
         })
+    }
+
+    // ── PQ-MIG-1 : vault de l'identité primaire post-quantique (ML-DSA-65) ─────
+    //
+    // Additif : `create_identity` / `unlock_identity` (Ed25519) restent intacts
+    // pour les consommateurs existants (coexistence). Ces deux fonctions stockent
+    // et rechargent la **graine racine** ML-DSA de 32 octets — la clé secrète
+    // ML-DSA est intégralement déterminée par cette graine (keygen déterministe),
+    // donc 32 octets suffisent et le rechargement redonne la clé publique
+    // identique. Même posture zeroize/erreur-opaque que le vault Ed25519.
+
+    /// PQ-MIG-1 — crée l'identité **primaire** post-quantique. Génère une racine
+    /// ML-DSA-65 indépendante dans le moteur, puis chiffre sa graine de 32 octets
+    /// au repos (Argon2id → AES-256-GCM) en effaçant la graine en clair. Renvoie
+    /// la clé publique ML-DSA (hex) + le bundle de graine chiffrée.
+    pub fn create_pq_identity(
+        engine: &mut CryptoEngine,
+        password: &str,
+    ) -> Result<CreatedPqIdentity, String> {
+        let pq_pk_hex = engine.generate_pq_identity()?;
+        // Graine racine auto-effaçante (Zeroizing) extraite du moteur.
+        let mut seed = engine.get_pq_seed_bytes()?;
+        let salt = CryptoEngine::blake3_hash(
+            format!("{PQ_VAULT_SALT_DOMAIN}:{pq_pk_hex}").as_bytes(),
+        );
+        // ZEROIZE : la clé AES dérivée d'Argon2id s'efface au drop.
+        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
+        // encrypt_and_wipe efface `seed` après chiffrement.
+        let enc = cipher::encrypt_and_wipe(&mut seed, &enc_key)?;
+        Ok((pq_pk_hex, enc.ciphertext, enc.nonce))
+    }
+
+    /// PQ-MIG-1 — déverrouille l'identité primaire post-quantique : déchiffre la
+    /// graine racine ML-DSA de 32 octets et rétablit la paire ML-DSA-65 dans le
+    /// moteur. Round-trip vers la clé publique **identique** (keygen
+    /// déterministe). Mauvais mot de passe ⇒ échec opaque. La graine déchiffrée
+    /// est effacée après usage. Renvoie la clé publique ML-DSA (hex).
+    pub fn unlock_pq_identity(
+        engine: &mut CryptoEngine,
+        pq_public_key_hex: &str,
+        encrypted_seed: &[u8],
+        nonce: &[u8],
+        password: &str,
+    ) -> Result<String, String> {
+        let salt = CryptoEngine::blake3_hash(
+            format!("{PQ_VAULT_SALT_DOMAIN}:{pq_public_key_hex}").as_bytes(),
+        );
+        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
+        let mut seed_bytes = cipher::decrypt(encrypted_seed, &enc_key, nonce)?;
+        // Construit le [u8;32] depuis la tranche (pas de clone non effacé), puis
+        // efface les DEUX copies — même hygiène que le vault Ed25519.
+        let mut seed_arr: [u8; 32] = seed_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "Bad seed len")?;
+        let pk_hex = engine.import_pq_identity(&seed_arr)?;
+        seed_arr.zeroize();
+        seed_bytes.zeroize();
+        Ok(pk_hex)
     }
 
     /// S/Kademlia crypto puzzle: prevent Sybil attacks by requiring

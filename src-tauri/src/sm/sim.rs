@@ -24,6 +24,7 @@
 use super::{
     effect::Effect,
     event::{Event, PeerId},
+    finality::{Checkpoint, EPOCH_LENGTH_BLOCKS},
     rng::{Blake3Rng, Rng},
     Node,
 };
@@ -139,12 +140,36 @@ enum Violation {
         node_b: PeerId,
         hash_b: String,
     },
-    /// **Conservation broken**: `Σ balances + burned != minted` for a node —
-    /// µQTA appeared or vanished (e.g. a negative balance, a phantom credit).
+    /// **Finality safety broken** (GADGET-1): two nodes hold a *conflicting*
+    /// finalized checkpoint at the **same epoch** — they disagree on history
+    /// that is supposed to be **irreversible**. This is the dual of `Safety` one
+    /// layer up: `Safety` is per-block agreement on the still-reorderable chain;
+    /// this is per-epoch agreement on the **finalized** set. The two-step
+    /// justify/finalize rule that makes this reachable on a real run is GADGET-3;
+    /// in GADGET-1 only genesis is finalized, so only a **planted** conflict can
+    /// trip it today — which the teeth test does, proving the checker bites
+    /// before finalization exists. Carries the `seed` (replay) and the epoch.
+    /// Mirrors [`Violation::Safety`] with `epoch` in place of `index`; the
+    /// boundary height is derivable (`epoch × E`) so it is not duplicated.
+    FinalitySafety {
+        seed: u64,
+        epoch: u64,
+        node_a: PeerId,
+        hash_a: String,
+        node_b: PeerId,
+        hash_b: String,
+    },
+    /// **Conservation broken**: `Σ spendable + locked_stake + burned != minted`
+    /// for a node — µQTA appeared or vanished (e.g. a negative balance, a phantom
+    /// credit). ONCHAIN-STAKE-1 §5: coins locked in stake (the `STAKE` sink:
+    /// bonded + unbonding + any pending stake) are **locked, not destroyed**, so
+    /// they MUST be counted on the balances side — otherwise staking would *look*
+    /// like burning and trip this falsely.
     Conservation {
         seed: u64,
         node: PeerId,
         sum_balances: u64,
+        locked_stake: u64,
         burned: u64,
         minted: u64,
     },
@@ -159,6 +184,21 @@ enum Violation {
         node: PeerId,
         index: u64,
         mining_count: usize,
+    },
+    /// **Emission AMOUNT broken** (FORK-CAP-1): a chain block mints MORE than the
+    /// legitimate per-block bound / pushes total supply past the hard cap —
+    /// checked with the **same** production rule
+    /// ([`Ledger::validate_block_emission_against`]) against the supply that
+    /// existed *before* the block. The count-only [`Violation::Emission`] above
+    /// is blind to a single over-sized reward; this is the backstop that makes
+    /// a regression of the fork-reorg emission gate scream in the sweep.
+    EmissionAmount {
+        seed: u64,
+        node: PeerId,
+        index: u64,
+        block_minted: u64,
+        prior_mined: u64,
+        reason: String,
     },
 }
 
@@ -425,6 +465,39 @@ impl Sim {
                 }
             }
         }
+        // Finality safety (GADGET-1): across nodes, never two CONFLICTING
+        // finalized checkpoints at the same epoch — the finalized sets must
+        // coincide on every shared epoch. Mirrors the `Safety` scan above, but
+        // keyed by EPOCH over each node's finalized set instead of by chain
+        // index. Nothing finalizes past genesis until GADGET-3, so on the honest
+        // path every node only holds epoch-0 genesis (which agrees) — today this
+        // can only fire on a PLANTED conflict, and the teeth test proves it does.
+        // `nodes` is a `BTreeMap` and `finalized().iter()` is epoch-ordered, so
+        // the first violation found is reproducible (spec §3, §4 determinism).
+        let mut finalized_by_epoch: BTreeMap<u64, (PeerId, Checkpoint)> = BTreeMap::new();
+        for (id, node) in &self.nodes {
+            for cp in node.finalized().iter() {
+                match finalized_by_epoch.get(&cp.epoch) {
+                    // Same epoch ⇒ same boundary height by construction, so a
+                    // mismatch on the full checkpoint reduces to a hash conflict
+                    // (a different block finalized for that epoch).
+                    Some((other, seen)) if seen != cp => {
+                        return Err(Violation::FinalitySafety {
+                            seed: self.seed,
+                            epoch: cp.epoch,
+                            node_a: other.clone(),
+                            hash_a: seen.hash.clone(),
+                            node_b: id.clone(),
+                            hash_b: cp.hash.clone(),
+                        });
+                    }
+                    None => {
+                        finalized_by_epoch.insert(cp.epoch, (id.clone(), cp.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
         // Emission (EMIT-1 §4.3): at MOST one mining reward per block — zero is
         // legitimate (a user-only block), so the `> 1` test is the intended `≤`
         // form, not `==` (EMIT-1-VERIFY; see the method doc). A block with >1
@@ -448,17 +521,59 @@ impl Sim {
                 }
             }
         }
-        // Conservation: Σ balances + burned == minted (pending-aware).
+        // FORK-CAP-1: emission AMOUNT backstop. The count check above is blind
+        // to a single OVER-sized reward; here every block is re-validated with
+        // the SAME production rule (`validate_block_emission_against`) against
+        // the supply that existed BEFORE it (Σ mining in earlier blocks). A
+        // block production accepted (happy path or fork-reorg) passes
+        // identically; if the fork-reorg emission gate ever regressed and let an
+        // over-emitter in, this fires with the seed. Integer-only prior
+        // accumulation, sorted-key node iteration (§4 determinism).
+        for (id, node) in &self.nodes {
+            let mut prior_mined: u64 = 0;
+            for (i, block) in node.ledger().chain.iter().enumerate() {
+                let block_minted: u64 = block
+                    .transactions
+                    .iter()
+                    .filter(|t| t.tx_type == TxType::Mining)
+                    .map(|t| t.amount)
+                    .sum();
+                if let Err(reason) = Ledger::validate_block_emission_against(block, prior_mined) {
+                    return Err(Violation::EmissionAmount {
+                        seed: self.seed,
+                        node: id.clone(),
+                        index: i as u64,
+                        block_minted,
+                        prior_mined,
+                        reason,
+                    });
+                }
+                prior_mined = prior_mined.saturating_add(block_minted);
+            }
+        }
+        // Conservation: Σ spendable + locked_stake + burned == minted
+        // (pending-aware). ONCHAIN-STAKE-1 §5: `all_balances` is the SPENDABLE side
+        // only — a Stake moves coins into the synthetic `STAKE` sink — so the
+        // locked-stake pool (`locked_stake_total`: bonded + unbonding + pending
+        // stake), which is locked-but-not-destroyed, is added back here. Without
+        // it, a single Stake would look like a burn and trip this check; with it, a
+        // full Stake → Unstake → maturation cycle conserves at every step.
         for (id, node) in &self.nodes {
             let l = node.ledger();
             let sum: u64 = l.all_balances().values().sum();
+            let locked_stake = l.locked_stake_total();
             let burned = l.total_burned();
             let minted = l.total_minted();
-            if sum.saturating_add(burned) != minted {
+            if sum
+                .saturating_add(locked_stake)
+                .saturating_add(burned)
+                != minted
+            {
                 return Err(Violation::Conservation {
                     seed: self.seed,
                     node: id.clone(),
                     sum_balances: sum,
+                    locked_stake,
                     burned,
                     minted,
                 });
@@ -549,12 +664,33 @@ use crate::{
 };
 
 /// Deterministic, seed-derived signing identity (Ed25519 accepts any 32 bytes).
+///
+/// PQ-MIG-3: the identity also establishes its **independent ML-DSA primary**
+/// (the tx-authority key the ledger binds). Its seed is derived from the Ed25519
+/// seed via a **domain-separated** BLAKE3 hash, so it is byte-reproducible (C1)
+/// yet structurally **independent** of the Ed25519 seed bytes — mirroring the
+/// production rule that a quantum break of Ed25519 must not yield the ML-DSA key.
 fn seeded_identity(seed: u64) -> CryptoEngine {
     let mut sk = [0x11u8; 32];
     sk[..8].copy_from_slice(&seed.to_le_bytes());
     let mut c = CryptoEngine::new();
     c.import_keypair(&sk).expect("valid 32-byte ed25519 secret");
+    let mut pq_seed = [0u8; 32];
+    pq_seed.copy_from_slice(&CryptoEngine::blake3_hash(
+        &[b"QUANTA-PQ-PRIMARY-sim:".as_ref(), &sk].concat(),
+    ));
+    c.import_pq_identity(&pq_seed).expect("ml-dsa primary");
     c
+}
+
+/// PQ-MIG-3B: the **value** identity of an engine — its ML-DSA *address*
+/// (`BLAKE3(ADDR_DOMAIN ‖ pq_pubkey)`), the key under which balance, stake,
+/// reward, validator weight and `from`/`to` are recorded. Distinct from
+/// `public_key_hex`, the Ed25519 **transport** identity that only signs gossip
+/// envelopes (`signed_msg_bytes`). The simulator's PeerId labels (`node-A`) are
+/// a third, independent namespace.
+fn addr_of(crypto: &CryptoEngine) -> String {
+    crypto.pq_address_hex().expect("ml-dsa address")
 }
 
 /// Build a signed gossip envelope wrapping `msg` from `crypto`'s identity,
@@ -574,7 +710,7 @@ fn signed_msg_bytes(crypto: &CryptoEngine, msg: GossipMessage, now_ms: u64) -> V
 /// proposer) and `B`, `C` are observers. `now0` is a fixed virtual time.
 fn three_node_sim(seed: u64) -> (Sim, PeerId, PeerId, PeerId, String) {
     let a_id = seeded_identity(1);
-    let a_pk = a_id.get_identity().unwrap().public_key_hex;
+    let a_pk = addr_of(&a_id); // PQ-MIG-3B: value identity = ML-DSA address
     let a = PeerId("node-A".into());
     let b = PeerId("node-B".into());
     let c = PeerId("node-C".into());
@@ -638,7 +774,7 @@ fn sim_three_nodes_converge_on_proposed_block() {
 #[test]
 fn sim_run_is_byte_deterministic() {
     let now0 = 1_800_000_000_000_u64;
-    let a_pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+    let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     // Frozen mining tx built ONCE → identical pending content in both runs.
     let frozen = {
         let mut origin = Ledger::new();
@@ -806,7 +942,7 @@ fn sim_late_joiner_syncs_via_request_chain() {
 /// Build a 2-node sim where both `A` and `B` can sign (so either can request a
 /// sync). `A` is the chain producer.
 fn two_signing_nodes(seed: u64) -> (Sim, PeerId, PeerId, String) {
-    let a_pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+    let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let a = PeerId("node-A".into());
     let b = PeerId("node-B".into());
     let sim = Sim::new(
@@ -879,7 +1015,7 @@ fn sim_partition_isolates_then_sync_recovers() {
 #[test]
 fn sim_network_faults_are_reproducible_by_seed() {
     let now0 = 1_800_000_000_000_u64;
-    let a_pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+    let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let frozen = {
         let mut origin = Ledger::new();
         origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
@@ -922,7 +1058,7 @@ fn sim_network_faults_are_reproducible_by_seed() {
 #[test]
 fn sim_total_drop_prevents_delivery() {
     let now0 = 1_800_000_000_000_u64;
-    let a_pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+    let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let frozen = {
         let mut origin = Ledger::new();
         origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
@@ -960,7 +1096,7 @@ fn sim_total_drop_prevents_delivery() {
 /// **same** byzantine key — i.e. an equivocation. Returns `(hash1, hash2, env1,
 /// env2)`.
 fn equivocating_blocks(byz: &CryptoEngine, now_ms: u64) -> (String, String, Vec<u8>, Vec<u8>) {
-    let pk = byz.get_identity().unwrap().public_key_hex;
+    let pk = addr_of(byz); // PQ-MIG-3B: block miner = ML-DSA address (envelope stays Ed25519)
     let seal_one = |amount: u64| {
         let mut origin = Ledger::new();
         origin.mine_tx(&pk, amount, 0.0);
@@ -1140,7 +1276,7 @@ fn sim_byzantine_retention_then_victim_syncs_from_honest_peer() {
     let l = PeerId("node-A".into()); // leader/retainer
     let s = PeerId("node-B".into()); // honest peer that receives the block
     let r = PeerId("node-C".into()); // victim, withheld from
-    let l_pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+    let l_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let mut sim = Sim::new(
         0x5E7E7,
         vec![
@@ -1248,8 +1384,8 @@ fn sim_partition_fork_breaks_safety_and_is_detected() {
     let seed = 0xF02C_BAD5;
     let a = PeerId("node-A".into());
     let b = PeerId("node-B".into());
-    let a_pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
-    let b_pk = seeded_identity(2).get_identity().unwrap().public_key_hex;
+    let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
+    let b_pk = addr_of(&seeded_identity(2)); // PQ-MIG-3B: value identity = ML-DSA address
     let mut sim = Sim::new(
         seed,
         vec![
@@ -1292,6 +1428,295 @@ fn sim_partition_fork_breaks_safety_and_is_detected() {
         }
         other => panic!("expected a Safety violation, got {other:?}"),
     }
+}
+
+/// **GADGET-1 — teeth (finality safety).** Nothing finalizes past genesis yet
+/// (the justify/finalize rule is GADGET-3), so the finality-safety invariant
+/// would be **vacuously true** — exactly the "passes no matter what" trap the
+/// spec §4 warns against. So we **plant** the violation: inject two CONFLICTING
+/// finalized checkpoints at the SAME epoch directly into two nodes' state
+/// (outside any real finalization path, as the T0.8 teeth tests do), and assert
+/// the checker BITES, carrying the seed + epoch. This proves the verifier has
+/// teeth NOW, before finalization exists — the invariant is not decoration.
+#[test]
+fn gadget_1_finality_safety_invariant_has_teeth() {
+    let seed = 0x6AD9_E7F1;
+    let a = PeerId("node-A".into());
+    let b = PeerId("node-B".into());
+    let mut sim = Sim::new(seed, vec![(a.clone(), Node::new()), (b.clone(), Node::new())]);
+    // Clean baseline: both nodes start with {genesis} finalized → epoch 0 agrees,
+    // so the invariant holds. NOT a vacuous pass — the matching-checkpoints test
+    // below finalizes a SHARED epoch-1 checkpoint and still holds.
+    assert_eq!(sim.check_invariants(), Ok(()));
+
+    // Plant a conflict at epoch 1: A finalizes one checkpoint, B another, both at
+    // the same epoch-1 boundary height but with DIFFERENT hashes. Hand-built via
+    // the test hook — there is no finalization RULE yet (that is GADGET-3).
+    let boundary = EPOCH_LENGTH_BLOCKS; // height of epoch 1's boundary block
+    sim.node_mut(&a).record_finalized_for_test(Checkpoint {
+        epoch: 1,
+        height: boundary,
+        hash: "a".repeat(64),
+    });
+    sim.node_mut(&b).record_finalized_for_test(Checkpoint {
+        epoch: 1,
+        height: boundary,
+        hash: "b".repeat(64),
+    });
+
+    match sim.check_invariants() {
+        Err(Violation::FinalitySafety { seed: s, epoch, .. }) => {
+            assert_eq!(epoch, 1, "the planted conflict is at epoch 1");
+            assert_eq!(s, seed, "the violation carries the run's seed for replay");
+        }
+        other => panic!("expected a FinalitySafety violation, got {other:?}"),
+    }
+}
+
+/// **GADGET-1 — anti-false-positive.** The finality-safety invariant must fire on
+/// a *conflict*, not on the mere presence of finalized checkpoints. Two nodes
+/// that finalize the **same** epoch-1 checkpoint agree, so the checker must stay
+/// green — this pins down that the teeth test above isn't tripping on any two
+/// finalized entries, only on genuine disagreement.
+#[test]
+fn gadget_1_finality_safety_accepts_matching_checkpoints() {
+    let a = PeerId("node-A".into());
+    let b = PeerId("node-B".into());
+    let mut sim = Sim::new(0x6AD9_E7F2, vec![(a.clone(), Node::new()), (b.clone(), Node::new())]);
+    let cp = Checkpoint {
+        epoch: 1,
+        height: EPOCH_LENGTH_BLOCKS,
+        hash: "c".repeat(64),
+    };
+    sim.node_mut(&a).record_finalized_for_test(cp.clone());
+    sim.node_mut(&b).record_finalized_for_test(cp);
+    assert_eq!(
+        sim.check_invariants(),
+        Ok(()),
+        "agreement on a finalized checkpoint must NOT trip finality safety"
+    );
+}
+
+/// **GADGET-3 — FinalitySafety becomes REAL (harness).** GADGET-1 left the
+/// finality-safety invariant quasi-vacuous: only genesis was ever finalized, so
+/// it could fire only on a *planted* conflict. GADGET-3's justify/finalize rule
+/// now grows the finalized set past genesis. Here two nodes apply the **same**
+/// honest certificate chain `g→c1→c2→c3` through
+/// [`Node::apply_finality_certificate`]; both finalize the **same** real
+/// checkpoints `{g, c1, c2}`, and the cross-node finality-safety invariant stays
+/// **green** — proving it now guards REAL finalized history (not the vacuous
+/// genesis-only state) and that an honest path never finalizes conflicting
+/// checkpoints. The planted-conflict teeth test
+/// ([`gadget_1_finality_safety_invariant_has_teeth`]) still bites, so the checker
+/// is neither vacuous nor a rubber stamp.
+#[test]
+fn gadget_3_finality_safety_guards_real_finalized_checkpoints() {
+    use crate::security::hybrid_crypto::{derive_ml_dsa, ml_dsa_sign_deterministic};
+    use crate::sm::{MlDsaCertificate, Vote};
+    use std::collections::HashMap;
+
+    const E: u64 = EPOCH_LENGTH_BLOCKS;
+
+    let a = PeerId("node-A".into());
+    let b = PeerId("node-B".into());
+
+    // Two fresh nodes share the same deterministic genesis hash — the genesis
+    // checkpoint both start with already justified + finalized. The honest chain
+    // of certificates must root at THIS hash, else `is_justified(source)` fails.
+    let genesis_hash = Node::new()
+        .ledger()
+        .chain
+        .first()
+        .map(|blk| blk.hash.clone())
+        .expect("genesis block");
+    let cp = |epoch: u64, hash: &str| Checkpoint {
+        epoch,
+        height: epoch * E,
+        hash: hash.to_string(),
+    };
+    let g = cp(0, &genesis_hash);
+    let c1 = cp(1, "c1-hash");
+    let c2 = cp(2, "c2-hash");
+    let c3 = cp(3, "c3-hash");
+
+    // Two equal-stake ML-DSA validators (100 each, total 200, ⅔ = 134): the
+    // whole committee signing each link clears the quorum. The stake snapshot is
+    // SUPPLIED to the rule (its provenance is the open GADGET-2 §4 reconciliation,
+    // not resolved here).
+    let validator = |seed: u8| derive_ml_dsa(&[seed; 32]).expect("derive").1;
+    let stakes: HashMap<String, u64> = [validator(1), validator(2)]
+        .into_iter()
+        .map(|pk| (pk, 100u64))
+        .collect();
+    let signed_vote = |seed: u8, source: &Checkpoint, target: &Checkpoint| -> Vote {
+        let (sk, pk) = derive_ml_dsa(&[seed; 32]).expect("derive");
+        let mut v = Vote {
+            source: source.clone(),
+            target: target.clone(),
+            voting_epoch: target.epoch,
+            validator: pk,
+            signature: Vec::new(),
+        };
+        v.signature = ml_dsa_sign_deterministic(&sk, &v.signable_bytes()).expect("sign");
+        v
+    };
+    let cert = |source: &Checkpoint, target: &Checkpoint| {
+        MlDsaCertificate::new(
+            source.clone(),
+            target.clone(),
+            vec![signed_vote(1, source, target), signed_vote(2, source, target)],
+        )
+    };
+
+    // Both nodes apply the identical honest chain through the real rule.
+    let chain = [(&g, &c1), (&c1, &c2), (&c2, &c3)];
+    let mut node_a = Node::new();
+    let mut node_b = Node::new();
+    for (s, t) in chain {
+        node_a.apply_finality_certificate(&cert(s, t), &stakes);
+        node_b.apply_finality_certificate(&cert(s, t), &stakes);
+    }
+
+    // The rule GREW the finalized set past genesis: g + c1 + c2 (c3 is justified
+    // but its direct child was never linked ⇒ not finalized — two-step).
+    assert_eq!(
+        node_a.finalized().iter().count(),
+        3,
+        "genesis + c1 + c2 finalized — the set grew, no longer vacuous"
+    );
+    assert_eq!(node_a.finalized().get(1).map(|c| c.hash.as_str()), Some("c1-hash"));
+    assert_eq!(node_a.finalized().get(2).map(|c| c.hash.as_str()), Some("c2-hash"));
+
+    // Cross-node finality safety holds on REAL (non-genesis) finalized points.
+    let sim = Sim::new(0x6AD9_E7F3, vec![(a, node_a), (b, node_b)]);
+    assert_eq!(
+        sim.check_invariants(),
+        Ok(()),
+        "two nodes finalizing the SAME honest chain agree — FinalitySafety guards real points"
+    );
+}
+
+/// **GADGET-4 — accountable safety made executable.** This is the §4 test that
+/// proves the slashing theorem: if a **byzantine committee** finalizes two
+/// **conflicting** checkpoints, then (i) the broken finality is **observable**
+/// (the cross-node `FinalitySafety` invariant fires), and (ii) the validators'
+/// **own signed votes** leave a proof covering **≥ ⅓** of the stake. Breaking
+/// irreversible history is not free — it is **answerable**.
+///
+/// Construction: 3 equal-stake validators (100 each, total 300, ⅔ = 200). Two
+/// ⅔-quorums back conflicting epoch-1 forks — `{1,2}` finalize fork A on node A,
+/// `{2,3}` finalize fork B on node B (each via GADGET-3's two-step rule). The
+/// two quorums must intersect in ≥ ⅓ (pigeonhole: `⅔ + ⅔ − 1 = ⅓`); here the
+/// intersection is validator 2, who signed **both** forks ⇒ a double vote.
+/// [`slashable_weight`] recovers exactly its 100 µQTA = ⅓ of 300.
+#[test]
+fn gadget_4_accountable_safety_finalized_conflict_leaves_a_third_slashable() {
+    use crate::security::hybrid_crypto::{derive_ml_dsa, ml_dsa_sign_deterministic};
+    use crate::sm::finality_slashing::slashable_weight;
+    use crate::sm::{MlDsaCertificate, Vote};
+    use std::collections::HashMap;
+
+    const E: u64 = EPOCH_LENGTH_BLOCKS;
+
+    let a = PeerId("node-A".into());
+    let b = PeerId("node-B".into());
+
+    // Shared deterministic genesis hash — the root both forks build on (else the
+    // genesis source is not justified and nothing finalizes).
+    let genesis_hash = Node::new()
+        .ledger()
+        .chain
+        .first()
+        .map(|blk| blk.hash.clone())
+        .expect("genesis block");
+    let cp = |epoch: u64, hash: &str| Checkpoint {
+        epoch,
+        height: epoch * E,
+        hash: hash.to_string(),
+    };
+    let g = cp(0, &genesis_hash);
+    // Two CONFLICTING epoch-1 checkpoints and their epoch-2 children (one per fork).
+    let c1a = cp(1, "epoch1-fork-A");
+    let c2a = cp(2, "epoch2-fork-A");
+    let c1b = cp(1, "epoch1-fork-B");
+    let c2b = cp(2, "epoch2-fork-B");
+
+    // 3 equal-stake ML-DSA validators (100 each). The stake snapshot is SUPPLIED
+    // to the rule (provenance = the open GADGET-2 §4 reconciliation, not resolved).
+    let v = |seed: u8| derive_ml_dsa(&[seed; 32]).expect("derive").1;
+    let stakes: HashMap<String, u64> = [v(1), v(2), v(3)]
+        .into_iter()
+        .map(|pk| (pk, 100u64))
+        .collect();
+    let signed_vote = |seed: u8, source: &Checkpoint, target: &Checkpoint| -> Vote {
+        let (sk, pk) = derive_ml_dsa(&[seed; 32]).expect("derive");
+        let mut vt = Vote {
+            source: source.clone(),
+            target: target.clone(),
+            voting_epoch: target.epoch,
+            validator: pk,
+            signature: Vec::new(),
+        };
+        vt.signature = ml_dsa_sign_deterministic(&sk, &vt.signable_bytes()).expect("sign");
+        vt
+    };
+    let cert = |source: &Checkpoint, target: &Checkpoint, signers: &[u8]| {
+        let votes: Vec<Vote> = signers.iter().map(|s| signed_vote(*s, source, target)).collect();
+        MlDsaCertificate::new(source.clone(), target.clone(), votes)
+    };
+
+    // Fork A finalized on node A by validators {1,2}; fork B on node B by {2,3}.
+    // Validator 2 backs BOTH forks — the equivocation that breaks finality.
+    let cert_g_c1a = cert(&g, &c1a, &[1, 2]);
+    let cert_c1a_c2a = cert(&c1a, &c2a, &[1, 2]);
+    let cert_g_c1b = cert(&g, &c1b, &[2, 3]);
+    let cert_c1b_c2b = cert(&c1b, &c2b, &[2, 3]);
+
+    let mut node_a = Node::new();
+    node_a.apply_finality_certificate(&cert_g_c1a, &stakes); // justify c1a
+    node_a.apply_finality_certificate(&cert_c1a_c2a, &stakes); // finalize c1a
+    let mut node_b = Node::new();
+    node_b.apply_finality_certificate(&cert_g_c1b, &stakes); // justify c1b
+    node_b.apply_finality_certificate(&cert_c1b_c2b, &stakes); // finalize c1b
+
+    // Each node finalized its fork's epoch-1 checkpoint — CONFLICTING across nodes.
+    assert_eq!(
+        node_a.finalized().get(1).map(|c| c.hash.as_str()),
+        Some("epoch1-fork-A"),
+        "node A finalized fork A at epoch 1"
+    );
+    assert_eq!(
+        node_b.finalized().get(1).map(|c| c.hash.as_str()),
+        Some("epoch1-fork-B"),
+        "node B finalized fork B at epoch 1"
+    );
+
+    // (i) The broken finality is OBSERVABLE: the cross-node FinalitySafety
+    // invariant fires at the conflicting epoch — the catastrophe someone must
+    // answer for.
+    let sim = Sim::new(0x6AD9_E7F4, vec![(a, node_a), (b, node_b)]);
+    match sim.check_invariants() {
+        Err(Violation::FinalitySafety { epoch, .. }) => {
+            assert_eq!(epoch, 1, "the conflicting checkpoints are finalized at epoch 1");
+        }
+        other => panic!("expected a FinalitySafety violation from the byzantine finalization, got {other:?}"),
+    }
+
+    // (ii) The votes LEAVE A PROOF: across every vote both forks cast, validator
+    // 2 double-voted at epoch 1 (g→c1a AND g→c1b) — its 100 µQTA is provably
+    // slashable, exactly ⅓ of 300. Honest validators 1 and 3 voted once per epoch
+    // and stay clean. Accountable safety: breaking finality costs ≥ a third.
+    let all_votes: Vec<Vote> = [&cert_g_c1a, &cert_c1a_c2a, &cert_g_c1b, &cert_c1b_c2b]
+        .into_iter()
+        .flat_map(|c| c.votes().iter().cloned())
+        .collect();
+    let total: u64 = stakes.values().sum();
+    let slashable = slashable_weight(&all_votes, &stakes, E);
+    assert_eq!(slashable, 100, "validator 2's equivocation is provably slashable");
+    assert!(
+        slashable * 3 >= total,
+        "accountable safety: ≥ ⅓ of stake ({slashable}/{total}) is provably slashable"
+    );
 }
 
 /// **T0.7 — teeth (conservation).** Phantom µQTA (an ESCROW release with no
@@ -1360,6 +1785,57 @@ fn blk_hash_1_conservation_holds_through_reorg() {
         "Σ balances + burned == minted must hold through the fork reorg + re-queue"
     );
     assert_eq!(sim.heights()[&n], 2, "N converged on one height-1 block");
+}
+
+/// **ONCHAIN-STAKE-1 §5 — the harness conservation checker counts locked stake.**
+/// A node holding bonded + unbonding stake must satisfy the harness invariant
+/// (staked/unbonding are locked, **not** destroyed). Teeth: the OLD formula
+/// (`spendable + burned == minted`) FALSELY flags this state, proving the new
+/// `staked`/`unbonding` terms are load-bearing — staking is not burning.
+#[test]
+fn onchain_stake_harness_conservation_counts_locked_stake() {
+    let a = PeerId("node-A".into());
+    let mut crypto = CryptoEngine::new();
+    let _ = crypto.generate_keypair();
+    crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
+    let pk = addr_of(&crypto); // PQ-MIG-3B: value identity (stake/mine/seal) = ML-DSA address
+
+    let mut node = Node::new();
+    node.ledger_mut().mine_tx(&pk, 100 * MICRO, 0.0);
+    node.ledger_mut().seal_block(&pk, 0.0);
+    node.ledger_mut()
+        .stake_tx(&pk, 40 * MICRO, &crypto)
+        .expect("stake builds");
+    node.ledger_mut().seal_block(&pk, 0.0);
+    node.ledger_mut()
+        .unstake_tx(&pk, 25 * MICRO, &crypto)
+        .expect("unstake builds");
+    node.ledger_mut().seal_block(&pk, 0.0);
+
+    let sim = Sim::new(0x57A6E, vec![(a.clone(), node)]);
+
+    // NEW checker: the locked-stake sink (bonded 15 + unbonding 25 = 40) is
+    // counted ⇒ conserves.
+    assert_eq!(
+        sim.check_invariants(),
+        Ok(()),
+        "locked stake (bonded + unbonding) must satisfy harness conservation"
+    );
+
+    // TEETH: the pre-ONCHAIN-STAKE-1 formula would have FALSELY flagged it.
+    let l = sim.nodes[&a].ledger();
+    let spendable: u64 = l.all_balances().values().sum();
+    assert_eq!(l.locked_stake_total(), 40 * MICRO, "40 locked (15 bonded + 25 unbonding)");
+    assert_ne!(
+        spendable + l.total_burned(),
+        l.total_minted(),
+        "old formula (spendable + burned) MUST mismatch — locked stake is load-bearing"
+    );
+    assert_eq!(
+        spendable + l.locked_stake_total() + l.total_burned(),
+        l.total_minted(),
+        "new formula conserves"
+    );
 }
 
 // ─── EMIT-1: no double-mint at reorg + emission invariant ──────────────────
@@ -1432,7 +1908,7 @@ fn emit_1_emission_invariant_has_teeth() {
     assert_eq!(sim.run_checked(10_000), Ok(()));
 
     // Forge a height-1 block with TWO NETWORK→pk mining txs and inject it.
-    let pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+    let pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let mut o = Ledger::new();
     let m1 = o.mine_tx(&pk, 5 * MICRO, 0.0);
     let m2 = o.mine_tx(&pk, 5 * MICRO, 0.0);
@@ -1453,6 +1929,112 @@ fn emit_1_emission_invariant_has_teeth() {
         }
         other => panic!("expected an Emission violation, got {other:?}"),
     }
+}
+
+/// **FORK-CAP-1 — the emission AMOUNT backstop has teeth.** A single mining
+/// reward far above the per-block bound (a height-1 block minting 1M QUANTA,
+/// which the count-only check `mining == 1` cannot see) is injected straight
+/// into a node's chain (bypassing validation). `check_invariants` MUST return
+/// `Violation::EmissionAmount`, carrying the seed and the offending amounts.
+/// Without this backstop a regression of the fork-reorg emission gate would let
+/// an over-emitter through and the sweep would stay green.
+#[test]
+fn forkcap_emission_amount_invariant_has_teeth() {
+    let now0 = SIM_EPOCH_MS;
+    let seed = 0xF0_4C_CA_77;
+    let n = PeerId("node-N".into());
+    let mut sim = Sim::new(seed, vec![(n.clone(), Node::new())]);
+    sim.tick_all(now0);
+    assert_eq!(sim.run_checked(10_000), Ok(()));
+
+    // ONE mining reward, but 1M QUANTA ≫ the per-block bound → an over-emission
+    // the count check (mining == 1) is blind to.
+    let pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
+    let mut o = Ledger::new();
+    let evil = o.mine_tx(&pk, 1_000_000 * MICRO, 0.0);
+    let genesis_hash = o.block_at(0).unwrap().hash.clone();
+    let bad =
+        Ledger::forge_block_at(1, &genesis_hash, "2026-01-01T00:00:00+00:00", &pk, vec![evil]);
+    sim.node_mut(&n).ledger_mut().chain.push(bad);
+
+    match sim.check_invariants() {
+        Err(Violation::EmissionAmount {
+            seed: s,
+            index,
+            block_minted,
+            prior_mined,
+            ..
+        }) => {
+            assert_eq!(s, seed, "the violation carries the run's seed for replay");
+            assert_eq!(index, 1, "the offending block is the height-1 block");
+            assert_eq!(block_minted, 1_000_000 * MICRO, "the over-emitted amount");
+            assert_eq!(prior_mined, 0, "genesis minted nothing");
+        }
+        other => panic!("expected an EmissionAmount violation, got {other:?}"),
+    }
+}
+
+/// **FORK-CAP-1 — the byzantine over-emit reorg is rejected by the sweep's
+/// production path.** Drive the `OverEmitReorg` archetype through the SAME
+/// `run_plan` executor as the sweep: node 0 adopts a legit height-1 block, then
+/// the byzantine peer delivers an over-cap block at the same height (ground to a
+/// higher hash, so it reaches the reorg tie-break). Production
+/// `validate_block_emission_against` MUST reject it on the reorg branch, so:
+/// (1) no invariant violation surfaces, (2) node 0 keeps the LEGIT tip (its
+/// height-1 reward is 50 QUANTA, never the 1M over-emitter), (3) supply ≤ cap.
+#[test]
+fn forkcap_sweep_over_emit_reorg_is_rejected() {
+    let t0 = SIM_EPOCH_MS;
+    let plan = ScenarioPlan {
+        seed: 0xF0_4C_CA_91,
+        n_nodes: 2,
+        id_seeds: vec![1, 2],
+        moves: vec![
+            Move::TickAll { at_ms: t0 },
+            Move::Run { steps: 1_000 },
+            Move::OverEmitReorg {
+                byz_seed: 77,
+                legit_reward: 50 * MICRO,
+                evil_reward: 1_000_000 * MICRO,
+                at_ms: t0,
+            },
+            Move::Run { steps: 4_000 },
+            Move::Sync {
+                from: 1,
+                to: 0,
+                at_ms: t0,
+            },
+            Move::Run { steps: 4_000 },
+        ],
+        max_steps: 40_000,
+    };
+    let (mut sim, violation, _) = run_plan(&plan);
+    assert_eq!(
+        violation, None,
+        "production must REJECT the over-emitter on the reorg branch → no invariant violation"
+    );
+
+    let node0 = sim.node_mut(&nid(0)).ledger();
+    assert_eq!(
+        node0.chain.len(),
+        2,
+        "node 0 holds genesis + the legit height-1 block (the over-emitter was rejected)"
+    );
+    let tip_minted: u64 = node0.chain[1]
+        .transactions
+        .iter()
+        .filter(|t| t.tx_type == TxType::Mining)
+        .map(|t| t.amount)
+        .sum();
+    assert_eq!(
+        tip_minted,
+        50 * MICRO,
+        "the 1M over-emitter must NOT have replaced the legit 50 QUANTA tip"
+    );
+    assert!(
+        node0.total_supply() <= crate::p2p::reputation::MAX_SUPPLY_MICRO,
+        "la masse en circulation ne dépasse JAMAIS 100M"
+    );
 }
 
 /// **EMIT-1 E5 — a healthy run keeps all three.** Propose → flood → integrate
@@ -1611,10 +2193,7 @@ fn forge_equivocation(
     reward_a: u64,
     reward_b: u64,
 ) -> (Vec<u8>, Vec<u8>) {
-    let pk = byz
-        .get_identity()
-        .expect("byz identity")
-        .public_key_hex;
+    let pk = addr_of(byz); // PQ-MIG-3B: forged-block miner = ML-DSA address (envelope stays Ed25519)
     let genesis_hash = Ledger::new()
         .block_at(0)
         .expect("genesis present")
@@ -1638,6 +2217,56 @@ fn forge_equivocation(
         )
     };
     (envelope(&high), envelope(&low))
+}
+
+/// FORK-CAP-1: forge a LEGIT height-1 block and a same-height OVER-EMITTING
+/// block whose hash is ground to EXCEED the legit one, so the over-emitter wins
+/// the reorg tie-break (`block.hash > tip.hash`) and reaches
+/// `validate_block_emission_against` — which rejects it, so it is never
+/// integrated. Both are byte-reproducible (injected ts, deterministic seq
+/// grind), so the sweep and the replay rebuild them identically. Returned LEGIT
+/// first, EVIL second: deliver in that order so the legit block becomes node 0's
+/// height-1 tip (happy path), then the over-emitter lands on the reorg branch.
+fn forge_over_emit_reorg(
+    byz: &CryptoEngine,
+    now_ms: u64,
+    legit_reward: u64,
+    evil_reward: u64,
+) -> (Vec<u8>, Vec<u8>) {
+    let pk = addr_of(byz); // PQ-MIG-3B: forged-block miner = ML-DSA address (envelope stays Ed25519)
+    let genesis_hash = Ledger::new()
+        .block_at(0)
+        .expect("genesis present")
+        .hash
+        .clone();
+    let ts = det_rfc3339(now_ms);
+    let legit_tx = det_mining_tx(&pk, legit_reward, now_ms, 7_001);
+    let legit = Ledger::forge_block_at(1, &genesis_hash, &ts, &pk, vec![legit_tx]);
+    // Grind the evil block's TIMESTAMP — which IS in the block-hash pre-image —
+    // until the over-emitter beats the legit tip and so WINS the reorg tie-break
+    // (`block.hash > tip.hash`), reaching the emission gate. NB: the tx id/hash
+    // are NOT in the block hash (only tx CONTENT is, via the Merkle root), so
+    // varying a sequence number alone would never move the hash. BLAKE3 is
+    // ~uniform → a few tries; deterministic, so the sweep and the replay rebuild
+    // the same over-emitter.
+    let evil = (1..=1_000_000u64)
+        .find_map(|k| {
+            let ts_k = det_rfc3339(now_ms + k);
+            let tx = det_mining_tx(&pk, evil_reward, now_ms + k, 7_002);
+            let b = Ledger::forge_block_at(1, &genesis_hash, &ts_k, &pk, vec![tx]);
+            (b.hash > legit.hash).then_some(b)
+        })
+        .expect("FORK-CAP sweep: could not grind an over-emitter hash above the legit tip");
+    let envelope = |b: &Block| {
+        signed_msg_bytes(
+            byz,
+            GossipMessage::NewBlock {
+                block_json: serde_json::to_string(b).expect("block json"),
+            },
+            now_ms,
+        )
+    };
+    (envelope(&legit), envelope(&evil))
 }
 
 /// Network fault knobs as plain **seed-derived data** (no live RNG handle), so a
@@ -1714,6 +2343,21 @@ enum Move {
         at_ms: u64,
         low_first: bool,
     },
+    /// FORK-CAP-1 byzantine archetype: an OVER-EMITTING reorg attempt. Node 0
+    /// first adopts a LEGIT height-1 block (happy path), then the byzantine peer
+    /// delivers a SECOND height-1 block at the same height whose mining reward
+    /// breaks the emission bound, ground to a HIGHER hash so it reaches the
+    /// reorg tie-break. Production validation (`validate_block_emission_against`)
+    /// MUST reject it on the reorg branch, so node 0 keeps the legit tip and the
+    /// supply never exceeds the cap. Without the FORK-CAP fix the over-emitter
+    /// would be integrated and the amount backstop ([`Violation::EmissionAmount`])
+    /// would scream — that is how the sweep now guards the gate.
+    OverEmitReorg {
+        byz_seed: u64,
+        legit_reward: u64,
+        evil_reward: u64,
+        at_ms: u64,
+    },
     /// Node `from` requests the chain from node `to` (recovery after a
     /// partition / crash). `from` must hold a signing identity.
     Sync { from: usize, to: usize, at_ms: u64 },
@@ -1763,6 +2407,16 @@ impl ScenarioPlan {
             .iter()
             .any(|m| matches!(m, Move::Equivocate { .. }))
     }
+    /// FORK-CAP-1: the over-emitting reorg archetype. Guarded by
+    /// `t0_8_sweep_exercises_faults` so it can never silently vanish from the
+    /// sweep (which would leave the fork-reorg emission gate untested while the
+    /// clean sweep stayed green — the precise vacuity this anti-vacuity proof
+    /// exists to prevent).
+    fn has_over_emit_reorg(&self) -> bool {
+        self.moves
+            .iter()
+            .any(|m| matches!(m, Move::OverEmitReorg { .. }))
+    }
     fn has_crash(&self) -> bool {
         self.moves.iter().any(|m| matches!(m, Move::Crash { .. }))
     }
@@ -1791,10 +2445,10 @@ fn nid(i: usize) -> PeerId {
 
 /// The public key of the identity seeded by `id_seed`.
 fn pk_of(id_seed: u64) -> String {
-    seeded_identity(id_seed)
-        .get_identity()
-        .expect("identity")
-        .public_key_hex
+    // PQ-MIG-3B: the scenario **value** identity (validator weight, mining-reward
+    // target, transfer `from`/`to`) is the ML-DSA address — election in
+    // `propose_block_at` is address-keyed. Transport (envelope) stays Ed25519.
+    addr_of(&seeded_identity(id_seed))
 }
 
 fn build_scenario_nodes(plan: &ScenarioPlan) -> Vec<(PeerId, Node)> {
@@ -1983,25 +2637,24 @@ fn scenario_equivocation(seed: u64, r: &mut Blake3Rng) -> ScenarioPlan {
     let n = sd_range(r, 2, 3) as usize;
     // A byzantine key well outside the honest range 1..=3.
     let byz_seed = 50 + (r.next_u64() % 50);
-    let reward_a = 50 * MICRO;
-    let reward_b = reward_a - MICRO; // distinct ⇒ the two blocks truly differ
-    // Cover BOTH delivery senses across the sweep (T0.8-HARDEN §2a): monotone
-    // (high-first to all) and the reorg flip (low-then-high, isolated to node 0).
-    let low_first = r.next_u64().is_multiple_of(2);
-    let mut moves = vec![
-        Move::TickAll { at_ms: t0 },
-        Move::Run { steps: 1_000 },
-        Move::Equivocate {
+    // FORK-CAP-1: a fraction (~1/3) of the byzantine archetype is an
+    // OVER-EMITTING reorg — node 0 adopts a legit height-1 block, then the
+    // byzantine peer pushes an over-cap block on the REORG branch that
+    // production MUST reject. This exercises the fork-reorg emission gate AND
+    // the amount backstop continuously across the sweep; until the archetype
+    // could generate this, the sweep was blind to the class.
+    let over_emit = r.next_u64().is_multiple_of(3);
+    let mut moves = vec![Move::TickAll { at_ms: t0 }, Move::Run { steps: 1_000 }];
+    if over_emit {
+        moves.push(Move::OverEmitReorg {
             byz_seed,
-            reward_a,
-            reward_b,
+            legit_reward: 50 * MICRO,
+            evil_reward: 1_000_000 * MICRO, // ≫ per-block bound → rejected
             at_ms: t0,
-            low_first,
-        },
-        Move::Run { steps: 4_000 },
-    ];
-    if low_first {
-        // Node 0 reorged in isolation; the rest converge by syncing from it.
+        });
+        moves.push(Move::Run { steps: 4_000 });
+        // node 0 kept the LEGIT tip (over-emitter rejected); the rest converge
+        // by syncing it.
         for behind in 1..n {
             moves.push(Move::Sync {
                 from: behind,
@@ -2010,6 +2663,32 @@ fn scenario_equivocation(seed: u64, r: &mut Blake3Rng) -> ScenarioPlan {
             });
         }
         moves.push(Move::Run { steps: 4_000 });
+    } else {
+        let reward_a = 50 * MICRO;
+        let reward_b = reward_a - MICRO; // distinct ⇒ the two blocks truly differ
+        // Cover BOTH delivery senses across the sweep (T0.8-HARDEN §2a):
+        // monotone (high-first to all) and the reorg flip (low-then-high,
+        // isolated to node 0).
+        let low_first = r.next_u64().is_multiple_of(2);
+        moves.push(Move::Equivocate {
+            byz_seed,
+            reward_a,
+            reward_b,
+            at_ms: t0,
+            low_first,
+        });
+        moves.push(Move::Run { steps: 4_000 });
+        if low_first {
+            // Node 0 reorged in isolation; the rest converge by syncing from it.
+            for behind in 1..n {
+                moves.push(Move::Sync {
+                    from: behind,
+                    to: 0,
+                    at_ms: t0,
+                });
+            }
+            moves.push(Move::Run { steps: 4_000 });
+        }
     }
     ScenarioPlan {
         seed,
@@ -2137,6 +2816,38 @@ fn run_plan(plan: &ScenarioPlan) -> (Sim, Option<Violation>, Option<u64>) {
                 }
                 check_after = false; // nothing applied yet — the Run checks it
             }
+            Move::OverEmitReorg {
+                byz_seed,
+                legit_reward,
+                evil_reward,
+                at_ms,
+            } => {
+                let byz = seeded_identity(*byz_seed);
+                let (env_legit, env_evil) =
+                    forge_over_emit_reorg(&byz, *at_ms, *legit_reward, *evil_reward);
+                let byz_peer = PeerId("byz".into());
+                // Legit first → node 0 adopts it at height 1 (happy path); then
+                // the over-emitter at the same height → reorg branch → rejected
+                // by `validate_block_emission_against` (never integrated). The
+                // following `Run` checks invariants per event step.
+                sim.schedule(
+                    *at_ms,
+                    nid(0),
+                    Event::MessageReceived {
+                        from: byz_peer.clone(),
+                        bytes: env_legit,
+                    },
+                );
+                sim.schedule(
+                    *at_ms,
+                    nid(0),
+                    Event::MessageReceived {
+                        from: byz_peer.clone(),
+                        bytes: env_evil,
+                    },
+                );
+                check_after = false; // applied during the following Run
+            }
             Move::Sync { from, to, at_ms } => {
                 let req = signed_msg_bytes(
                     &seeded_identity(plan.id_seeds[*from]),
@@ -2163,7 +2874,7 @@ fn run_plan(plan: &ScenarioPlan) -> (Sim, Option<Violation>, Option<u64>) {
                 at_ms,
             } => {
                 let crypto = seeded_identity(plan.id_seeds[*from]);
-                let from_pk = crypto.get_identity().expect("identity").public_key_hex;
+                let from_pk = addr_of(&crypto); // PQ-MIG-3B: transfer `from` = ML-DSA address
                 let to_pk = pk_of(plan.id_seeds[*to]);
                 // Injected ts ⇒ byte-reproducible. Best-effort: an underfunded
                 // transfer is a no-op (conservation holds either way). The
@@ -2323,18 +3034,26 @@ fn t0_8_sweep_exercises_faults() {
     // A FIXED range (not `default_seed_count()`): the coverage proof is about
     // the generator, so it must not weaken under a small `QUANTA_SIM_SEEDS`.
     const COVERAGE_SEEDS: u64 = 128;
-    let (mut partition, mut net, mut equivocation, mut crash) = (false, false, false, false);
+    let (mut partition, mut net, mut equivocation, mut crash, mut over_emit) =
+        (false, false, false, false, false);
     for seed in 0..COVERAGE_SEEDS {
         let p = scenario(seed);
         partition |= p.has_partition();
         net |= p.has_net_faults();
         equivocation |= p.has_equivocation();
         crash |= p.has_crash();
+        over_emit |= p.has_over_emit_reorg();
     }
     assert!(partition, "generator must produce partitions");
     assert!(net, "generator must produce drops/dups/delays");
     assert!(equivocation, "generator must produce byzantine equivocators");
     assert!(crash, "generator must produce crash/restart");
+    // FORK-CAP-1: the over-emitting reorg archetype MUST appear, else the
+    // fork-reorg emission gate is untested by the sweep while it stays green.
+    assert!(
+        over_emit,
+        "generator must produce over-emitting reorg attempts (FORK-CAP-1)"
+    );
 }
 
 /// **T0.8.5 — `sweep_catches_planted_violation` (§5.2 teeth + replay
@@ -2466,7 +3185,7 @@ fn t0_8_coverage_transfers_and_burns() {
 fn t0_8_prod_tx_still_timestamps_at_edge() {
     let mut ledger = Ledger::new();
     let crypto = seeded_identity(1);
-    let pk = crypto.get_identity().unwrap().public_key_hex;
+    let pk = addr_of(&crypto); // PQ-MIG-3B: value identity = ML-DSA address
     ledger.mine_tx(&pk, 100 * MICRO, 0.0);
     let to = "b".repeat(64);
     let (tx, burn, _amt) = ledger
@@ -2485,6 +3204,110 @@ fn t0_8_prod_tx_still_timestamps_at_edge() {
     assert!(
         burn.is_some_and(|b| b.pq_signature.is_some_and(|s| !s.is_empty())),
         "prod path keeps the hybrid ML-DSA layer"
+    );
+}
+
+// ─── PQ-MIG-5 : genèse post-quantique — les dents §5 (côté harnais) ───────────
+
+/// **PQ-MIG-5 §5 — adresses de genèse liées à leurs graines.** Chaque adresse de
+/// genèse figée EST l'adresse PQ-MIG-2 `BLAKE3(ADDR_DOMAIN ‖ clé ML-DSA)` d'une
+/// clé de test dérivée d'une graine connue — donc les constantes câblées ne sont
+/// pas du « hex magique » mais des adresses ML-DSA reproductibles (PQ-MIG-2), ce
+/// que la dent « enchaînement » exploite pour signer depuis un compte de genèse.
+#[test]
+fn pqmig5_genesis_addresses_bind_their_seeds() {
+    assert_eq!(addr_of(&seeded_identity(5_000_001)), Ledger::GENESIS_ADDR_0);
+    assert_eq!(addr_of(&seeded_identity(5_000_002)), Ledger::GENESIS_ADDR_1);
+    assert_eq!(addr_of(&seeded_identity(5_000_003)), Ledger::GENESIS_ADDR_2);
+}
+
+/// **PQ-MIG-5 §5 — enchaînement.** Un premier bloc bâti sur la genèse PQ
+/// (allocation DEV) est **valide** — couverture (COVER-1), émission (FORK-CAP-1)
+/// et binding ML-DSA (PQ-MIG-3B) — et **conserve**. G0 (compte de genèse, 50 QTA
+/// dépensables) mine une petite récompense et **dépense une partie de sa valeur de
+/// genèse** via un transfert signé ; un récepteur frais sur la **même** genèse PQ
+/// l'intègre (`Ok(true)`), prouvant que la validation reçue passe. Après
+/// enchaînement, `Σ dépensable + enjeu-verrouillé + brûlé == miné` des deux côtés,
+/// le miné n'ayant grandi que de la récompense.
+#[test]
+fn pqmig5_first_block_on_pq_genesis_validates_and_conserves() {
+    let now0 = SIM_EPOCH_MS;
+    let ts = det_rfc3339(now0);
+    let crypto = seeded_identity(5_000_001); // la clé de GENESIS_ADDR_0
+    let g0 = addr_of(&crypto);
+    assert_eq!(g0, Ledger::GENESIS_ADDR_0);
+
+    let mut l = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+    // Récompense de bloc déterministe + transfert signé de 10 QTA pris sur les
+    // 50 QTA de genèse de G0 (exerce émission + couverture + binding).
+    l.replay_remote_tx(det_mining_tx(&g0, 7 * MICRO, now0, 1));
+    l.transfer_tx_at(&g0, Ledger::GENESIS_ADDR_2, 10 * MICRO, &crypto, ts.clone(), true)
+        .expect("transfert signé depuis un compte de genèse");
+    let block1 = l.seal_block_at(&g0, 0.0, ts.clone());
+    assert_eq!(block1.index, 1, "premier bloc après la genèse");
+    assert_eq!(
+        block1.prev_hash,
+        l.block_at(0).unwrap().hash,
+        "il s'enchaîne sur la genèse PQ"
+    );
+
+    // Un récepteur frais sur la MÊME genèse PQ valide entièrement le bloc.
+    let mut recv = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+    assert_eq!(
+        recv.integrate_remote_block(block1.clone()),
+        Ok(true),
+        "premier bloc valide sur la genèse PQ (couverture/émission/binding)"
+    );
+
+    for led in [&l, &recv] {
+        let spendable: u64 = led.all_balances().values().sum();
+        assert_eq!(
+            spendable + led.locked_stake_total() + led.total_burned(),
+            led.total_minted(),
+            "conservation après le premier bloc"
+        );
+        assert_eq!(led.total_minted(), 107 * MICRO, "100 genèse + 7 récompense");
+    }
+    assert_eq!(
+        l.balance_of(Ledger::GENESIS_ADDR_2),
+        20 * MICRO,
+        "G2 reçoit 10 en plus de ses 10 de genèse"
+    );
+}
+
+/// **PQ-MIG-5 §5 — déterminisme global (C1).** Une chaîne partant de la genèse PQ
+/// est **byte-identique** entre deux exécutions : même genèse (constante) + même
+/// récompense déterministe + même transfert signé déterministe ⇒ même hash de
+/// bloc #1. C1 tient de la genèse au premier bloc.
+#[test]
+fn pqmig5_pq_genesis_chain_is_deterministic() {
+    let now0 = SIM_EPOCH_MS;
+    let ts = det_rfc3339(now0);
+    let build = || {
+        let crypto = seeded_identity(5_000_001);
+        let g0 = addr_of(&crypto);
+        let mut l = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+        l.replay_remote_tx(det_mining_tx(&g0, 7 * MICRO, now0, 1));
+        l.transfer_tx_at(&g0, Ledger::GENESIS_ADDR_2, 10 * MICRO, &crypto, ts.clone(), true)
+            .expect("transfert signé");
+        l.seal_block_at(&g0, 0.0, ts.clone())
+    };
+    let a = build();
+    let b = build();
+    assert_eq!(
+        a.hash, b.hash,
+        "C1 : chaîne depuis la genèse PQ byte-identique"
+    );
+    assert_eq!(
+        Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION)
+            .block_at(0)
+            .unwrap()
+            .hash,
+        Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION)
+            .block_at(0)
+            .unwrap()
+            .hash,
+        "C1 : la genèse PQ elle-même est byte-identique"
     );
 }
 
@@ -2509,7 +3332,7 @@ fn t0_8_single_block_reorg_lowest_hash_first_reconciles() {
     let n = PeerId("n0".into());
     let p = PeerId("n1".into());
     let n_crypto = seeded_identity(1);
-    let pk = n_crypto.get_identity().unwrap().public_key_hex; // miner + transfer sender
+    let pk = addr_of(&n_crypto); // PQ-MIG-3B: miner + transfer sender = ML-DSA address
     let y = "d".repeat(64); // transfer recipient
 
     let mut sim = Sim::new(
@@ -2613,29 +3436,32 @@ fn t0_8_single_block_reorg_lowest_hash_first_reconciles() {
     assert_eq!(sim.tips()[&p], sim.tips()[&n], "peer converged on the winner via sync");
 }
 
-// ─── T0.8-HARDEN Phase 2b: multi-block partition (the known ADR-001 gap) ──────
+// ─── T0.8-HARDEN Phase 2b: multi-block partition (the ADR-001 gap — CLOSED) ───
 
-/// **Phase 2b — `multiblock_partition_currently_diverges_GADGET_DEFERRED`.**
+/// **Phase 2b — `multiblock_partition_reconciles_at_heal` (GADGET-5B).**
 ///
-/// The `partition_heal` archetype converges only because a SINGLE leader seals
-/// while the other side just re-syncs. Here BOTH sides advance **multi-block**
-/// on competing forks, then heal — which the current **single-block**
-/// fork-choice cannot reconcile (it resolves one block at a time at the tip
-/// index; a height-1 block arriving when the tip is height 2 fails the
-/// prev-hash link). This is the documented ADR-001 finality gap.
+/// The `partition_heal` archetype converged only because a SINGLE leader sealed
+/// while the other side just re-synced. Here BOTH sides advance **multi-block**
+/// on competing forks, then heal — the case the old **single-block** fork-choice
+/// could not reconcile (a height-1 block arriving when the tip is height 2 fails
+/// the prev-hash link). That was the documented ADR-001 finality gap, asserted
+/// for sessions as a `…gadget_deferred` divergence.
 ///
-/// This test makes the gap **explicit** and asserts the CURRENT (diverging)
-/// behaviour — it is the **acceptance target for the finality gadget**: when
-/// that lands, INVERT the safety assertion to `tips[a] == tips[b]`.
+/// **GADGET-5B closes it.** At heal each node feeds the competing fork to the
+/// GADGET-5A GHOST engine ([`Node::reconcile_fork`]): the union block tree is
+/// walked from the last justified checkpoint to the heaviest branch (here,
+/// vote-free, the deterministic smallest-hash tie-break), and the loser reorgs
+/// to it with full conservation. Seeing the same blocks, the two nodes converge
+/// on the **same** head — so this test now asserts **convergence + global
+/// conservation** (the inversion the gap was seeded as the target for).
 ///
-/// **§4 stop rule (crucial).** A persistent **safety** divergence is the KNOWN
-/// gap → asserted + marked gadget-deferred (no escalation, expected). But a
-/// **conservation** or **emission** break (funds duplicated/lost between the two
-/// chains, a double-mint at heal) is a NEW bug, worse than the gap and not
-/// necessarily fixed by the gadget → the per-node checks below **panic**, which
-/// is the STOP-and-report signal (T0.8 §7), never a green mark.
+/// **The teeth.** Convergence (`tips[a] == tips[b]`, determinism C1) is the
+/// reconciliation tooth; the per-node + global conservation checks are the
+/// load-bearing **conservation-at-heal** tooth — were the loser branch's
+/// emission *not* reverted on reorg, `Σ balances` would exceed `minted` and
+/// `check_invariants` would fire (the planted-break the spec demands bite).
 #[test]
-fn t0_8_multiblock_partition_currently_diverges_gadget_deferred() {
+fn t0_8_multiblock_partition_reconciles_at_heal() {
     let now0 = SIM_EPOCH_MS;
     let a = PeerId("n0".into());
     let b = PeerId("n1".into());
@@ -2688,17 +3514,17 @@ fn t0_8_multiblock_partition_currently_diverges_gadget_deferred() {
     }
     sim.run(10_000);
 
-    // §4: CONSERVATION + EMISSION must STILL hold per node — checked directly
-    // (a safety break makes `check_invariants` short-circuit before them). A
-    // failure here is a NEW bug ⇒ STOP and report (panic), NOT gadget-deferred.
+    // GADGET-5B §2: CONSERVATION + EMISSION hold per node at heal — checked
+    // directly (and load-bearing: the loser branch's emission is reverted on
+    // reorg, so `Σ balances + burned == minted` STILL holds; an un-reverted
+    // emission would break exactly this).
     for (id, node) in &sim.nodes {
         let l = node.ledger();
         let sum: u64 = l.all_balances().values().sum();
         assert_eq!(
             sum.saturating_add(l.total_burned()),
             l.total_minted(),
-            "NEW BUG worse than the known ADR-001 gap: conservation broken on {id:?} at heal \
-             — STOP and report, do NOT mark gadget-deferred"
+            "conservation must hold on {id:?} after reconciliation (loser emission reverted)"
         );
         for (i, blk) in l.chain.iter().enumerate() {
             let mining = blk
@@ -2708,32 +3534,44 @@ fn t0_8_multiblock_partition_currently_diverges_gadget_deferred() {
                 .count();
             assert!(
                 mining <= 1,
-                "NEW BUG: double-mint (emission) on {id:?} block {i} at heal — STOP and report"
+                "no double-mint on {id:?} block {i} after reconciliation (EMIT-1 §4.1)"
             );
         }
     }
 
-    // The KNOWN gap: the two multi-block forks do NOT reconcile → a persistent
-    // safety divergence. ASSERTED as gadget-deferred; INVERT when the gadget
-    // lands (assert convergence instead).
-    match sim.check_invariants() {
-        Err(Violation::Safety { index, .. }) => {
-            assert!(index >= 1, "the forks diverge at a non-genesis index");
-            assert_ne!(
-                sim.tips()[&a],
-                sim.tips()[&b],
-                "GADGET-DEFERRED (ADR-001): single-block fork-choice cannot reconcile two \
-                 multi-block forks — they diverge. Invert to assert convergence when the \
-                 finality gadget lands."
-            );
-        }
-        Ok(()) => panic!(
-            "UNEXPECTED CONVERGENCE: the multi-block partition reconciled. If real, the \
-             fork-choice gap is closed — update this test to assert convergence (gadget landed?)."
-        ),
-        Err(other) => panic!(
-            "NEW BUG worse than the known safety gap: {other:?} — STOP and report, do NOT \
-             mark gadget-deferred"
-        ),
+    // GADGET-5B §1/§3: the two multi-block forks **reconcile** — both nodes
+    // converge on the SAME head (the gap, inverted). Determinism (C1): seeing the
+    // same blocks, each node's GHOST engine picks the identical winner.
+    assert_eq!(
+        sim.tips()[&a],
+        sim.tips()[&b],
+        "GADGET-5B: the two multi-block forks reconcile to one common head at heal"
+    );
+    assert_eq!(sim.heights()[&a], 3, "the converged chain keeps its two-block height");
+    assert_eq!(sim.heights()[&b], 3, "both nodes hold the same three-block chain");
+
+    // Global safety + conservation across all nodes (no Safety/Conservation
+    // violation anywhere — the reconciliation is real, not vacuous).
+    assert_eq!(
+        sim.check_invariants(),
+        Ok(()),
+        "after reconciliation: safety holds (one chain) and conservation is global"
+    );
+
+    // Conservation-at-heal, made surgical: exactly the winning miner is credited
+    // the single fork's emission (50+49 = 99 QTA); the LOSER miner's branch — its
+    // identical 99 QTA emission — was undone, not double-minted (a re-queue or a
+    // missing revert would leave its reward in a balance and break the equality
+    // above). Both forks mint 99, so whichever won, the total is one fork's worth.
+    for (id, node) in &sim.nodes {
+        let l = node.ledger();
+        let won_a = l.balance_of(&a_pk);
+        let won_b = l.balance_of(&b_pk);
+        assert_eq!(won_a + won_b, 99 * MICRO, "only one fork's emission survives on {id:?}");
+        assert!(
+            won_a == 0 || won_b == 0,
+            "the losing miner's dropped-branch emission is fully reverted on {id:?}"
+        );
+        assert_eq!(l.total_minted(), 99 * MICRO, "minted counts one fork only on {id:?}");
     }
 }

@@ -25,7 +25,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// - Unknown payload variants always deserialize as a parse error and are
 ///   silently dropped at the JSON layer, satisfying the "skip unknown
 ///   messages gracefully" requirement.
-pub const TORUS_PROTOCOL_VERSION: u8 = 2;
+///
+/// PQ-MIG-5 §4: bumped **2 → 3** — the post-quantum genesis (genesis reconstructed
+/// on ML-DSA identities + addresses, canonical content-bound genesis hash) is a
+/// protocol break, so a v3 node's genesis/chain is incompatible with a v2 node's.
+pub const TORUS_PROTOCOL_VERSION: u8 = 3;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 

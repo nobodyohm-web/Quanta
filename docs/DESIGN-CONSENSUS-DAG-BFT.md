@@ -92,6 +92,9 @@ commit déterministe (sélection d'ancre via le beacon) produit l'ordre total.
    réécrit PAS le consensus sans pouvoir tester la convergence sous adversité.
 2. **Phase 1** : **Option 1** (finality gadget) → finalité déterministe rapide,
    slashing, risque contenu. Livre 80 % de la valeur perçue (« rapide + sûr »).
+   → **Conception détaillée** : `DESIGN-FINALITY-GADGET.md` (style Casper FFG, votes ML-DSA
+   post-quantiques, finalisation par époque ; *proposée, à valider*). Les 4 méta-décisions §7
+   ci-dessous sont depuis cadrées en ADR-001→005 (`docs/decisions/`).
 3. **Phase 2** : migrer vers **Option 2** (DAG-BFT) une fois le harnais et le
    gadget éprouvés, derrière un **bump de version de protocole**.
 

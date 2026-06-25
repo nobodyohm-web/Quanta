@@ -26,12 +26,22 @@
 //! SECURITY.md and the DAG-BFT consensus design doc).
 //!
 //! The weight of each validator is:
-//!   weight = staked_amount + (reputation_score * 10_000)
+//!   weight = staked_amount        // ADR-002: on-chain stake ONLY
+//!
+//! **ADR-002 (accepté) — poids = enjeu on-chain seul.** Reputation (and any
+//! other non-stake, locally-measured quantity) is **removed from the security
+//! path**: it is an application signal (mining / Shapley reward), never an
+//! election or quorum weight. The previous `stake + reputation × 10_000` made
+//! the weight depend on each node's **local** reputation view, so two honest
+//! nodes could compute different weights → different leaders → **fork**. Anchoring
+//! weight to on-chain stake makes it a pure function of consensus state.
 //!
 //! This ensures:
-//!   1. **Determinism** — All nodes compute the same leader for the same slot.
+//!   1. **Determinism** — weight is a pure function of on-chain stake, so all
+//!      nodes at the same chain state compute the **same** weights and leader
+//!      (no dependence on any node-local measurement).
 //!   2. **Sybil resistance** — Creating many identities without stake gives no advantage.
-//!   3. **Fairness** — Higher stake + contribution = higher chance of being elected.
+//!   3. **Fairness** — Higher stake = higher chance of being elected.
 //!   4. **Liveness** — If the elected leader is offline, a fallback mechanism
 //!      allows the next-in-line after a timeout.
 //!
@@ -51,6 +61,11 @@
 use std::collections::HashMap;
 
 /// Minimum stake required to participate in consensus (1 QUANTA = 1_000_000 µQTA).
+/// **ADR-009 :** la **classe** est tranchée — *ajustable* (anti-sybil, derrière
+/// constante, modifiable par **fork**, pas de gouvernance on-chain). La **valeur**
+/// reste un **placeholder nominal 🛑 d'Alexandre** (§3) : son niveau sensé dépend
+/// de l'**échelle monétaire** (offre, valeur du µQTA) — le noyau gravé, non
+/// redéfini ici. À fixer quand l'échelle l'est ; ne bloque pas le câblage du gadget.
 pub const MIN_VALIDATOR_STAKE: u64 = 1_000_000;
 
 /// Timeout in seconds after which the next validator in line can propose.
@@ -74,26 +89,33 @@ pub const LEADER_ENTROPY_LOOKBACK: u64 = 2;
 pub struct Validator {
     /// Public key (hex)
     pub pk: String,
-    /// Total staked amount in µQTA
+    /// Total staked amount in µQTA — the **only** consensus weight (ADR-002).
     pub stake: u64,
-    /// Reputation score (0-100)
+    /// Reputation score (0-100). **Application signal only — ZERO consensus
+    /// effect** (ADR-002: la réputation sort du chemin de sécurité). It is
+    /// carried here for display/leaderboard purposes; it does **not** enter
+    /// [`Validator::weight`], election, or quorum. Reputation is measured
+    /// **locally** by each node, so letting it weigh consensus would fork the
+    /// chain — which is exactly the hole ADR-002 closes.
     pub reputation: u64,
 }
 
 impl Validator {
-    /// Consensus weight = stake + a **bounded** reputation bonus.
+    /// Consensus weight = **on-chain stake only** (ADR-002, accepté 2026-06-21).
     ///
-    /// Reputation is scaled relative to stake (100 rep = 1 QUANTA of weight =
-    /// 1_000_000 µQTA), but the bonus is **capped at the validator's own stake**
-    /// (audit 3.4). So contribution-mined reputation can at most *double* a
-    /// validator's election weight and can never overcome stake. This keeps the
-    /// election **stake-anchored**: energy-farmed reputation cannot dominate, and
-    /// there is no cheaper Sybil path via reputation than via stake. (Eligibility
-    /// already requires `stake >= MIN_VALIDATOR_STAKE`, so a zero-stake identity
-    /// has zero weight regardless of reputation.)
+    /// The weight that decides leader election and (for GADGET-2) the ⅔ quorum is
+    /// a **pure function of on-chain stake** — identical on every node at the same
+    /// chain state. **Reputation is deliberately NOT included**: it is measured
+    /// locally (each node's own view), so a reputation-weighted election would let
+    /// two honest nodes elect different leaders → **fork**. The previous formula
+    /// `stake + min(reputation × 10_000, stake)` reopened exactly that hole; ADR-002
+    /// removes it.
+    ///
+    /// ⚠️ **Do not re-introduce any non-stake term here** (reputation, Shapley,
+    /// energy, uptime…). Eligibility already requires `stake >= MIN_VALIDATOR_STAKE`,
+    /// so a zero-stake identity has zero weight and cannot be elected.
     pub fn weight(&self) -> u64 {
-        let rep_bonus = self.reputation.saturating_mul(10_000).min(self.stake);
-        self.stake.saturating_add(rep_bonus)
+        self.stake
     }
 }
 
@@ -429,15 +451,18 @@ mod tests {
     }
 
     #[test]
-    fn reputation_bonus_capped_at_stake() {
-        // 3.4: a huge reputation cannot let a small stake dominate — the bonus is
-        // capped at stake, so weight tops out at 2× stake.
+    fn weight_is_stake_only_reputation_has_no_effect() {
+        // ADR-002: consensus weight = on-chain stake ONLY. Reputation — however
+        // large — has zero effect on weight (supersedes audit 3.4's capped bonus).
+        // A reputation "farmer" with a small stake gets weight == stake, NOT 2×.
         let farmer = Validator { pk: "rep_farmer".into(), stake: 1_000_000, reputation: 10_000 };
-        // raw bonus = 10_000 * 10_000 = 100_000_000, capped at stake (1_000_000)
-        assert_eq!(farmer.weight(), 2_000_000, "reputation bonus must be capped at stake");
-        // Modest reputation stays uncapped: 90 * 10_000 = 900_000 < 5_000_000 stake.
-        let modest = Validator { pk: "modest".into(), stake: 5_000_000, reputation: 90 };
-        assert_eq!(modest.weight(), 5_900_000);
+        assert_eq!(farmer.weight(), 1_000_000, "weight must equal stake, ignoring reputation");
+        // Same stake, wildly different reputation ⇒ identical weight: the property
+        // that makes the weight a pure function of on-chain stake.
+        let a = Validator { pk: "a".into(), stake: 5_000_000, reputation: 0 };
+        let b = Validator { pk: "b".into(), stake: 5_000_000, reputation: 100 };
+        assert_eq!(a.weight(), b.weight(), "reputation cannot change weight");
+        assert_eq!(a.weight(), 5_000_000);
     }
 
     // ─── Track C: aléa d'élection non-grindable (beacon d'entropie enterrée) ──
@@ -528,9 +553,12 @@ mod tests {
         // u64::MAX. The previous `eligible.iter().map(weight).sum::<u64>()` would
         // panic in debug / wrap in release; the u128 accumulation must elect one
         // of them without panicking (Constitution §3: no silent wrap/overflow).
+        // Weight is now stake-only (ADR-002), so the stakes themselves must sum
+        // past u64::MAX: (u64::MAX/2 + 1_000_000) × 2 = u64::MAX + 2_000_000.
+        let huge = u64::MAX / 2 + 1_000_000;
         let vals = vec![
-            Validator { pk: "whale_a".into(), stake: u64::MAX / 2, reputation: 100 },
-            Validator { pk: "whale_b".into(), stake: u64::MAX / 2, reputation: 100 },
+            Validator { pk: "whale_a".into(), stake: huge, reputation: 0 },
+            Validator { pk: "whale_b".into(), stake: huge, reputation: 0 },
         ];
         let leader = elect_leader("extreme", 7, &vals);
         assert!(
@@ -540,5 +568,66 @@ mod tests {
         // Fallback path must survive the same extreme weights.
         let fb = elect_fallback_leader("extreme", 7, 1, &vals);
         assert!(matches!(fb.as_deref(), Some("whale_a") | Some("whale_b")));
+    }
+
+    /// **STAKE-WEIGHT-1 / ADR-002 — the anti-divergence property (with teeth).**
+    ///
+    /// The fork hole ADR-002 closes: reputation is measured **locally**, so if it
+    /// weighed the election, two honest nodes with the same on-chain stakes but
+    /// *different local reputation views* could elect **different** leaders and
+    /// fork. Here two nodes hold the SAME validator stakes but DIVERGENT local
+    /// reputations; we assert (a) per-validator weight is identical, and (b) the
+    /// elected leader agrees across both views, for every slot in a long sweep.
+    ///
+    /// **Teeth (non-vacuity):** the reputations genuinely differ, and the OLD
+    /// formula `stake + min(rep×10_000, stake)` *would* have produced different
+    /// weights — we assert that inline, so the test proves the new election agrees
+    /// **despite** an input that previously caused divergence, not because the
+    /// inputs happen to match.
+    #[test]
+    fn weight_and_election_are_identical_across_nodes_despite_local_reputation() {
+        // Same on-chain stakes on both nodes; only the LOCAL reputation differs.
+        let stakes = [("alice", 5_000_000u64), ("bob", 3_000_000), ("carol", 4_000_000)];
+        let node_a_reps = [90u64, 10, 50]; // node A's local view
+        let node_b_reps = [10u64, 99, 0]; //  node B's local view (divergent)
+
+        let view = |reps: &[u64; 3]| -> Vec<Validator> {
+            stakes
+                .iter()
+                .zip(reps.iter())
+                .map(|((pk, stake), rep)| Validator {
+                    pk: (*pk).into(),
+                    stake: *stake,
+                    reputation: *rep,
+                })
+                .collect()
+        };
+        let a = view(&node_a_reps);
+        let b = view(&node_b_reps);
+
+        // The reputations really differ, and the OLD rep-weighted formula WOULD
+        // have diverged — so the agreement below is meaningful, not vacuous.
+        let old_weight = |v: &Validator| v.stake.saturating_add(v.reputation.saturating_mul(10_000).min(v.stake));
+        let mut old_would_diverge = false;
+        for (va, vb) in a.iter().zip(b.iter()) {
+            assert_eq!(va.weight(), vb.weight(), "stake-only weight must match across views");
+            if old_weight(va) != old_weight(vb) {
+                old_would_diverge = true;
+            }
+        }
+        assert!(
+            old_would_diverge,
+            "test must exercise a reputation delta the OLD formula reacted to (else it proves nothing)"
+        );
+
+        // The real property: same leader on both nodes, every slot.
+        for slot in 0..2_000u64 {
+            let beacon = leader_beacon("anti-fork", slot);
+            assert_eq!(
+                elect_leader(&beacon, slot, &a),
+                elect_leader(&beacon, slot, &b),
+                "nodes with the same stakes but different local reputation must elect the SAME leader (slot {slot})"
+            );
+        }
     }
 }

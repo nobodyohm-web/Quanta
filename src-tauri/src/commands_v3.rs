@@ -21,13 +21,16 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Signe un blob via `CryptoEngine` puis renvoie l'hex de la signature (128 chars).
-async fn sign_hex(state: &Arc<AppState>, msg: &[u8]) -> Result<String, String> {
+/// PQ-MIG-3B — signe un blob via l'identité **ML-DSA** (autorité de valeur) puis
+/// renvoie l'hex de la signature. Sert à signer une revendication `@pseudo` :
+/// l'autorité du pseudo est désormais la clé ML-DSA liée à l'adresse, pas Ed25519.
+async fn sign_pq_hex(state: &Arc<AppState>, msg: &[u8]) -> Result<String, String> {
     let crypto = state.crypto.lock().await;
-    let sig = crypto.sign(msg)?;
+    let sig = crypto.sign_pq(msg)?;
     Ok(hex::encode(sig))
 }
 
+/// L'identité **transport** (clé publique Ed25519) — signe les enveloppes gossip.
 async fn my_pk(state: &Arc<AppState>) -> Result<String, String> {
     state
         .crypto
@@ -35,6 +38,27 @@ async fn my_pk(state: &Arc<AppState>) -> Result<String, String> {
         .await
         .get_identity()
         .map(|i| i.public_key_hex)
+}
+
+/// PQ-MIG-3B — l'identité de **valeur** (adresse ML-DSA) : c'est le wallet, la
+/// cible de `@pseudo`, la clé du solde. `to`/`from`/`owner_pk` partout.
+async fn my_address(state: &Arc<AppState>) -> Result<String, String> {
+    state
+        .crypto
+        .lock()
+        .await
+        .pq_address_hex()
+        .ok_or_else(|| "Identité ML-DSA absente".to_string())
+}
+
+/// La clé publique ML-DSA **révélée** (se lie à l'adresse via `lie()`).
+async fn my_pq_key(state: &Arc<AppState>) -> Result<String, String> {
+    state
+        .crypto
+        .lock()
+        .await
+        .pq_identity_hex()
+        .ok_or_else(|| "Identité ML-DSA absente".to_string())
 }
 
 /// Wrap + signe + envoie une enveloppe gossip (pipeline B/C/D).
@@ -65,22 +89,28 @@ pub async fn claim_username(
     p2p::username::validate_username(&name).map_err(|_| {
         "Pseudo invalide : 3 à 20 caractères, minuscules / chiffres / _ , doit commencer par une lettre.".to_string()
     })?;
-    let pk = my_pk(&state).await?;
+    // PQ-MIG-3B: the wallet identity `@pseudo` resolves to is the ML-DSA
+    // **address** (a spendable account), and the claim is authenticated by the
+    // revealed ML-DSA key bound to that address — not the Ed25519 transport key.
+    let addr = my_address(&state).await?;
+    let owner_key = my_pq_key(&state).await?;
 
     // Disponibilité (vue locale) : déjà pris par quelqu'un d'autre → refus.
     if let Some(existing) = state.node.usernames.read().await.get(&name) {
-        if existing.owner_pk != pk {
+        if existing.owner_pk != addr {
             return Err(format!("@{name} est déjà pris."));
         }
     }
 
     let mut rec = p2p::username::UsernameRecord {
         username: name.clone(),
-        owner_pk: pk.clone(),
+        owner_pk: addr.clone(),
+        owner_key,
         claimed_at: now_secs(),
         signature: String::new(),
     };
-    rec.signature = sign_hex(&state, &p2p::username::signable_bytes(&rec)).await?;
+    // Sign AFTER owner_pk + owner_key are set (they are in the signed preimage).
+    rec.signature = sign_pq_hex(&state, &p2p::username::signable_bytes(&rec)).await?;
 
     state
         .node
@@ -93,7 +123,7 @@ pub async fn claim_username(
     let record_json = serde_json::to_string(&rec).map_err(|e| e.to_string())?;
     wrap_broadcast(&state, GossipMessage::PublishUsername { record_json }).await?;
 
-    Ok(serde_json::json!({ "username": name, "owner_pk": pk }))
+    Ok(serde_json::json!({ "username": name, "owner_pk": addr }))
 }
 
 /// Résout `@pseudo → clé publique` (l'adresse de wallet). `None` si inconnu.
@@ -120,8 +150,9 @@ pub async fn is_username_available(
 pub async fn get_my_username(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Option<String>, String> {
-    let pk = my_pk(&state).await?;
-    Ok(state.node.usernames.read().await.username_of(&pk))
+    // PQ-MIG-3B: the registry is keyed by the ML-DSA address (`owner_pk`).
+    let addr = my_address(&state).await?;
+    Ok(state.node.usernames.read().await.username_of(&addr))
 }
 
 /// Pseudo détenu par une clé publique donnée (résolution inverse pour l'UI).
@@ -139,8 +170,10 @@ pub async fn username_of_pk(
 pub async fn get_my_connection_code(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
-    let pk = my_pk(&state).await?;
-    p2p::username::connection_code(&pk).ok_or_else(|| "Clé invalide".to_string())
+    // PQ-MIG-3B: the safety number is derived from the ML-DSA address, so it
+    // matches `verify_connection` (which resolves @pseudo → address → code).
+    let addr = my_address(&state).await?;
+    p2p::username::connection_code(&addr).ok_or_else(|| "Clé invalide".to_string())
 }
 
 #[derive(Serialize)]

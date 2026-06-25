@@ -141,7 +141,7 @@ La production de blocs est par leader et déterministe par slot (= hauteur de ch
 ```
 beacon = BLAKE3(domaine ‖ bloc_enterré_hash ‖ slot)   (enterré = plusieurs slots derrière le tip)
 seed   = BLAKE3(domaine ‖ beacon ‖ slot ‖ round)
-leader = seed % stake_total_pondéré                    (poids = stake + réputation·10_000)
+leader = seed % stake_total_pondéré                    (poids = stake seul — enjeu on-chain, ADR-002)
 ```
 
 Le stake minimum de validateur est 1 QUANTA. Si le leader élu ne scelle pas dans un timeout

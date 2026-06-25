@@ -135,11 +135,23 @@ Slot N (= chain height)
 ├─ seed   = BLAKE3(domaine ‖ beacon ‖ slot ‖ round)
 ├─ seed % total_weighted_stake → leader déterministe
 │
-├─ Poids = stake + (reputation × 10_000)
+├─ Poids = stake **inscrit sur la chaîne** (`ledger.validator_stakes()` — ADR-002 ;
+│   réputation hors chemin de sécurité ; source = état du ledger, identique sur tous les nœuds)
 ├─ Minimum stake = 1 QUANTA (1M µQTA)
 ├─ Fallback = 30s timeout → next-in-line
 └─ Bootstrap = permissionless si personne n'a staké
 ```
+
+> **Enjeu on-chain (ONCHAIN-STAKE-1).** Le poids du validateur **n'est plus** lu du
+> leaderboard local mais d'un **état d'enjeu dans le ledger**, dérivé des tx `Stake`/`Unstake`
+> scellées (ancrage à `block.index`) — donc une **fonction pure de la chaîne**, identique sur
+> chaque nœud (live / restauré / synchronisé). C'est la seconde moitié de la fermeture du
+> vecteur de fork (la première — la réputation dans le poids — l'a été par STAKE-WEIGHT-1).
+> Le solde se scinde en **dépensable / staké / en-déverrouillage** ; staker **déplace** des
+> pièces (ne les brûle pas), donc la conservation compte
+> `Σ(dépensable + staké + déverrouillage) + brûlé == miné`. Déverrouillage **indexé par
+> hauteur** (`unlock = block.index + UNBONDING_PERIOD_BLOCKS`, 🛑 à figer ; contrainte gravée :
+> `≥ fenêtre de slashing`, ADR-003).
 
 > **Nommage honnête** : élection *déterministe et publiquement vérifiable*, **pas** un VRF
 > cryptographique (aucune clé secrète → leader publiquement prévisible). Le beacon enterré
@@ -199,6 +211,16 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 - **Merkle root** : BLAKE3 tree des tx IDs dans chaque bloc
 - **Burn-and-mint** : 1% sur chaque transfert
 - **Chain sync** : RequestChain → ChainSegment (paginated 50 blocks)
+- **Couverture symétrique (COVER-1 réception / COVER-2 production)** : règle de couverture unique
+  (`uncovered_tx_indices` + `onchain_spendable_before`, solde **on-chain** avant le bloc, fonction
+  pure de la chaîne, jamais le mempool ; séquentielle ; crédits intra-bloc comptés ; synthétiques
+  `NETWORK`/`ESCROW`/`BURN` exemptés). **COVER-1 — réception** : `validate_block_against_prev`
+  (validateur **partagé** intégration linéaire **et** reorg) **rejette** tout bloc reçu avec une
+  dépense/stake non couvert. **COVER-2 — production** : `seal_block_at` **exclut** les tx non
+  couvertes (revert cache + éviction) pour produire un bloc **valide par construction** — invariant :
+  tout bloc auto-scellé passe `validate_block_against_prev` (un nœud ne corrompt plus sa chaîne). Le
+  clamp `.max(0)` est **conservé** (cache pending-inclus via `replay_remote_tx` sans garde + sûreté
+  du cast `i128→u64`).
 
 ---
 
@@ -210,9 +232,10 @@ const MINE_INTERVAL_SECS: u64 = 60;        // 1 tx/min
 const SEAL_EVERY_N_TICKS: u32 = 2;          // seal toutes les 2 min
 
 // Consensus PoS
-const MIN_VALIDATOR_STAKE: u64 = 1_000_000; // 1 QUANTA minimum
+const MIN_VALIDATOR_STAKE: u64 = 1_000_000; // 1 QUANTA minimum (🛑 valeur à figer §12)
 const LEADER_TIMEOUT_SECS: u64 = 30;        // fallback après 30s
 const MAX_FALLBACK_ROUNDS: u32 = 3;         // 3 rounds de fallback
+const UNBONDING_PERIOD_BLOCKS: u64 = 10_080;// 🛑 ~2 sem. de blocs ; ≥ fenêtre de slashing (ADR-003)
 
 // Persistence
 const SNAPSHOT_INTERVAL: Duration = 30s;    // SQLite save toutes les 30s
@@ -235,7 +258,7 @@ const MAX_RAW_ENVELOPE_BYTES: usize = 10MB; // DoS guard
 1. `tokio::sync` (JAMAIS `std::sync` avec `.await`)
 2. Zéro `unwrap()` — `Result<T,E>` + `?` partout
 3. `zeroize()` tous les secrets cryptographiques
-4. Ed25519 sur chaque tx et message gossip
+4. Autorité de tx = **ML-DSA** (clé liée à l'adresse `from` via `lie`, PQ-MIG-3B) ; Ed25519 = **transport** (chaque enveloppe gossip) + co-facteur tx vestigial
 5. Lock ordering strict pour éviter deadlocks
 6. Tous les montants en `u64` µQTA (jamais f64 pour les balances)
 
@@ -334,3 +357,7 @@ npx tauri build
 | 2026-05-07 | **🧱 Site Engine v3.3 — smart tags, no-code builder, dev HTTP API (256 tests)** |
 | 2026-05-31 | **🔐 Post-quantique hybride ACTIF (ML-DSA-65/FIPS 204, dérivé de la graine Ed25519) + invariants formels (proptest) + aléa d'élection non-grindable (beacon enterré) — 265 tests** |
 | 2026-06-20 | **₿ Refonte crypto-only — suppression des modules web/social (sites, domaines, recherche, social, forums, modération, marketplace, DAG) ; Shapley sans terme social (énergie 30 / travail 30 / validation 25 / uptime 15) — 174 tests** |
+| 2026-06-23 | **⚖️ Enjeu on-chain (ADR-002 complet) — STAKE-WEIGHT-1 (réputation retirée du poids) puis ONCHAIN-STAKE-1 (état d'enjeu dans le ledger : tx Stake/Unstake, déverrouillage indexé par hauteur, `build_validator_set` sourcé de la chaîne) ; vecteur de fork fermé, conservation `Σ(dépensable+staké+déverrouillage)+brûlé==miné` — 289 tests** |
+| 2026-06-23 | **🛡️ COVER-1 — validation de couverture au bloc : `validate_block_against_prev` (validateur partagé des deux chemins) rejette toute dépense/stake non couvert par le solde on-chain ; couverture séquentielle + crédits intra-bloc ; clamp `.max(0)` conservé (§4 « ne force pas ») ; dernier trou de validation fermé avant le gadget — 298 tests** |
+| 2026-06-23 | **🛡️ COVER-2 — couverture **symétrique** au seal : `seal_block_at` **exclut** les tx non couvertes (même règle que COVER-1, source unique `uncovered_tx_indices`) + revert cache + éviction ⇒ bloc **valide par construction** ; invariant « bloc auto-scellé passe la validation » (auto-corruption locale fermée) ; clamp/admission inchangés — 306 tests** |
+| 2026-06-25 | **🔐 PQ-MIG-3B — identité de compte **entièrement ML-DSA, sans astérisque** (ADR-007 b réalisé ; ADR-008 reversé) : `from`/`to` = **adresse ML-DSA** (`BLAKE3(ADDR_DOMAIN ‖ clé)`) **partout** — solde, récompense (`mine_tx`), enjeu/`validator_stakes`, `@pseudo` (`owner_pk` + `owner_key` révélée, signé ML-DSA + `lie`) ; autorité de `verify_tx` = **pur ML-DSA** (co-facteur Ed25519 retiré du chemin), CRYPTO-ID-1 close **par construction** ; **transport Ed25519 différé** (enveloppes/PeerId intacts) ; conservation/couverture/**C1** verts — 335 tests** |

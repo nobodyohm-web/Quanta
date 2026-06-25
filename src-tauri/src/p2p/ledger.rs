@@ -12,6 +12,71 @@ use std::collections::{HashMap, HashSet, VecDeque};
 // Re-export all types from ledger_types so external code keeps working
 pub use super::ledger_types::*;
 
+/// SLICE-CLASS (HARDEN-HYGIENE-1): a char-safe prefix of `s` of at most `max`
+/// **bytes**, truncated DOWN to the nearest UTF-8 char boundary. Byte-indexing a
+/// `&str` (`&s[..n]`) panics if `n` lands inside a multi-byte char OR past the
+/// end, so every log/error that truncates an attacker-controlled `String` field
+/// (block hash, prev_hash, tx id, miner) MUST go through this — a crafted block
+/// with a short or multi-byte `hash`/`id` would otherwise panic the single
+/// inbound-gossip dispatch task and make the node deaf to all gossip (remote
+/// DoS). **Display-only**: never feeds a hash, signature, merkle leaf, or
+/// consensus comparison (those use the full field), so the truncation has zero
+/// consensus effect.
+pub(crate) fn short(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// TX-AUTH-NONCE-1 §1: maximum a remote tx's nonce may exceed the account's
+/// current high-water. A tx further ahead than this is **rejected** at
+/// admission, so the high-water advance can never iterate an unbounded range
+/// (the old `for _ in current..new_hw { increment_nonce }` with an
+/// attacker-supplied nonce near `u64::MAX` looped ~2^64 times **under the
+/// ledger write lock** — a global hang / remote DoS).
+///
+/// **§4 policy note**: the *existence* of a bound is required for soundness; the
+/// exact *value* is a policy choice (how much out-of-order / future nonce slack
+/// to tolerate before rejecting). 1024 comfortably covers realistic gossip
+/// reordering while keeping the advance O(bounded). Flagged for Alexandre.
+pub(crate) const MAX_NONCE_GAP: u64 = 1_024;
+
+/// ONCHAIN-STAKE-1 §3 (🛑 — constante à figer avec le temps de bloc et la §12).
+///
+/// Delay, in **block heights**, between an `Unstake` and the moment the unbonding
+/// funds become spendable again. Indexing the unlock by **block height** (not the
+/// wall clock) keeps the whole stake state a deterministic function of the chain.
+///
+/// **Hard constraint (ADR-003, slashing — not implemented here):**
+/// `UNBONDING_PERIOD_BLOCKS ≥ slashing window`. If funds could unbond faster than
+/// equivocation can be detected and punished, slashing would be trivially
+/// bypassable (unstake-and-run). The stake state below is the **place** a future
+/// slashing rule will reduce `staked`; this delay is what makes it enforceable.
+///
+/// **Durée d'unbonding (blocs). Ratifiée *réglable* par ADR-009 = 10 080**
+/// (≈ 2 semaines au rythme actuel : un seal ~2 min ⇒ ~720 blocs/jour).
+/// ADR-009 tranche la **classe** (ajustable, durée, modifiable par **fork**) et
+/// pose **10 080** comme défaut ancré ; la **contrainte gravée** est
+/// `SLASH_EVIDENCE_WINDOW_BLOCKS ≤ UNBONDING_PERIOD_BLOCKS` (anti *unstake-and-run*,
+/// GADGET-4). Le *mécanisme* est codé ; changer le *nombre* par fork co-détermine
+/// le taux de churn du validator-set — un réglage, pas une promesse.
+pub const UNBONDING_PERIOD_BLOCKS: u64 = 10_080;
+
+/// ONCHAIN-STAKE-1 §1: one pending unlock created by an `Unstake`. `amount` µQTA
+/// leave the bonded `staked` pool and sit here, **locked** (they weigh nothing in
+/// consensus and are not yet spendable), until the chain reaches `unlock_height`
+/// — at which point [`Ledger::mature_unbonding`] folds them back into the
+/// spendable balance cache. `tx_hash` ties the entry to the `Unstake` tx that
+/// created it, so a single-block fork reorg can revert exactly that entry.
+#[derive(Debug, Clone)]
+pub(crate) struct UnbondEntry {
+    amount: u64,
+    unlock_height: u64,
+    tx_hash: String,
+}
+
 /// A transaction whose signature has been verified by [`Ledger::verify_tx`].
 ///
 /// C5: this is a **proof-carrying token**. The authoritative admission method
@@ -49,6 +114,13 @@ impl VerifiedTx {
 }
 
 /// The ATN distributed ledger
+///
+/// `Clone` backs GADGET-5B's **validate-before-commit** fork reconciliation: a
+/// competing multi-block fork is trial-applied on a clone and committed only if
+/// the whole fork integrates cleanly, so a malformed fork can never truncate the
+/// live chain (AUDIT-BLK-2 generalized). The clone happens only on a rare
+/// partition-heal reorg, never on the steady-state path.
+#[derive(Clone)]
 pub struct Ledger {
     pub chain: Vec<Block>,
     pending: Vec<Transaction>,
@@ -65,28 +137,67 @@ pub struct Ledger {
     /// recent_txs() reads from this in O(limit) instead of cloning + sorting
     /// O(n log n).
     recent_deque: VecDeque<Transaction>,
+    /// ONCHAIN-STAKE-1 §1: per-account **bonded** stake in µQTA — the on-chain
+    /// consensus weight (ADR-002). Maintained at **block-application** time
+    /// (block-index-anchored), so it is a pure function of the chain and identical
+    /// on every node. This is what [`Ledger::validator_stakes`] feeds to the
+    /// validator set, closing the second half of the fork vector (the first half
+    /// — reputation in the weight — was closed by STAKE-WEIGHT-1).
+    staked: HashMap<String, u64>,
+    /// ONCHAIN-STAKE-1 §1: per-account list of **unbonding** entries — stake that
+    /// an `Unstake` moved out of `staked` but that is not yet spendable. Each entry
+    /// matures (folds back into `balance_cache`) once the chain reaches its
+    /// `unlock_height`. Also chain-derived, so it survives restart/sync identically.
+    unbonding: HashMap<String, Vec<UnbondEntry>>,
 }
 
 impl Ledger {
-    /// Fixed genesis timestamp — deterministic across all nodes. The genesis
-    /// HASH is a constant (`BLAKE3("QUANTA_GENESIS_2026")`) independent of this
-    /// field, so reading the wall clock here only made the genesis `Block`
-    /// differ per node for no benefit. Phase 0 (Constitution §3): the ledger
-    /// constructor performs no system-clock read.
+    /// Fixed genesis timestamp — deterministic across all nodes (no wall-clock
+    /// read; Phase 0, Constitution §3). PQ-MIG-5: the genesis HASH is no longer a
+    /// standalone literal — it is the **canonical block hash**
+    /// ([`Self::block_hash_hex`]) over the genesis allocation, so it commits to the
+    /// initial state and two nodes building the same genesis derive the same hash
+    /// byte-for-byte (C1).
     const GENESIS_TIMESTAMP: &str = "2026-01-01T00:00:00+00:00";
 
+    /// Default ledger: an **EMPTY** genesis — `genesis_with_allocation(&[])`.
+    /// PQ-MIG-5: the default chain carries **zéro premine** (offre 0 au bloc 0,
+    /// bloc de genèse sans transaction), preserving the mission invariant. A
+    /// non-empty initial distribution is a §12 decision (indécise, pré-genèse);
+    /// the genesis machinery that would encode it is
+    /// [`Self::genesis_with_allocation`], built and exercised by the PQ-MIG-5 teeth.
     pub fn new() -> Self {
-        // Genesis block
+        Self::genesis_with_allocation(&[])
+    }
+
+    /// PQ-MIG-5 §1 — build a ledger whose **genesis block** encodes an initial
+    /// allocation: the mapping `(adresse ML-DSA, solde dépensable µQTA, enjeu
+    /// µQTA)`. The genesis is a **pure, deterministic function** of `allocation`
+    /// (same mapping ⇒ byte-identical genesis block + hash, C1) and **conserves
+    /// exactly** at block 0: `miné == Σ(solde + enjeu)` — the genesis stake comes
+    /// out of the allocated value, never created on top (§3).
+    ///
+    /// Determinism/IO: pure — no wall clock, no entropy, no `HashMap` iteration in
+    /// the genesis bytes (the allocation is consumed in slice order; the derived
+    /// state goes through [`Self::rebuild_cache`], whose moves are additive). The
+    /// `addresses` are PQ-MIG-2 ML-DSA addresses `BLAKE3(ADDR_DOMAIN ‖ clé)`; this
+    /// builder does not need the keys (an address only needs its key to be *spent*,
+    /// via `verify_tx`, in a later block).
+    pub fn genesis_with_allocation(allocation: &[(&str, u64, u64)]) -> Self {
+        let txs = Self::genesis_transactions(allocation);
+        let prev_hash = "0".repeat(64);
+        let hash = Self::block_hash_hex(0, &prev_hash, Self::GENESIS_TIMESTAMP, "GENESIS", &txs);
+        let genesis_hashes: Vec<String> = txs.iter().map(|t| t.hash.clone()).collect();
         let genesis = Block {
             index: 0,
             timestamp: Self::GENESIS_TIMESTAMP.to_string(),
-            transactions: vec![],
-            prev_hash: "0".repeat(64),
-            hash: hex::encode(blake3::hash(b"QUANTA_GENESIS_2026").as_bytes()),
+            transactions: txs,
+            prev_hash,
+            hash,
             miner: "GENESIS".into(),
             energy_kwh: 0.0,
         };
-        Self {
+        let mut ledger = Self {
             chain: vec![genesis],
             pending: vec![],
             tx_counter: 0,
@@ -94,8 +205,157 @@ impl Ledger {
             account_nonces: HashMap::new(),
             balance_cache: HashMap::new(),
             recent_deque: VecDeque::new(),
+            staked: HashMap::new(),
+            unbonding: HashMap::new(),
+        };
+        // PQ-MIG-5 §1+§3: derive balance_cache + staked/unbonding from the genesis
+        // block — the SINGLE source of truth, exactly as a restore would — so the
+        // initial state is a pure function of the allocation and conservation holds
+        // at block 0. Record the genesis tx hashes for anti-replay.
+        ledger.rebuild_cache();
+        ledger.seen_tx_hashes.extend(genesis_hashes);
+        ledger
+    }
+
+    /// PQ-MIG-5 §1 — assemble the deterministic genesis transaction list from an
+    /// allocation mapping. Empty mapping ⇒ **no transactions** (zéro premine, the
+    /// default). Otherwise: a SINGLE `Mining` mint of the whole allocation
+    /// `Σ(solde + enjeu)` to the first account (one reward per block, ≤ the
+    /// per-block emission bound at supply 0), then **balance-neutral** `Transfer`s
+    /// distributing every other account's full share, then a `Stake` per validator
+    /// (enjeu > 0). Conservation is exact by construction (`Σ Mining == Σ(solde +
+    /// enjeu)`; every later tx only MOVES value). Order is slice order — no map.
+    fn genesis_transactions(allocation: &[(&str, u64, u64)]) -> Vec<Transaction> {
+        if allocation.is_empty() {
+            return Vec::new();
+        }
+        let total_minted: u64 = allocation
+            .iter()
+            .map(|(_, bal, stake)| bal.saturating_add(*stake))
+            .sum();
+        let treasury = allocation[0].0;
+        let mut txs = Vec::new();
+        // ① one mint of the entire allocation to the first account (the distributor).
+        txs.push(Self::genesis_tx(
+            "genesis_mint",
+            "NETWORK",
+            treasury,
+            total_minted,
+            TxType::Mining,
+        ));
+        // ② distribute every OTHER account's full share (solde + enjeu) from it.
+        for (addr, bal, stake) in allocation.iter().skip(1) {
+            let share = bal.saturating_add(*stake);
+            if share > 0 {
+                txs.push(Self::genesis_tx(
+                    &format!("genesis_alloc_{addr}"),
+                    treasury,
+                    addr,
+                    share,
+                    TxType::Transfer,
+                ));
+            }
+        }
+        // ③ bond each validator's stake (enjeu > 0), in declaration order.
+        for (addr, _, stake) in allocation.iter() {
+            if *stake > 0 {
+                txs.push(Self::genesis_tx(
+                    &format!("genesis_stake_{addr}"),
+                    addr,
+                    Self::STAKE_SINK,
+                    *stake,
+                    TxType::Stake,
+                ));
+            }
+        }
+        txs
+    }
+
+    /// PQ-MIG-5 §1 — build ONE deterministic genesis transaction. Genesis txs are
+    /// **system-constructed**: never gossiped, never `verify_tx`'d (genesis has no
+    /// `prev`, so `validate_block_against_prev` never runs on it). The `Mining`
+    /// mint is synthetic (`from = NETWORK`); the distributing `Transfer`/`Stake`
+    /// carry no signature. Each id is a stable string and the hash binds the
+    /// content via the canonical pre-image, so the genesis Merkle root — hence the
+    /// genesis block hash — is byte-identical on every node (C1).
+    fn genesis_tx(id: &str, from: &str, to: &str, amount: u64, tx_type: TxType) -> Transaction {
+        let ts = Self::GENESIS_TIMESTAMP;
+        let payload = Self::tx_signing_preimage(id, from, to, amount, ts, &tx_type, 0, "");
+        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        Transaction {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            amount,
+            tx_type,
+            timestamp: ts.to_string(),
+            signature: String::new(),
+            hash,
+            nonce: 0,
+            pq_signature: None,
+            pq_public_key: None,
         }
     }
+
+    /// BLK-HASH-1 / PQ-MIG-5 §1 — the canonical block hash: BLAKE3 over
+    /// `index:prev_hash:ts:miner:len:merkle_root`, where the Merkle root commits to
+    /// each tx's content + signature + ML-DSA authority layer. Shared verbatim by
+    /// [`Self::seal_block_at`] (sealed blocks), [`Self::validate_block_against_prev`]
+    /// (received blocks), and [`Self::genesis_with_allocation`] (the genesis block)
+    /// so the three can never drift — the genesis hash is computed by the SAME block
+    /// hashing, domain-separated by `index = 0`, `prev_hash = 0×64`,
+    /// `miner = "GENESIS"`.
+    fn block_hash_hex(
+        index: u64,
+        prev_hash: &str,
+        ts: &str,
+        miner: &str,
+        txs: &[Transaction],
+    ) -> String {
+        let tx_root = Self::compute_merkle_root(txs);
+        let payload = format!(
+            "{}:{}:{}:{}:{}:{}",
+            index,
+            prev_hash,
+            ts,
+            miner,
+            txs.len(),
+            tx_root
+        );
+        hex::encode(blake3::hash(payload.as_bytes()).as_bytes())
+    }
+
+    /// 🛑 PQ-MIG-5 §2 — **PLACEHOLDER DEV** genesis ML-DSA addresses (§12 réglable,
+    /// **jamais** définitif). Chacune est l'adresse PQ-MIG-2
+    /// `BLAKE3(ADDR_DOMAIN ‖ clé_publique_ML-DSA)` d'une clé de test dérivée d'une
+    /// graine figée (`seeded_identity(5_000_00N)`) ; le test
+    /// `pqmig5_genesis_addresses_bind_their_seeds` épingle ce lien. Test-only — le
+    /// défaut `new()` n'alloue rien (zéro premine).
+    #[cfg(test)]
+    pub(crate) const GENESIS_ADDR_0: &str =
+        "f9d618b390aa1596ec3ccfdaffd32c35b7ac3eadd3e08cb741c7973f0ec2e1d2";
+    #[cfg(test)]
+    pub(crate) const GENESIS_ADDR_1: &str =
+        "07ac1346445df462d00d4cee9f00a39b438c3d87163093e31e7137c3cce01c6e";
+    #[cfg(test)]
+    pub(crate) const GENESIS_ADDR_2: &str =
+        "76e709edc6e3b0b223f91a1d4dd74ce2d63623e50c06146761a25a301886aedd";
+
+    /// 🛑 PQ-MIG-5 §1–§2 — **PLACEHOLDER DEV** genesis allocation (§12 réglable,
+    /// **jamais** figé définitif). Mapping `adresse ML-DSA → (solde dépensable
+    /// µQTA, enjeu µQTA)`. La distribution réelle des tokens est **indécise**
+    /// (pré-genèse) : ces montants sont **nominaux** et **ne promettent rien** —
+    /// ils existent pour exercer la machinerie de genèse (les dents §5). Le défaut
+    /// `new()` est l'allocation **vide** (zéro premine) ; câbler une vraie
+    /// distribution ici est une décision §12. Conservation (§3) :
+    /// `miné == Σ(solde + enjeu)`. Deux validateurs initiaux (enjeu > 0), un
+    /// porteur simple (enjeu 0) — total miné 100 QTA (≤ borne d'émission/bloc).
+    #[cfg(test)]
+    pub(crate) const DEV_GENESIS_ALLOCATION: &[(&str, u64, u64)] = &[
+        (Self::GENESIS_ADDR_0, 50 * MICRO, 10 * MICRO),
+        (Self::GENESIS_ADDR_1, 25 * MICRO, 5 * MICRO),
+        (Self::GENESIS_ADDR_2, 10 * MICRO, 0),
+    ];
 
     /// PERF-1: Maximum entries kept in the recent_deque (bounded ring buffer).
     const MAX_RECENT: usize = 500;
@@ -181,6 +441,22 @@ impl Ledger {
 
     /// PERF-1: Apply a transaction's balance effects to the cache.
     fn cache_apply_tx(&mut self, tx: &Transaction) {
+        // ONCHAIN-STAKE-1: a `Stake` flows through the generic balance move below
+        // (`from → STAKE` sink, `STAKE` is NOT synthetic so the coins are credited
+        // to the sink, not destroyed) — this LOCKS the staked funds the instant the
+        // tx is admitted (HARDEN-STAKE-1: a pending Stake's coins can no longer be
+        // double-spent by a concurrent transfer, and conservation stays exact). The
+        // per-account *bonded weight* consensus reads is committed at block time.
+        // An `Unstake`, by contrast, only reclassifies already-locked sink coins
+        // (bonded → unbonding) and has no spendable/sink effect here — it is applied
+        // at block time, anchored to the sealing block's height.
+        if matches!(tx.tx_type, TxType::Unstake) {
+            self.recent_deque.push_back(tx.clone());
+            if self.recent_deque.len() > Self::MAX_RECENT {
+                self.recent_deque.pop_front();
+            }
+            return;
+        }
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
         if !synthetic(&tx.to) {
             *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
@@ -198,6 +474,14 @@ impl Ledger {
     /// PERF-1: Reverse a transaction's balance effects (used during fork
     /// reorg).
     fn cache_revert_tx(&mut self, tx: &Transaction) {
+        // ONCHAIN-STAKE-1: a `Stake`'s `from → STAKE` move IS reverted here (the
+        // generic path below: it credits `from` back and debits the sink), so an
+        // evicted/reorged pending Stake releases its lock correctly. An `Unstake`
+        // had no spendable/sink effect at this layer; its block-time bonded-weight
+        // effect is reverted by `revert_block_stake_effects` on a fork-reorg pop.
+        if matches!(tx.tx_type, TxType::Unstake) {
+            return;
+        }
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
         if !synthetic(&tx.to) {
             *self.balance_cache.entry(tx.to.clone()).or_insert(0) -= tx.amount as i128;
@@ -212,31 +496,208 @@ impl Ledger {
     fn rebuild_cache(&mut self) {
         self.balance_cache.clear();
         self.recent_deque.clear();
+        // ONCHAIN-STAKE-1: the stake state is also chain-derived, so a restore
+        // rebuilds it from scratch (block-index-anchored) — identical to a node
+        // that was never restarted.
+        self.staked.clear();
+        self.unbonding.clear();
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        // ONCHAIN-STAKE-1: a `Stake`'s `from → STAKE` spendable move replays through
+        // the generic loop (same as live `cache_apply_tx`). Only `Unstake` is
+        // excluded here — it has no spendable effect; its bonded-weight reclassify +
+        // the unbonding/maturation are replayed per chain block below, anchored to
+        // `block.index`, exactly as live block application does.
+        let is_stake = |t: &TxType| matches!(t, TxType::Unstake);
         for block in &self.chain {
             for tx in &block.transactions {
+                if !is_stake(&tx.tx_type) {
+                    if !synthetic(&tx.to) {
+                        *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+                    }
+                    if !synthetic(&tx.from) {
+                        *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+                    }
+                }
+                self.recent_deque.push_back(tx.clone());
+            }
+        }
+        for tx in &self.pending {
+            if !is_stake(&tx.tx_type) {
                 if !synthetic(&tx.to) {
                     *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
                 }
                 if !synthetic(&tx.from) {
                     *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
                 }
-                self.recent_deque.push_back(tx.clone());
-            }
-        }
-        for tx in &self.pending {
-            if !synthetic(&tx.to) {
-                *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
-            }
-            if !synthetic(&tx.from) {
-                *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
             }
             self.recent_deque.push_back(tx.clone());
+        }
+        // Replay the on-chain stake state block by block (one clone at a time, not
+        // the whole chain) so `staked`/`unbonding` and the matured-fund credits are
+        // reconstructed deterministically from the chain.
+        for i in 0..self.chain.len() {
+            let block = self.chain[i].clone();
+            self.apply_block_stake_effects(&block);
         }
         // Trim deque to MAX_RECENT
         while self.recent_deque.len() > Self::MAX_RECENT {
             self.recent_deque.pop_front();
         }
+    }
+
+    // ── ONCHAIN-STAKE-1: on-chain stake state (block-index-anchored) ─────────
+
+    /// ONCHAIN-STAKE-1: the synthetic **locked-stake sink** address. A `Stake`
+    /// moves coins `pk → STAKE` (a balance-NEUTRAL transfer, like any other), so
+    /// the staked coins are debited from the staker's spendable balance the moment
+    /// the tx is admitted to the mempool — **locking** them (HARDEN-STAKE-1: this
+    /// is what prevents a pending Stake's coins from being double-spent by a
+    /// concurrent transfer, and what keeps conservation exact: nothing is created
+    /// or destroyed, value just sits in the sink). The per-account *bonded* weight
+    /// that consensus reads (`staked`) is committed separately at block time. Like
+    /// `BURN`/`ESCROW`, `STAKE` is excluded from `all_balances` (it is not a
+    /// spendable holder); unlike `BURN`, it is **not** synthetic in the cache, so
+    /// the move is balance-neutral and the locked coins are conserved, not burned.
+    pub(crate) const STAKE_SINK: &str = "STAKE";
+
+    /// Commit a freshly-applied block's per-account **bonded stake** (the consensus
+    /// weight), then mature any unbonding entry the block's height has reached.
+    /// Called right after a block is pushed to the chain (seal, happy-path
+    /// integrate, fork-reorg winner) and during `rebuild_cache`. Every quantity is
+    /// derived from the chain and **anchored to `block.index`**, so two nodes that
+    /// hold the same chain compute byte-identical `staked`/`unbonding` maps — the
+    /// property §7 verifies.
+    ///
+    /// The **spendable debit** for a Stake (and its conserving credit to the
+    /// `STAKE` sink) already happened at mempool time via `cache_apply_tx` — here
+    /// we only commit the bonded weight, so a pending Stake locks funds immediately
+    /// but only weighs consensus once sealed.
+    ///
+    /// - **Stake**: bond `amount` into `staked` (consensus weight).
+    /// - **Unstake**: move `amount` out of `staked` into a new unbonding entry that
+    ///   unlocks at `block.index + UNBONDING_PERIOD_BLOCKS` (the coins stay in the
+    ///   `STAKE` sink — still locked — until maturation returns them).
+    /// - **maturation**: see [`Self::mature_unbonding`].
+    fn apply_block_stake_effects(&mut self, block: &Block) {
+        for tx in &block.transactions {
+            match tx.tx_type {
+                TxType::Stake => {
+                    *self.staked.entry(tx.from.clone()).or_insert(0) += tx.amount;
+                }
+                TxType::Unstake => {
+                    let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
+                    *bonded = bonded.saturating_sub(tx.amount);
+                    if *bonded == 0 {
+                        self.staked.remove(&tx.from);
+                    }
+                    self.unbonding.entry(tx.from.clone()).or_default().push(UnbondEntry {
+                        amount: tx.amount,
+                        unlock_height: block.index.saturating_add(UNBONDING_PERIOD_BLOCKS),
+                        tx_hash: tx.hash.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.mature_unbonding(block.index);
+    }
+
+    /// Return every unbonding entry whose `unlock_height <= height` from the
+    /// `STAKE` sink to the owner's spendable balance (and drop it) — a conserving
+    /// `STAKE → pk` move. Idempotent and **height-indexed** (never the wall clock):
+    /// re-running at the same or a higher height releases each entry exactly once.
+    /// The moves are additive, so the final cache is independent of `HashMap`
+    /// iteration order (Constitution §3 determinism).
+    pub(crate) fn mature_unbonding(&mut self, height: u64) {
+        let mut matured: Vec<(String, u64)> = Vec::new();
+        for (pk, entries) in self.unbonding.iter_mut() {
+            entries.retain(|e| {
+                if e.unlock_height <= height {
+                    matured.push((pk.clone(), e.amount));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        self.unbonding.retain(|_, v| !v.is_empty());
+        for (pk, amount) in matured {
+            // Conserving move: the locked coins leave the sink and become spendable.
+            *self.balance_cache.entry(Self::STAKE_SINK.to_string()).or_insert(0) -= amount as i128;
+            *self.balance_cache.entry(pk).or_insert(0) += amount as i128;
+        }
+    }
+
+    /// Reverse the **bonded-weight** effects of a block popped during a fork reorg.
+    /// The spendable/sink balance of a Stake is reverted by `cache_revert_tx` (the
+    /// reorg's cache-revert loop), so here we only undo the `staked`/`unbonding`
+    /// bookkeeping. **Maturation is intentionally NOT un-done**: it is keyed on the
+    /// chain *height*, and the replacement block sits at the **same** height, so a
+    /// matured entry stays matured across the swap. This is sound because fork
+    /// resolution here is single-block (≤1 deep) and `UNBONDING_PERIOD_BLOCKS ≫ 1`,
+    /// so no reorg can ever span an unbonding maturation.
+    fn revert_block_stake_effects(&mut self, block: &Block) {
+        for tx in &block.transactions {
+            match tx.tx_type {
+                TxType::Stake => {
+                    let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
+                    *bonded = bonded.saturating_sub(tx.amount);
+                    if *bonded == 0 {
+                        self.staked.remove(&tx.from);
+                    }
+                }
+                TxType::Unstake => {
+                    *self.staked.entry(tx.from.clone()).or_insert(0) += tx.amount;
+                    if let Some(entries) = self.unbonding.get_mut(&tx.from) {
+                        if let Some(pos) = entries.iter().position(|e| e.tx_hash == tx.hash) {
+                            entries.remove(pos);
+                        }
+                        if entries.is_empty() {
+                            self.unbonding.remove(&tx.from);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// ONCHAIN-STAKE-1: bonded stake of an account (µQTA) — the consensus weight.
+    pub fn staked_of(&self, pk: &str) -> u64 {
+        self.staked.get(pk).copied().unwrap_or(0)
+    }
+
+    /// ONCHAIN-STAKE-1 §5: total bonded stake across all accounts (µQTA). Counts
+    /// toward conservation as a **locked** balance (not destroyed).
+    pub fn staked_total(&self) -> u64 {
+        self.staked.values().sum()
+    }
+
+    /// ONCHAIN-STAKE-1 §5: total unbonding stake across all accounts (µQTA) —
+    /// locked, not yet spendable, **not** destroyed. Also counts toward conservation.
+    pub fn unbonding_total(&self) -> u64 {
+        self.unbonding.values().flatten().map(|e| e.amount).sum()
+    }
+
+    /// ONCHAIN-STAKE-1: total amount this account currently has unbonding (µQTA).
+    pub fn unbonding_of(&self, pk: &str) -> u64 {
+        self.unbonding
+            .get(pk)
+            .map(|v| v.iter().map(|e| e.amount).sum())
+            .unwrap_or(0)
+    }
+
+    /// ONCHAIN-STAKE-1 §4: the on-chain stake snapshot that feeds the validator
+    /// set — `pk → bonded µQTA`, derived purely from the chain (zero locally
+    /// measured input), so every node at the same chain state builds the **same**
+    /// validator set. This is the source `build_validator_set` now reads, replacing
+    /// the node-local reputation leaderboard and closing the fork vector.
+    pub fn validator_stakes(&self) -> HashMap<String, u64> {
+        self.staked
+            .iter()
+            .filter(|(_, &v)| v > 0)
+            .map(|(k, &v)| (k.clone(), v))
+            .collect()
     }
 
     // ── B2: Nonce management ────────────────────────────────────────────
@@ -251,6 +712,18 @@ impl Ledger {
     pub(crate) fn increment_nonce(&mut self, pk: &str) {
         let entry = self.account_nonces.entry(pk.to_string()).or_insert(0);
         *entry += 1;
+    }
+
+    /// TX-AUTH-NONCE-1 §1: set an account's nonce high-water directly in **O(1)**
+    /// (monotonic — never lowers it). Replaces a `for _ in current..new_hw`
+    /// increment loop that, with an attacker-supplied nonce near `u64::MAX`,
+    /// iterated ~2^64 times under the ledger write lock (global hang / DoS). The
+    /// end state is identical to the loop's (high-water == `new_hw`).
+    pub(crate) fn raise_nonce_high_water(&mut self, pk: &str, high_water: u64) {
+        let entry = self.account_nonces.entry(pk.to_string()).or_insert(0);
+        if high_water > *entry {
+            *entry = high_water;
+        }
     }
 
     /// Total circulating supply (mined - burned), in µQTA.
@@ -460,6 +933,112 @@ impl Ledger {
         Ok(tx)
     }
 
+    // ── ONCHAIN-STAKE-1 §2 / §3: Stake & Unstake transactions ────────────────
+
+    /// ONCHAIN-STAKE-1 §2: build a signed **Stake** tx locking `amount` µQTA of
+    /// spendable balance into the bonded `staked` pool. The bonding (and the
+    /// matching spendable debit) takes effect when the tx is **sealed into a
+    /// block** — see `apply_block_stake_effects` — so the unlock arithmetic for a
+    /// later `Unstake` is anchored to a chain height every node agrees on.
+    ///
+    /// `to` is the synthetic marker `"STAKE"`; the tx is still signed by `from`
+    /// (it is **not** signature-exempt, unlike `NETWORK`/`ESCROW`), so no peer can
+    /// forge a stake on someone else's behalf.
+    pub fn stake_tx(
+        &mut self,
+        from: &str,
+        amount: u64,
+        crypto: &CryptoEngine,
+    ) -> Result<Transaction, String> {
+        self.stake_tx_at(from, amount, crypto, Utc::now().to_rfc3339(), false)
+    }
+
+    /// Injected-time / injected-entropy core of [`Self::stake_tx`] for the
+    /// deterministic harness (mirrors `transfer_tx_at`).
+    pub fn stake_tx_at(
+        &mut self,
+        from: &str,
+        amount: u64,
+        crypto: &CryptoEngine,
+        ts: String,
+        det_sign: bool,
+    ) -> Result<Transaction, String> {
+        if amount == 0 {
+            return Err("Montant invalide".into());
+        }
+        // Lock only spendable funds. `balance_of` already nets pending outflows.
+        let spendable = self.balance_of(from);
+        if spendable < amount {
+            return Err(format!(
+                "Solde insuffisant pour staker: {:.6} QUANTA",
+                spendable as f64 / MICRO as f64
+            ));
+        }
+        let tx = self.build_signed_tx_at(from, "STAKE", amount, TxType::Stake, crypto, ts, det_sign)?;
+        if !self.seen_tx_hashes.insert(tx.hash.clone()) {
+            return Err("Transaction déjà traitée (replay détecté)".into());
+        }
+        // No spendable-balance effect at mempool time (applied on seal); this only
+        // records the tx in the recent deque + mempool.
+        self.cache_apply_tx(&tx);
+        self.pending.push(tx.clone());
+        Ok(tx)
+    }
+
+    /// ONCHAIN-STAKE-1 §3: build a signed **Unstake** tx beginning to unlock
+    /// `amount` µQTA of bonded stake. On seal it moves `amount` from `staked` into
+    /// an unbonding entry that becomes spendable only once the chain reaches
+    /// `height_at_seal + UNBONDING_PERIOD_BLOCKS`. Rejected if the account does not
+    /// currently have at least `amount` **bonded** (only sealed stake counts).
+    pub fn unstake_tx(
+        &mut self,
+        from: &str,
+        amount: u64,
+        crypto: &CryptoEngine,
+    ) -> Result<Transaction, String> {
+        self.unstake_tx_at(from, amount, crypto, Utc::now().to_rfc3339(), false)
+    }
+
+    /// Injected-time / injected-entropy core of [`Self::unstake_tx`].
+    pub fn unstake_tx_at(
+        &mut self,
+        from: &str,
+        amount: u64,
+        crypto: &CryptoEngine,
+        ts: String,
+        det_sign: bool,
+    ) -> Result<Transaction, String> {
+        if amount == 0 {
+            return Err("Montant invalide".into());
+        }
+        // Only **sealed** bonded stake can be unbonded, and an account must not
+        // queue Unstakes whose sum exceeds it (a pending Unstake has no effect
+        // until sealed, so without this guard two pending Unstakes could each pass
+        // the bonded check and over-draw `staked` at seal → fabricated unbonding).
+        let bonded = self.staked_of(from);
+        let pending_unstake: u64 = self
+            .pending
+            .iter()
+            .filter(|t| t.tx_type == TxType::Unstake && t.from == from)
+            .map(|t| t.amount)
+            .sum();
+        if bonded < amount.saturating_add(pending_unstake) {
+            return Err(format!(
+                "Enjeu insuffisant à délier: {:.6} QUANTA bondé ({:.6} déjà en attente de déliement)",
+                bonded as f64 / MICRO as f64,
+                pending_unstake as f64 / MICRO as f64
+            ));
+        }
+        let tx =
+            self.build_signed_tx_at(from, "STAKE", amount, TxType::Unstake, crypto, ts, det_sign)?;
+        if !self.seen_tx_hashes.insert(tx.hash.clone()) {
+            return Err("Transaction déjà traitée (replay détecté)".into());
+        }
+        self.cache_apply_tx(&tx);
+        self.pending.push(tx.clone());
+        Ok(tx)
+    }
+
     /// STRUCT-3: Replay a validated remote transaction into the local ledger.
     /// Called from the gossip dispatcher AFTER signature + nonce verification.
     /// Idempotent via `seen_tx_hashes` dedup. Returns true if the tx was newly
@@ -491,15 +1070,32 @@ impl Ledger {
         }
         let from = tx.from.clone();
         let nonce = tx.nonce;
+        // TX-AUTH-NONCE-1 §1: reject a nonce too far AHEAD of the high-water
+        // BEFORE applying — this bounds the advance so it can never loop ~2^64
+        // under the ledger lock (DoS), independent of authentication. This is
+        // the single high-water advance shared by every caller (the dispatcher's
+        // direct `apply_verified_remote_tx`, the core, and `apply_remote_tx_checked`),
+        // so the bound covers them all.
+        let current = self.get_nonce(&from);
+        if nonce > current.saturating_add(MAX_NONCE_GAP) {
+            // Too far ahead → reject, mutate nothing. Logged (debug, low-spam) so
+            // a genuinely large-but-honest reorder near the bound is diagnosable.
+            log::debug!(
+                "◈ [Ledger] tx from {} dropped: nonce {} too far ahead of high-water {} (max gap {})",
+                short(&from, 12),
+                nonce,
+                current,
+                MAX_NONCE_GAP
+            );
+            return false;
+        }
         let applied = self.replay_remote_tx(tx);
         if applied {
             // AUDIT-TX-2: high-water = max(current, nonce + 1) so out-of-order
-            // arrivals never roll the counter backwards.
-            let current = self.get_nonce(&from);
+            // arrivals never roll the counter backwards. Direct O(1) set (no
+            // loop) — see `raise_nonce_high_water`.
             let new_hw = current.max(nonce.saturating_add(1));
-            for _ in current..new_hw {
-                self.increment_nonce(&from);
-            }
+            self.raise_nonce_high_water(&from, new_hw);
         }
         applied
     }
@@ -577,6 +1173,23 @@ impl Ledger {
     /// MUST carry a valid signature, even if `to == "BURN"`. Previously a
     /// bug allowed any peer to forge `from=victim, to=BURN` txs over gossip
     /// because `to == "BURN"` short-circuited the check.
+    /// PQ-MIG-3B §1 — **stateless** post-quantum gate of a transaction's authority
+    /// (ADR-007 b, accounts fully ML-DSA). Returns `Ok(true)` only if, over the
+    /// key-binding pre-image:
+    /// - `tx.from` IS the ML-DSA **address** of the revealed `pq_public_key`, i.e.
+    ///   `lie(from, key)` holds (`from == BLAKE3(ADDR_DOMAIN ‖ pk)`, PQ-MIG-2), and
+    /// - a valid **ML-DSA-65** signature from that revealed key (post-quantum
+    ///   authority — **mandatory**, no Ed25519 fallback).
+    ///
+    /// This closes CRYPTO-ID-1 **intrinsically and statelessly**: the account
+    /// identifier (`from`) cryptographically commits to the key, so an attacker
+    /// cannot attach its own ML-DSA key to a foreign account (a different key ⇒ a
+    /// different `from`), and breaking Ed25519 grants no authority (the address no
+    /// longer derives from an Ed25519 key). The model-(a) Ed25519 co-factor is
+    /// removed from this path; the on-chain binding registry
+    /// ([`Self::binding_violations`]) is retained at validation/seal as a redundant
+    /// backstop but is now subsumed by this intrinsic check. A tx without an ML-DSA
+    /// layer, or whose key does not hash to `from`, is rejected here.
     pub fn verify_tx(tx: &Transaction) -> Result<bool, String> {
         // Synthetic system addresses are exempt — they originate inside the
         // node and are never accepted from gossip.
@@ -589,29 +1202,52 @@ impl Ledger {
             return Err("Transaction non signée".into());
         }
 
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{:?}",
-            tx.id, tx.from, tx.to, tx.amount, tx.timestamp, tx.tx_type
+        // PQ-MIG-3 §3: the ML-DSA authority layer is MANDATORY — a tx without a
+        // non-empty `pq_public_key` + `pq_signature` is rejected (the Ed25519-only
+        // fallback is gone). Empty here ⇒ an Ed25519-only tx ⇒ rejected.
+        let pq_pk_hex = tx.pq_public_key.as_deref().unwrap_or("");
+        let pq_sig_hex = tx.pq_signature.as_deref().unwrap_or("");
+        if pq_pk_hex.is_empty() || pq_sig_hex.is_empty() {
+            return Ok(false);
+        }
+
+        // PQ-MIG-3B §1 — INTRINSIC key↔account binding (the closure of CRYPTO-ID-1).
+        // `tx.from` IS the ML-DSA address `BLAKE3(ADDR_DOMAIN ‖ pk)` (PQ-MIG-2), so
+        // the revealed key MUST hash to it (`lie(from, key)`). A tx revealing any
+        // key other than the one whose address is `from` is REJECTED here — an
+        // attacker can no longer attach its OWN ML-DSA key to someone else's
+        // account, because the account identifier itself cryptographically commits
+        // to the key. This supersedes the model-(a) Ed25519 co-factor + on-chain
+        // binding registry: the binding is now stateless and unforgeable by
+        // construction (a different key ⇒ a different `from`).
+        if !CryptoEngine::address_hex_binds_key_hex(&tx.from, pq_pk_hex) {
+            return Ok(false);
+        }
+
+        // TX-AUTH-NONCE-1 §2 + PQ-MIG-3 §2: the pre-image binds `tx.nonce` AND the
+        // revealed ML-DSA key — the signature covers them, so a third party can
+        // alter neither the nonce nor the revealed key of a signed tx.
+        let payload = Self::tx_signing_preimage(
+            &tx.id, &tx.from, &tx.to, tx.amount, &tx.timestamp, &tx.tx_type, tx.nonce, pq_pk_hex,
         );
 
-        let classical = hex::decode(&tx.signature).map_err(|_| "Signature invalide")?;
-        let quantum = match tx.pq_signature.as_deref() {
-            Some(hex_str) if !hex_str.is_empty() => {
-                hex::decode(hex_str).map_err(|_| "PQ signature invalide")?
-            }
-            _ => Vec::new(),
-        };
-        let pq_pk_hex = tx.pq_public_key.as_deref().unwrap_or("");
+        // TX-AUTH-NONCE-1 §3: recompute the content hash and REJECT a wire hash
+        // that disagrees — no hash malleability (dedup `seen_tx_hashes` is keyed
+        // on `tx.hash`; a forged hash must not slip past as "unseen").
+        let recomputed = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        if tx.hash != recomputed {
+            return Ok(false);
+        }
 
-        let hybrid_sig = crate::security::hybrid_crypto::HybridSignature { classical, quantum };
-        Ok(
-            crate::security::hybrid_crypto::HybridIdentity::verify_hybrid(
-                &tx.from,
-                pq_pk_hex,
-                payload.as_bytes(),
-                &hybrid_sig,
-            ),
-        )
+        // PQ-MIG-3B §1 — authority is PURE ML-DSA: a valid ML-DSA-65 signature from
+        // the revealed (address-bound) key over the pre-image, via the project's
+        // single ML-DSA verifier ([`CryptoEngine::verify_pq`]). The Ed25519
+        // co-factor is GONE from the authority path (ADR-007 b, "sans astérisque"):
+        // breaking Ed25519 grants no power over an account, since `from` no longer
+        // derives from an Ed25519 key. (`tx.signature` may still carry a vestigial
+        // Ed25519 signature for wire-compat; it is NOT consulted for authority.)
+        let pq_sig = hex::decode(pq_sig_hex).map_err(|_| "PQ signature invalide")?;
+        Ok(CryptoEngine::verify_pq(pq_pk_hex, payload.as_bytes(), &pq_sig))
     }
 
     /// Verify the integrity of the entire chain:
@@ -661,17 +1297,25 @@ impl Ledger {
     /// extraction of `seal_block`: identical Merkle root, hash pre-image, and
     /// block structure — only the timestamp source changes.
     pub fn seal_block_at(&mut self, miner: &str, energy_kwh: f64, timestamp: String) -> Block {
-        let prev = match self.chain.last() {
-            Some(b) => b,
-            None => {
-                log::error!("◈ [Ledger] CRITICAL: chain is empty — this should never happen");
-                // Re-create genesis to recover
-                *self = Self::new();
-                self.chain.last().unwrap() // genesis exists now
-            }
+        // Resolve prev (recover genesis if the chain is somehow empty), capturing
+        // only OWNED data so no borrow of `self` outlives the mutations below.
+        if self.chain.last().is_none() {
+            log::error!("◈ [Ledger] CRITICAL: chain is empty — this should never happen");
+            *self = Self::new(); // Re-create genesis to recover
+        }
+        let (prev_index, prev_hash) = {
+            let prev = self.chain.last().expect("genesis exists after recovery");
+            (prev.index, prev.hash.clone())
         };
-        let index = prev.index + 1;
+        let index = prev_index + 1;
         let ts = timestamp;
+        // COVER-2 §1–§2: on-chain spendable balances BEFORE this block, via the
+        // COVER-1 helper (single source of truth) — chain-only, deterministic.
+        let onchain_before = {
+            let prev = self.chain.last().expect("genesis exists");
+            self.onchain_spendable_before(prev)
+        };
+
         // EMIT-1 (Option A — one reward per block): fold the pending mining
         // rewards into a SINGLE coalesced `NETWORK→miner` tx before sealing.
         // Production mines once per tick but seals every `SEAL_EVERY_N_TICKS`
@@ -679,33 +1323,68 @@ impl Ledger {
         // bundling them keeps the chain at exactly one reward per block (the
         // §4.2 rule peers enforce + the §4.3 emission invariant). A block with
         // ≤1 mining tx is returned byte-identical to the pre-EMIT-1 seal.
-        let txs = Self::coalesce_block_rewards(std::mem::take(&mut self.pending), miner, index, &ts);
+        let candidate = Self::coalesce_block_rewards(std::mem::take(&mut self.pending), miner, index, &ts);
+
+        // COVER-2 §2: build a VALID-BY-CONSTRUCTION block — EXCLUDE any uncovered
+        // tx (the SAME sequential rule validation uses) rather than refusing to
+        // seal. An excluded tx already applied its balance effect at admission
+        // (`cache_apply_tx`), so we REVERT it to keep the `cache == chain+pending`
+        // invariant, then DROP it (§4: evicted — it stays in `seen_tx_hashes`, so
+        // it is not re-admitted; if its funding later lands on-chain it re-enters
+        // this node via block sync, not the mempool). The sealed block thus holds
+        // ONLY covered txs and always passes `validate_block_against_prev` (§3).
+        // PQ-MIG-3 §4 (COVER-2 symmetry): also exclude any tx that VIOLATES the
+        // ML-DSA key binding (a foreign/forged key for an already-bound account),
+        // using the SAME rule `validate_block_against_prev` rejects with — so a
+        // self-sealed block is binding-valid by construction. A node's own txs all
+        // carry its consistent primary key, so this only fires on a mempool that
+        // somehow holds another account's mismatched tx.
+        let bindings_before = {
+            let prev = self.chain.last().expect("genesis exists");
+            self.pq_bindings_before(prev)
+        };
+        let uncovered = Self::uncovered_tx_indices(&onchain_before, &candidate);
+        let unbound = Self::binding_violations(&bindings_before, &candidate);
+        let txs = if uncovered.is_empty() && unbound.is_empty() {
+            candidate
+        } else {
+            let drop_idx: HashSet<usize> =
+                uncovered.into_iter().chain(unbound).collect();
+            let mut kept = Vec::with_capacity(candidate.len());
+            for (i, tx) in candidate.into_iter().enumerate() {
+                if drop_idx.contains(&i) {
+                    log::warn!(
+                        "◈ [Ledger] COVER-2/PQ-MIG-3: excluding uncovered-or-unbound tx {} (from {}) from sealed block #{}",
+                        short(&tx.hash, 12),
+                        short(&tx.from, 12),
+                        index
+                    );
+                    self.cache_revert_tx(&tx); // undo its admission-time cache effect
+                } else {
+                    kept.push(tx);
+                }
+            }
+            kept
+        };
 
         // BLK-HASH-1: the block hash commits to tx CONTENT via the Merkle root
-        // (content+signature leaves) AND to the `miner` — shared verbatim with
-        // `validate_block_against_prev` to avoid drift.
-        let tx_root = Self::compute_merkle_root(&txs);
-
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{}",
-            index,
-            prev.hash,
-            ts,
-            miner,
-            txs.len(),
-            tx_root
-        );
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        // (content+signature leaves) AND to the `miner` — via the shared
+        // `block_hash_hex` (PQ-MIG-5), used verbatim by genesis and validation so
+        // the hashings can never drift.
+        let hash = Self::block_hash_hex(index, &prev_hash, &ts, miner, &txs);
         let block = Block {
             index,
             timestamp: ts,
             transactions: txs,
-            prev_hash: prev.hash.clone(),
+            prev_hash,
             hash,
             miner: miner.into(),
             energy_kwh,
         };
         self.chain.push(block.clone());
+        // ONCHAIN-STAKE-1: apply this block's Stake/Unstake + height-triggered
+        // maturation now that it is the chain tip (block-index-anchored).
+        self.apply_block_stake_effects(&block);
         block
     }
 
@@ -743,10 +1422,10 @@ impl Ledger {
             }
         }
         let id = format!("tx_mint_b{index}");
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{:?}",
-            id, "NETWORK", miner, total, ts, TxType::Mining
-        );
+        // TX-AUTH-NONCE-1: one canonical pre-image everywhere. Synthetic NETWORK
+        // reward → nonce 0 (it is unsigned and `verify_tx`-exempt; block-bound
+        // via the Merkle root over `tx_content_bytes`).
+        let payload = Self::tx_signing_preimage(&id, "NETWORK", miner, total, ts, &TxType::Mining, 0, "");
         let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
         let reward = Transaction {
             id,
@@ -816,11 +1495,16 @@ impl Ledger {
         if block.prev_hash != tip.hash {
             return Err(format!(
                 "prev_hash mismatch: block says {} but tip is {}",
-                &block.prev_hash[..block.prev_hash.len().min(16)],
-                &tip.hash[..tip.hash.len().min(16)]
+                short(&block.prev_hash, 16),
+                short(&tip.hash, 16)
             ));
         }
-        Self::validate_block_against_prev(block, tip)?;
+        // COVER-1: seed the shared validator's coverage check with the on-chain
+        // balances up to the tip (this block extends it). Mempool-free → identical
+        // verdict on every node.
+        let onchain_before = self.onchain_spendable_before(tip);
+        let bindings_before = self.pq_bindings_before(tip);
+        Self::validate_block_against_prev(block, tip, &onchain_before, &bindings_before)?;
         self.validate_block_emission(block)
     }
 
@@ -831,6 +1515,23 @@ impl Ledger {
     /// → inflation arbitraire. Le plafond devient ainsi infalsifiable à
     /// l'échelle réseau.
     fn validate_block_emission(&self, block: &Block) -> Result<(), String> {
+        // Linear (happy-path) emission: the block extends the tip, so the
+        // supply *before* it is the whole current chain's minted total.
+        Self::validate_block_emission_against(block, self.stats().total_mined)
+    }
+
+    /// FORK-CAP-1: emission validation parameterised by `prior_mined` — the
+    /// minted supply that exists **before** this block — so the happy path and
+    /// the fork-reorg path enforce the SAME hard cap + per-block bound from one
+    /// source of truth and can never diverge on emission again. The happy path
+    /// passes the whole chain's `total_mined`; the fork-reorg path passes
+    /// `total_mined` MINUS the tip it replaces (else the popped tip's reward is
+    /// double-counted, over-stating supply and falsely rejecting honest reorgs
+    /// near the cap).
+    pub(crate) fn validate_block_emission_against(
+        block: &Block,
+        prior_mined: u64,
+    ) -> Result<(), String> {
         let block_minted: u64 = block
             .transactions
             .iter()
@@ -840,7 +1541,7 @@ impl Ledger {
         if block_minted == 0 {
             return Ok(());
         }
-        let current = self.stats().total_mined;
+        let current = prior_mined;
         // ① Plafond dur (total) — l'offre ne peut JAMAIS dépasser MAX_SUPPLY.
         if current.saturating_add(block_minted) > crate::p2p::reputation::MAX_SUPPLY_MICRO {
             return Err(format!(
@@ -871,17 +1572,157 @@ impl Ledger {
         Ok(())
     }
 
+    /// COVER-1 §2: the **on-chain** spendable balance of every account just
+    /// before `prev`'s child block — a pure function of the chain up to and
+    /// including `prev`, **never** the pending mempool (a mempool-derived figure
+    /// differs node-to-node and would make the coverage verdict diverge). It
+    /// mirrors the ledger's own balance semantics exactly, so it can never drift:
+    ///
+    /// - generic `from → to` moves, identical to [`Self::cache_apply_tx`] (a
+    ///   `Stake`'s `pk → STAKE` lock flows through here — `STAKE` is not synthetic
+    ///   — so staked coins are correctly debited from `from`);
+    /// - `Unstake` has no spendable effect (it reclassifies already-locked sink
+    ///   coins), exactly as `cache_apply_tx` skips it;
+    /// - height-triggered unbonding **maturation** (`STAKE → pk`), identical to
+    ///   [`Self::mature_unbonding`], so coins whose unlock height is `≤ prev.index`
+    ///   are counted as spendable again.
+    ///
+    /// Both validation paths seed [`Self::validate_block_against_prev`]'s coverage
+    /// loop with this map, so neither the linear nor the fork-reorg path can admit
+    /// an uncovered spend (the FORK-CAP lesson: one check, on the shared
+    /// validator). A `#[cfg(test)]` no-drift guard asserts this equals the live
+    /// cache for a pending-free chain.
+    fn onchain_spendable_before(&self, prev: &Block) -> HashMap<String, i128> {
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        let mut bal: HashMap<String, i128> = HashMap::new();
+        // pk → list of (amount, unlock_height) still locked in the unbonding pool.
+        let mut unbonding: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+        for block in self.chain.iter().filter(|b| b.index <= prev.index) {
+            for tx in &block.transactions {
+                if matches!(tx.tx_type, TxType::Unstake) {
+                    // Bonded → unbonding: no spendable move; the coins stay in the
+                    // STAKE sink until they mature (recorded for the pass below).
+                    unbonding.entry(tx.from.clone()).or_default().push((
+                        tx.amount,
+                        block.index.saturating_add(UNBONDING_PERIOD_BLOCKS),
+                    ));
+                    continue;
+                }
+                if !synthetic(&tx.to) {
+                    *bal.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+                }
+                if !synthetic(&tx.from) {
+                    *bal.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+                }
+            }
+            // Height-triggered maturation — mirrors `mature_unbonding(block.index)`.
+            let height = block.index;
+            let mut matured: Vec<(String, u64)> = Vec::new();
+            for (pk, entries) in unbonding.iter_mut() {
+                entries.retain(|(amount, unlock)| {
+                    if *unlock <= height {
+                        matured.push((pk.clone(), *amount));
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            unbonding.retain(|_, v| !v.is_empty());
+            for (pk, amount) in matured {
+                *bal.entry(Self::STAKE_SINK.to_string()).or_insert(0) -= amount as i128;
+                *bal.entry(pk).or_insert(0) += amount as i128;
+            }
+        }
+        bal
+    }
+
+    /// PQ-MIG-3 §1 — the chain-derived ML-DSA **binding registry** as of `prev`:
+    /// the first-seen `from → pq_public_key` over every sealed, real-sender, signed
+    /// tx up to and including `prev`. A **pure function of the chain** (like
+    /// [`Self::onchain_spendable_before`]), so every node computes the identical
+    /// map and binding validation is deterministic — no extra persisted state.
+    fn pq_bindings_before(&self, prev: &Block) -> HashMap<String, String> {
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        let mut bound: HashMap<String, String> = HashMap::new();
+        for block in self.chain.iter().filter(|b| b.index <= prev.index) {
+            for tx in &block.transactions {
+                if synthetic(&tx.from) {
+                    continue;
+                }
+                if let Some(k) = tx.pq_public_key.as_deref() {
+                    if !k.is_empty() {
+                        bound.entry(tx.from.clone()).or_insert_with(|| k.to_string());
+                    }
+                }
+            }
+        }
+        bound
+    }
+
+    /// PQ-MIG-3 §1 — the **single source of truth** for the ML-DSA key binding,
+    /// mirroring `uncovered_tx_indices` (COVER-1/2). Walks `txs` in order over a
+    /// running binding map seeded from `bindings_before`; returns the indices of
+    /// txs that **violate** the binding — a real-sender signed tx whose
+    /// `pq_public_key` differs from the key already bound to its `from`. The FIRST
+    /// signed tx from an as-yet-unbound `from` **establishes** the binding (immutable
+    /// thereafter) and is not a violation. Synthetic/unsigned txs bind nothing.
+    ///
+    /// This is the **stateful** half of closing CRYPTO-ID-1: once an account's
+    /// independent ML-DSA key is bound, no later tx may swap in a different key — so
+    /// a future Ed25519 break can neither re-bind an attacker's key nor produce the
+    /// bound (independent) key's signature. Used by BOTH validation (reject) and
+    /// seal (exclude), so the two can never disagree (the COVER-2 lesson).
+    fn binding_violations(
+        bindings_before: &HashMap<String, String>,
+        txs: &[Transaction],
+    ) -> Vec<usize> {
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        let mut bound = bindings_before.clone();
+        let mut out = Vec::new();
+        for (i, tx) in txs.iter().enumerate() {
+            if synthetic(&tx.from) {
+                continue;
+            }
+            // A real sender with no ML-DSA key is already rejected by `verify_tx`;
+            // here we only police key *consistency* for keyed txs.
+            let key = match tx.pq_public_key.as_deref() {
+                Some(k) if !k.is_empty() => k,
+                _ => continue,
+            };
+            match bound.get(&tx.from) {
+                Some(existing) if existing != key => out.push(i),
+                Some(_) => {}
+                None => {
+                    bound.insert(tx.from.clone(), key.to_string());
+                }
+            }
+        }
+        out
+    }
+
     /// AUDIT-BLK-2: Stateless block validation against an explicit `prev`.
     /// Used by `integrate_remote_block` during fork reorg, where the relevant
     /// `prev` is the block at `tip.index - 1` rather than the current tip.
     /// Doesn't enforce index continuity (caller checks) but recomputes the
     /// block hash and verifies every transaction signature.
-    fn validate_block_against_prev(block: &Block, prev: &Block) -> Result<(), String> {
+    ///
+    /// COVER-1: also enforces **sequential coverage** against `onchain_before`
+    /// (the on-chain spendable balances up to `prev`, from
+    /// [`Self::onchain_spendable_before`]). Because BOTH integration paths route
+    /// through here, no node can finalize a spend or stake of coins that don't
+    /// exist — on either path (FORK-CAP lesson).
+    fn validate_block_against_prev(
+        block: &Block,
+        prev: &Block,
+        onchain_before: &HashMap<String, i128>,
+        bindings_before: &HashMap<String, String>,
+    ) -> Result<(), String> {
         if block.prev_hash != prev.hash {
             return Err(format!(
                 "prev_hash mismatch: block says {} but prev is {}",
-                &block.prev_hash[..block.prev_hash.len().min(16)],
-                &prev.hash[..prev.hash.len().min(16)]
+                short(&block.prev_hash, 16),
+                short(&prev.hash, 16)
             ));
         }
         // EMIT-1 §4.2 (Option A — one reward per block): at most ONE `Mining`
@@ -920,31 +1761,103 @@ impl Ledger {
             if !Self::verify_tx(tx)? {
                 return Err(format!(
                     "invalid tx signature: {}",
-                    &tx.id[..tx.id.len().min(16)]
+                    short(&tx.id, 16)
                 ));
             }
         }
-        let tx_root = Self::compute_merkle_root(&block.transactions);
-        // BLK-HASH-1: same pre-image as `seal_block_at` — includes `miner` and a
-        // content-binding Merkle root.
-        let expected_payload = format!(
-            "{}:{}:{}:{}:{}:{}",
+        // PQ-MIG-3 §1/§4: enforce the ML-DSA key binding (the stateful half of
+        // closing CRYPTO-ID-1). A block carrying a real-sender tx whose ML-DSA key
+        // ≠ the key already bound to its account is INVALID and rejected whole —
+        // this is the "clé non liée rejetée" guarantee (an attacker cannot attach
+        // its own key to someone else's account). Same single rule the seal path
+        // uses to EXCLUDE (COVER-2 symmetry), so reject/exclude never disagree.
+        let binding_viol = Self::binding_violations(bindings_before, &block.transactions);
+        if let Some(&i) = binding_viol.first() {
+            let tx = &block.transactions[i];
+            return Err(format!(
+                "bloc rejeté : clé ML-DSA non liée — {} présente une clé ≠ celle liée à son compte (CRYPTO-ID-1)",
+                short(&tx.from, 12)
+            ));
+        }
+        // BLK-HASH-1: same canonical hash as production via the shared
+        // `block_hash_hex` (PQ-MIG-5) — includes `miner` and a content-binding
+        // Merkle root.
+        let expected_hash = Self::block_hash_hex(
             block.index,
-            block.prev_hash,
-            block.timestamp,
-            block.miner,
-            block.transactions.len(),
-            tx_root
+            &block.prev_hash,
+            &block.timestamp,
+            &block.miner,
+            &block.transactions,
         );
-        let expected_hash = hex::encode(blake3::hash(expected_payload.as_bytes()).as_bytes());
         if block.hash != expected_hash {
             return Err(format!(
                 "block hash mismatch: declared {} but computed {}",
-                &block.hash[..block.hash.len().min(16)],
-                &expected_hash[..expected_hash.len().min(16)]
+                short(&block.hash, 16),
+                short(&expected_hash, 16)
+            ));
+        }
+        // COVER-1 §2–§3: sequential coverage against the on-chain balance. A block
+        // received from a peer with ANY uncovered real-sender tx is INVALID and
+        // rejected whole — on whichever integration path called us. The coverage
+        // rule itself lives in the shared `uncovered_tx_indices` (COVER-2: same
+        // single source of truth the seal path uses to EXCLUDE, so reject and
+        // exclude can never disagree).
+        let uncovered = Self::uncovered_tx_indices(onchain_before, &block.transactions);
+        if let Some(&i) = uncovered.first() {
+            let tx = &block.transactions[i];
+            return Err(format!(
+                "bloc rejeté : dépense non couverte — {} en {} {} µQTA sans couverture (COVER-1)",
+                short(&tx.from, 12),
+                if matches!(tx.tx_type, TxType::Stake) { "enjeu" } else { "transfère" },
+                tx.amount
             ));
         }
         Ok(())
+    }
+
+    /// COVER-1/COVER-2 — the **single source of truth** for sequential coverage.
+    /// Walks `txs` in declared order over a running balance seeded from
+    /// `onchain_before` (the on-chain spendable state up to the parent, from
+    /// [`Self::onchain_spendable_before`]); returns the indices of the txs that are
+    /// **uncovered** — a REAL-sender `Transfer`/`Stake` whose running balance is
+    /// insufficient at that point. An uncovered tx's effect is **not** applied to
+    /// the running balance (it will be rejected/excluded, so it must not fund later
+    /// txs), while every covered tx, every synthetic-sender tx (`NETWORK`/`ESCROW`
+    /// mint; `BURN` destination-only), and every `Unstake` (no spendable debit)
+    /// applies its move — so **intra-block credits fund later txs** (§3).
+    ///
+    /// Two consumers, one rule: validation ([`Self::validate_block_against_prev`])
+    /// REJECTS the whole block iff this is non-empty (COVER-1); seal
+    /// ([`Self::seal_block_at`]) EXCLUDES exactly these txs to build a
+    /// valid-by-construction block (COVER-2). One rule ⇒ a self-sealed block always
+    /// passes validation.
+    fn uncovered_tx_indices(
+        onchain_before: &HashMap<String, i128>,
+        txs: &[Transaction],
+    ) -> Vec<usize> {
+        let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
+        let mut running: HashMap<String, i128> = onchain_before.clone();
+        let mut uncovered = Vec::new();
+        for (i, tx) in txs.iter().enumerate() {
+            if matches!(tx.tx_type, TxType::Unstake) {
+                continue; // no spendable debit to cover
+            }
+            if !synthetic(&tx.from) {
+                let have = running.get(&tx.from).copied().unwrap_or(0);
+                if have < tx.amount as i128 {
+                    uncovered.push(i);
+                    continue; // excluded/rejected → do NOT move the running balance
+                }
+            }
+            // Mirror `cache_apply_tx` so intra-block credits fund later txs.
+            if !synthetic(&tx.to) {
+                *running.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+            }
+            if !synthetic(&tx.from) {
+                *running.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+            }
+        }
+        uncovered
     }
 
     /// EMIT-1: a synthetic **sender** — `NETWORK` (mining reward) or `ESCROW`
@@ -1048,8 +1961,11 @@ impl Ledger {
                 "◈ [Ledger] Integrated remote block #{} ({} txs, miner={})",
                 block.index,
                 block.transactions.len(),
-                &block.miner[..block.miner.len().min(12)]
+                short(&block.miner, 12)
             );
+            // ONCHAIN-STAKE-1: apply the integrated block's stake effects before
+            // it is moved into the chain (block-index-anchored, identical to seal).
+            self.apply_block_stake_effects(&block);
             self.chain.push(block);
             return Ok(true);
         }
@@ -1062,8 +1978,8 @@ impl Ledger {
                 log::warn!(
                     "◈ [Ledger] FORK at height {} — remote block wins ({}... > {}...)",
                     block.index,
-                    &block.hash[..12],
-                    &tip.hash[..12]
+                    short(&block.hash, 12),
+                    short(&tip.hash, 12)
                 );
                 // AUDIT-BLK-2: Validate FIRST, pop SECOND. The previous order
                 // popped our tip before validate, so a malformed remote block
@@ -1083,7 +1999,30 @@ impl Ledger {
                     return Err("fork block prev_hash doesn't match the would-be new tip".into());
                 }
                 // Standalone validation (sigs + merkle root + recomputed hash).
-                Self::validate_block_against_prev(&block, &prev_for_remote)?;
+                // COVER-1: the reorg winner REPLACES the tip, so its coverage is
+                // checked against the chain WITHOUT that tip (`prev_for_remote` =
+                // chain[tip.index-1]) — the exact same shared validator the linear
+                // path uses, proving the check lives on both paths, not one.
+                let onchain_before = self.onchain_spendable_before(&prev_for_remote);
+                let bindings_before = self.pq_bindings_before(&prev_for_remote);
+                Self::validate_block_against_prev(&block, &prev_for_remote, &onchain_before, &bindings_before)?;
+
+                // FORK-CAP-1: the incoming block REPLACES the tip, so it must
+                // clear the SAME emission validation as the linear path — the
+                // 100M hard cap + the per-block bound. Without this, the
+                // fork-reorg branch let a network adversary mint past the hard
+                // cap (the one monetary safety property that must never cede).
+                // Validate BEFORE popping (AUDIT-BLK-2), against the supply that
+                // would exist WITHOUT the tip we are about to replace, so the
+                // popped tip's own reward is not double-counted.
+                let our_tip_mining: u64 = tip
+                    .transactions
+                    .iter()
+                    .filter(|t| t.tx_type == TxType::Mining)
+                    .map(|t| t.amount)
+                    .sum();
+                let prior_mined = self.stats().total_mined.saturating_sub(our_tip_mining);
+                Self::validate_block_emission_against(&block, prior_mined)?;
 
                 // Now it's safe to mutate state.
                 let our_tip = self.chain.pop().ok_or("chain unexpectedly empty")?;
@@ -1092,6 +2031,10 @@ impl Ledger {
                 for tx in &our_tip.transactions {
                     self.cache_revert_tx(tx);
                 }
+                // ONCHAIN-STAKE-1: revert the popped tip's Stake/Unstake stake-state
+                // effects (single-block reorg; maturation is height-keyed and the
+                // replacement sits at the same height, so it is left intact).
+                self.revert_block_stake_effects(&our_tip);
 
                 // AUDIT-BLK-1: Re-queue txs from our popped tip that are NOT in
                 // the winning remote block, so they aren't lost in the reorg.
@@ -1128,14 +2071,17 @@ impl Ledger {
                     self.seen_tx_hashes.insert(tx.hash.clone());
                     self.cache_apply_tx(tx);
                 }
+                // ONCHAIN-STAKE-1: apply the winner's stake effects (its unlock
+                // heights anchor to the same index the loser used).
+                self.apply_block_stake_effects(&block);
                 self.chain.push(block);
                 return Ok(true);
             } else {
                 log::info!(
                     "◈ [Ledger] FORK at height {} — our block wins ({}... > {}...)",
                     block.index,
-                    &tip.hash[..12],
-                    &block.hash[..12]
+                    short(&tip.hash, 12),
+                    short(&block.hash, 12)
                 );
                 return Ok(false); // keep ours
             }
@@ -1146,6 +2092,96 @@ impl Ledger {
             "block index {} out of range (our tip: {})",
             block.index, tip.index
         ))
+    }
+
+    /// GADGET-5B — **multi-block fork reconciliation** at partition heal. Adopt
+    /// the competing fork `winners` (ascending index; `winners[0]` is a child of a
+    /// block already on our chain — the *common ancestor*) that the GADGET-5A
+    /// GHOST engine selected, reorganizing the chain with **full conservation**:
+    ///
+    /// - the abandoned local branch is **popped**, every block's balance-cache and
+    ///   stake effects **reverted** — so its emission (block rewards) and applied
+    ///   state are undone; no coin survives a dropped branch (EMIT-1 at partition
+    ///   scale: `Σ(spendable+staked+unbonding)+burned == minted` still holds);
+    /// - its **user** txs that the winning fork did not include are **re-queued**
+    ///   (AUDIT-BLK-1), while its **synthetic** rewards are dropped — never
+    ///   re-minted (EMIT-1 §4.1: re-queuing a `NETWORK` reward would double-mint);
+    /// - the winning fork is applied through the SAME linear
+    ///   [`Self::integrate_remote_block`] happy path, so each winner clears the
+    ///   identical coverage + emission + signature + ML-DSA-binding validation a
+    ///   directly-extended block does (no second, weaker validator).
+    ///
+    /// **Finality floor (absolute).** `floor_index` is the last finalized block's
+    /// index; the reorg **refuses** to disturb any block at or below it — a fork
+    /// that would undo finalized history can never win (GADGET-5A §3 / GADGET-3),
+    /// and by accountable safety (GADGET-4) two conflicting finalized branches are
+    /// impossible without ⅓ slashable, so finalized prefixes coincide.
+    ///
+    /// **Validate-before-commit** (AUDIT-BLK-2, generalized to N blocks): the
+    /// reorg runs on a trial **clone**; a single invalid/duplicate winner aborts it
+    /// whole, leaving the live chain byte-for-byte untouched (a malformed fork can
+    /// never truncate us). Returns `Ok(true)` iff it actually reorganized,
+    /// `Ok(false)` if it legitimately kept our chain (floor / unknown root / not a
+    /// clean fork), `Err` only on an invalid winner block.
+    pub fn reorg_to_fork(&mut self, winners: &[Block], floor_index: u64) -> Result<bool, String> {
+        let first = winners.first().ok_or("empty winning fork")?;
+        // Common ancestor = the chain block the fork roots at (its prev_hash).
+        let fork_point = match self.chain.iter().find(|b| b.hash == first.prev_hash) {
+            Some(b) => b.index,
+            None => return Ok(false), // fork roots at a block we don't hold — keep ours
+        };
+        // Finality floor (absolute): never disturb a block at or below the last
+        // finalized one — a fork diverging there contradicts finalized history.
+        if fork_point < floor_index {
+            return Ok(false);
+        }
+        // Trial reorg on a clone — commit only if the WHOLE winning fork integrates
+        // cleanly (no half-applied reorg, no truncation on a bad winner).
+        let mut trial = self.clone();
+        let popped = trial.pop_above(fork_point);
+        for w in winners {
+            match trial.integrate_remote_block(w.clone()) {
+                Ok(true) => {}
+                // A duplicate/rejected winner means the supplied blocks are not a
+                // clean linear fork off the common ancestor → abort, keep our chain.
+                Ok(false) => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        // Re-queue the loser's user txs absent from the winning fork (AUDIT-BLK-1);
+        // drop synthetic-sender rewards so a popped emission is never re-minted.
+        let winner_tx_hashes: HashSet<String> = winners
+            .iter()
+            .flat_map(|b| b.transactions.iter().map(|t| t.hash.clone()))
+            .collect();
+        for blk in popped {
+            for tx in blk.transactions {
+                if winner_tx_hashes.contains(&tx.hash) || Self::is_synthetic_sender(&tx.from) {
+                    continue;
+                }
+                trial.cache_apply_tx(&tx);
+                trial.pending.push(tx);
+            }
+        }
+        *self = trial;
+        Ok(true)
+    }
+
+    /// Pop every block **strictly above** `keep_index` (tip-first), reverting each
+    /// one's balance-cache and stake effects; returns the popped blocks (tip-first)
+    /// for the caller's re-queue pass. Genesis (index 0) is never popped, since the
+    /// caller always passes `keep_index >= floor_index >= 0`.
+    fn pop_above(&mut self, keep_index: u64) -> Vec<Block> {
+        let mut popped = Vec::new();
+        while self.chain.last().map(|b| b.index > keep_index).unwrap_or(false) {
+            let Some(blk) = self.chain.pop() else { break };
+            for tx in &blk.transactions {
+                self.cache_revert_tx(tx);
+            }
+            self.revert_block_stake_effects(&blk);
+            popped.push(blk);
+        }
+        popped
     }
 
     /// BLK-HASH-1: canonical **content** commitment for a tx — a fixed-order,
@@ -1176,7 +2212,11 @@ impl Ledger {
                 let mut h = blake3::Hasher::new();
                 h.update(&[0x00]); // leaf domain separator
                 h.update(Self::tx_content_bytes(tx).as_bytes());
-                h.update(tx.signature.as_bytes()); // bind the signature too
+                h.update(tx.signature.as_bytes()); // bind the Ed25519 signature
+                // PQ-MIG-3 §2: bind the ML-DSA authority layer (key + signature)
+                // into the block hash, so a peer cannot strip or swap it post-seal.
+                h.update(tx.pq_public_key.as_deref().unwrap_or("").as_bytes());
+                h.update(tx.pq_signature.as_deref().unwrap_or("").as_bytes());
                 *h.finalize().as_bytes()
             })
             .collect();
@@ -1212,18 +2252,48 @@ impl Ledger {
 
     /// Compute balance from the incremental cache (in µQTA, saturating at 0).
     /// PERF-1: O(1) via balance_cache instead of O(n) full chain scan.
+    ///
+    /// COVER-1 §4 — the `.max(0)` clamp is REVIEWED and **kept** (the spec's
+    /// "ne force pas" branch). COVER-1 closes uncovered spends at the **block**
+    /// (on-chain) level, so no *sealed* balance can go negative. But this cache is
+    /// **pending-inclusive**, and remote-tx admission (`replay_remote_tx`) has no
+    /// coverage gate — gating it would risk rejecting an out-of-order arrival
+    /// whose funding tx hasn't landed yet, breaking AUDIT-TX-2 convergence (so §5
+    /// keeps mempool coverage optional). A transient uncovered *pending* tx can
+    /// thus still drive a cache entry negative, and an unclamped `i128 as u64` of a
+    /// negative wraps to a colossal fabricated balance — far worse than clamping.
+    /// So removal has real other effects → the clamp stays. A true *on-chain*
+    /// negative (a genuine bug) is still surfaced loudly: it never reaches the
+    /// cache (rejected at validation), and any residual phantom inflates the
+    /// conservation sum (`Σ ≠ minted`) rather than hiding.
     pub fn balance_of(&self, pk: &str) -> u64 {
         self.balance_cache.get(pk).copied().unwrap_or(0).max(0) as u64
     }
 
-    /// Get all balances in µQTA. Excludes synthetic addresses
-    /// (NETWORK/BURN/ESCROW). PERF-1: O(accounts) direct read from cache
-    /// instead of O(transactions) scan.
+    /// Get all **spendable** balances in µQTA. Excludes the synthetic
+    /// `STAKE` sink (ONCHAIN-STAKE-1: locked stake is not a spendable holder —
+    /// it is accounted via [`Self::locked_stake_total`]); `NETWORK`/`BURN`/`ESCROW`
+    /// never appear here (they are never credited). PERF-1: O(accounts) direct read
+    /// from cache instead of O(transactions) scan.
     pub fn all_balances(&self) -> HashMap<String, u64> {
         self.balance_cache
             .iter()
+            .filter(|(k, _)| k.as_str() != Self::STAKE_SINK)
             .map(|(k, v)| (k.clone(), (*v).max(0) as u64))
             .collect()
+    }
+
+    /// ONCHAIN-STAKE-1 §5: total µQTA currently **locked in stake** — the balance
+    /// of the synthetic `STAKE` sink. This is bonded stake + unbonding stake +
+    /// any pending (un-sealed) stake — all **locked, not destroyed**. Conservation
+    /// counts it on the balances side: `Σ spendable + locked_stake + burned == minted`.
+    /// In a sealed state (no pending stake) it equals `staked_total + unbonding_total`.
+    pub fn locked_stake_total(&self) -> u64 {
+        self.balance_cache
+            .get(Self::STAKE_SINK)
+            .copied()
+            .unwrap_or(0)
+            .max(0) as u64
     }
 
     /// Get recent transactions.
@@ -1261,17 +2331,50 @@ impl Ledger {
         }
     }
 
+    /// TX-AUTH-NONCE-1 §2: the canonical signed pre-image of a tx — the exact
+    /// bytes the signature covers AND that `tx.hash` commits to. Now includes the
+    /// **nonce**, so altering a signed tx's nonce breaks BOTH the signature and
+    /// the recomputed hash (closes the nonce-griefing / hash-malleability vector).
+    /// Used identically at creation (`next_tx_at`), the coalesced reward, and
+    /// verification (`verify_tx`) — ONE encoding, no divergence (C1). The first
+    /// six fields are unchanged from the pre-TX-AUTH pre-image; only `:nonce` is
+    /// appended.
+    /// PQ-MIG-3 §2 — the signed pre-image now binds `pq_pk` (the ML-DSA public key
+    /// the tx reveals). The Ed25519 **and** ML-DSA signatures both cover these
+    /// bytes, so swapping the revealed key changes the pre-image and invalidates
+    /// **both** signatures — an attacker cannot keep a valid signature while
+    /// substituting another key, and the Ed25519 signature that authorizes the
+    /// FIRST on-chain binding commits to exactly which key is being bound.
+    /// Synthetic/unsigned txs pass `pq_pk = ""` (they are `verify_tx`-exempt).
+    // The canonical pre-image legitimately commits to all tx fields plus the
+    // bound key; bundling them into a struct would only obscure the wire format.
+    #[allow(clippy::too_many_arguments)]
+    fn tx_signing_preimage(
+        id: &str,
+        from: &str,
+        to: &str,
+        amount: u64,
+        ts: &str,
+        tx_type: &TxType,
+        nonce: u64,
+        pq_pk: &str,
+    ) -> String {
+        format!("{}:{}:{}:{}:{}:{:?}:{}:{}", id, from, to, amount, ts, tx_type, nonce, pq_pk)
+    }
+
     fn next_tx(
         &mut self,
         from: &str,
         to: &str,
         amount: u64,
         tx_type: TxType,
+        nonce: u64,
+        pq_pk: &str,
     ) -> (String, String, String, String) {
         // Production reads the wall clock at the boundary and delegates to the
         // injected-time core (C7 / Phase 0, Constitution §3 — same pattern as
         // `seal_block`/`seal_block_at`).
-        self.next_tx_at(from, to, amount, tx_type, Utc::now().to_rfc3339())
+        self.next_tx_at(from, to, amount, tx_type, Utc::now().to_rfc3339(), nonce, pq_pk)
     }
 
     /// Build a tx id/timestamp/payload/hash with an **injected** RFC3339
@@ -1279,6 +2382,7 @@ impl Ledger {
     /// txs reproducibly without reading the wall clock. Pure extraction of
     /// `next_tx`: identical `id:from:to:amount:ts:type` pre-image and BLAKE3
     /// hash — only the timestamp source changes.
+    #[allow(clippy::too_many_arguments)]
     fn next_tx_at(
         &mut self,
         from: &str,
@@ -1286,10 +2390,12 @@ impl Ledger {
         amount: u64,
         tx_type: TxType,
         ts: String,
+        nonce: u64,
+        pq_pk: &str,
     ) -> (String, String, String, String) {
         self.tx_counter += 1;
         let id = format!("tx_{}", self.tx_counter);
-        let payload = format!("{}:{}:{}:{}:{}:{:?}", id, from, to, amount, ts, tx_type);
+        let payload = Self::tx_signing_preimage(&id, from, to, amount, &ts, &tx_type, nonce, pq_pk);
         let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
         (id, ts, payload, hash)
     }
@@ -1303,7 +2409,9 @@ impl Ledger {
         amount: u64,
         tx_type: TxType,
     ) -> Transaction {
-        let (id, ts, _payload, hash) = self.next_tx(from, to, amount, tx_type.clone());
+        // Network-issued (synthetic) txs carry no account nonce → nonce 0, and no
+        // ML-DSA authority key (they are `verify_tx`-exempt) → empty `pq_pk`.
+        let (id, ts, _payload, hash) = self.next_tx(from, to, amount, tx_type.clone(), 0, "");
         Transaction {
             id,
             from: from.into(),
@@ -1360,26 +2468,35 @@ impl Ledger {
         let nonce = self.get_nonce(from);
         self.increment_nonce(from);
 
-        let (id, ts, payload, hash) = self.next_tx_at(from, to, amount, tx_type.clone(), ts);
-        // SIGN-DET-VERIFY: the deterministic signer (`sign_hybrid_det`) is
-        // `#[cfg(test)]`, so the `det_sign` branch exists ONLY in test builds.
-        // In a release build the deterministic path is physically absent and
-        // signing is always hedged (`OsRng`); `det_sign` can only be set `true`
-        // by a `#[cfg(test)]` caller (the DST harness), never by production.
+        // PQ-MIG-3 §2: the revealed ML-DSA key (the **independent primary**, NOT the
+        // legacy seed-derived layer) must be known BEFORE building the pre-image, so
+        // the pre-image — and therefore both signatures and the tx hash — bind it.
+        let pq_pk = crypto
+            .pq_identity_hex()
+            .ok_or("No ML-DSA primary identity for tx authority")?;
+        let (id, ts, payload, hash) =
+            self.next_tx_at(from, to, amount, tx_type.clone(), ts, nonce, &pq_pk);
+        // PQ-MIG-3: authority is signed on BOTH layers (Ed25519 + primary ML-DSA)
+        // over the key-binding pre-image. SIGN-DET-VERIFY: the deterministic signer
+        // (`sign_tx_authority_det`) is `#[cfg(test)]`, so the `det_sign` branch
+        // exists ONLY in test builds — a release build is always hedged (`OsRng`)
+        // and `det_sign` can only be set `true` by a `#[cfg(test)]` caller.
         #[cfg(test)]
-        let (classical, quantum, pq_pk) = if det_sign {
-            crypto.sign_hybrid_det(payload.as_bytes())?
+        let (classical, quantum, signed_pq_pk) = if det_sign {
+            crypto.sign_tx_authority_det(payload.as_bytes())?
         } else {
-            crypto.sign_hybrid(payload.as_bytes())?
+            crypto.sign_tx_authority(payload.as_bytes())?
         };
         #[cfg(not(test))]
-        let (classical, quantum, pq_pk) = {
+        let (classical, quantum, signed_pq_pk) = {
             debug_assert!(
                 !det_sign,
                 "deterministic ML-DSA signing must never reach a non-test build"
             );
-            crypto.sign_hybrid(payload.as_bytes())?
+            crypto.sign_tx_authority(payload.as_bytes())?
         };
+        // Invariant: the key that signed == the key bound into the pre-image.
+        debug_assert_eq!(signed_pq_pk, pq_pk, "authority key must match pre-image key");
         Ok(Transaction {
             id,
             from: from.into(),
@@ -1433,8 +2550,12 @@ impl Ledger {
             account_nonces: snap.account_nonces,
             balance_cache: HashMap::new(),
             recent_deque: VecDeque::new(),
+            staked: HashMap::new(),
+            unbonding: HashMap::new(),
         };
-        // PERF-1: Rebuild cache from restored state
+        // PERF-1 + ONCHAIN-STAKE-1: rebuild the balance cache AND the on-chain
+        // stake state from the restored chain. Both are block-index-anchored, so
+        // a restored node reconstructs byte-identical `staked`/`unbonding` maps.
         ledger.rebuild_cache();
         ledger
     }
@@ -1443,6 +2564,27 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PQ-MIG-3 test wallet: an engine carrying an **independent ML-DSA primary**
+    /// (the tx-authority key the ledger binds). Returned without an Ed25519
+    /// keypair yet — callers that need one still call `generate_keypair()`, which
+    /// sets the Ed25519 layer **without disturbing** the primary. So a wallet that
+    /// signs a tx satisfies `verify_tx`'s mandatory ML-DSA layer + the binding.
+    /// Uses `CryptoEngine::default()` (≡ `new()`) so the engine starts empty.
+    fn pq_wallet() -> CryptoEngine {
+        let mut c = CryptoEngine::default();
+        c.generate_pq_identity().expect("ml-dsa primary");
+        c
+    }
+
+    /// PQ-MIG-3B test helper — a wallet's **account identity** is its ML-DSA
+    /// address (`from`/`to`/miner/balance key under ADR-007 b). Installs the
+    /// Ed25519 signing layer (so `sign_tx_authority` co-signs the pre-image) and
+    /// returns `pq_address_hex()`. Replaces the model-(a) `…public_key_hex`.
+    fn gen_addr(c: &mut CryptoEngine) -> String {
+        c.generate_keypair();
+        c.pq_address_hex().expect("ml-dsa address")
+    }
 
     // ─── NET-14: Mempool eviction tests ─────────────────────────────────
 
@@ -1537,19 +2679,20 @@ mod tests {
 
     #[test]
     fn signed_tx_uses_hybrid_path() {
-        // Une tx signée doit avoir les champs PQ "présents-mais-vides", ce qui
-        // exerce HybridIdentity::verify_hybrid avec fallback Ed25519.
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        // PQ-MIG-3: une tx signée porte des champs PQ **non vides** (la clé +
+        // signature ML-DSA du primaire), et `verify_tx` exige strictement les deux
+        // couches (Ed25519 + ML-DSA) — il n'y a plus de repli Ed25519 seul.
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
         // Donne un solde au signataire via une mining tx réseau (5 QUANTA = 5_000_000
         // µQTA).
-        ledger.mine_tx(&id.public_key_hex, 5 * MICRO, 0.0);
+        ledger.mine_tx(&id, 5 * MICRO, 0.0);
 
         // Adresse destinataire valide (64 chars hex)
         let to = "b".repeat(64);
         let tx = ledger
-            .transfer_tx(&id.public_key_hex, &to, MICRO, &crypto)
+            .transfer_tx(&id, &to, MICRO, &crypto)
             .expect("transfer should succeed");
 
         assert!(
@@ -1561,8 +2704,12 @@ mod tests {
             "tx signée doit porter le champ pq_public_key"
         );
         assert!(
+            !tx.pq_signature.as_deref().unwrap_or("").is_empty(),
+            "la couche ML-DSA est non vide (autorité PQ obligatoire)"
+        );
+        assert!(
             Ledger::verify_tx(&tx).unwrap(),
-            "verify_tx hybride doit valider Ed25519"
+            "verify_tx doit valider la tx (Ed25519 + ML-DSA stricts)"
         );
     }
 
@@ -1578,6 +2725,112 @@ mod tests {
             Ledger::verify_tx(&tx).unwrap(),
             "tx NETWORK toujours valide"
         );
+    }
+
+    // ─── PQ-MIG-5 : genèse post-quantique (les dents §5) ────────────────────
+
+    /// **PQ-MIG-5 §5 — genèse déterministe.** Deux constructions de la même
+    /// allocation ⇒ hash **identique** (C1), et le hash est **figé** sur un vecteur
+    /// connu (comme les vecteurs d'adresses épinglés de PQ-MIG-2). La genèse par
+    /// défaut (`new()`, allocation vide, zéro premine) et la genèse d'allocation DEV
+    /// ont chacune un hash fixe ; le hash **lie le contenu** — changer l'allocation
+    /// change le hash (vide ≠ alloué).
+    #[test]
+    fn pqmig5_genesis_hash_is_deterministic_and_frozen() {
+        assert_eq!(
+            Ledger::new().chain[0].hash,
+            Ledger::new().chain[0].hash,
+            "genèse vide : deux constructions ⇒ même hash (C1)"
+        );
+        assert_eq!(
+            Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
+            Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
+            "genèse allouée : deux constructions ⇒ même hash (C1)"
+        );
+        // Vecteurs figés (PQ-MIG-5 §1) — calculés via le hachage de bloc existant.
+        assert_eq!(
+            Ledger::new().chain[0].hash,
+            "37bb89571c9055b61e73fecf7526d2c91c8aba7027f4434e0cdf29c78ea889a1",
+            "hash de genèse vide figé"
+        );
+        assert_eq!(
+            Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
+            "d13f62215438fe74640f57981a9f5aab62990f77916a18a9cf5d4fd09528666e",
+            "hash de genèse DEV figé"
+        );
+        assert_ne!(
+            Ledger::new().chain[0].hash,
+            Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
+            "le hash lie le contenu : vide ≠ alloué"
+        );
+    }
+
+    /// **PQ-MIG-5 §5 — conservation à la genèse (EMIT-1 / classe conservation).**
+    /// Au bloc 0 : `miné == Σ(solde + enjeu)` (l'enjeu vient de l'allocation, pas
+    /// créé en plus) et `Σ dépensable + enjeu-verrouillé + brûlé == miné`. Puis la
+    /// **dent négative** : planter un enjeu de genèse **non couvert** par une
+    /// émission (un `Stake` sans `Mining` derrière) **casse** l'égalité de
+    /// conservation — la vérification mord, un déséquilibre de genèse ne passe pas.
+    #[test]
+    fn pqmig5_dev_genesis_conserves_at_block_zero() {
+        let l = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+        let expected_alloc: u64 = Ledger::DEV_GENESIS_ALLOCATION
+            .iter()
+            .map(|(_, bal, stake)| bal + stake)
+            .sum();
+        assert_eq!(l.total_minted(), expected_alloc, "miné == Σ(solde + enjeu)");
+        assert_eq!(l.total_minted(), 100 * MICRO, "allocation DEV = 100 QTA");
+        assert_eq!(
+            conservation_lhs(&l),
+            l.total_minted(),
+            "Σ dépensable + enjeu-verrouillé + brûlé == miné, dès le bloc 0"
+        );
+        assert_eq!(l.total_burned(), 0, "rien de brûlé à la genèse");
+        assert_eq!(l.locked_stake_total(), 15 * MICRO, "enjeu de genèse = 10 + 5");
+
+        // Dent négative — planter un enjeu non couvert (Stake sans Mining derrière).
+        let mut bad = Ledger::genesis_with_allocation(&[]); // miné 0
+        let planted = Ledger::genesis_tx(
+            "planted_unbacked_stake",
+            Ledger::GENESIS_ADDR_0,
+            Ledger::STAKE_SINK,
+            10 * MICRO,
+            TxType::Stake,
+        );
+        bad.chain[0].transactions.push(planted);
+        bad.rebuild_cache();
+        assert_eq!(bad.total_minted(), 0, "aucune émission ne couvre l'enjeu planté");
+        assert_eq!(bad.locked_stake_total(), 10 * MICRO, "10 verrouillés sans backing");
+        assert_ne!(
+            conservation_lhs(&bad),
+            bad.total_minted(),
+            "enjeu de genèse non couvert ⇒ conservation cassée (la vérif mord)"
+        );
+    }
+
+    /// **PQ-MIG-5 §5 — validateurs initiaux.** `validator_stakes()` au bloc 0
+    /// reflète **exactement** le mapping de genèse, indexé par **adresse ML-DSA** :
+    /// les deux comptes à enjeu > 0 (G0, G1), pas le porteur simple (G2, enjeu 0).
+    #[test]
+    fn pqmig5_dev_genesis_validators_reflect_mapping() {
+        let l = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+        let stakes = l.validator_stakes();
+        assert_eq!(stakes.len(), 2, "deux validateurs initiaux (enjeu > 0)");
+        assert_eq!(stakes.get(Ledger::GENESIS_ADDR_0).copied(), Some(10 * MICRO));
+        assert_eq!(stakes.get(Ledger::GENESIS_ADDR_1).copied(), Some(5 * MICRO));
+        assert_eq!(
+            stakes.get(Ledger::GENESIS_ADDR_2).copied(),
+            None,
+            "le porteur sans enjeu n'est pas un validateur"
+        );
+        // Mêmes valeurs via l'accès par compte (chaîne ⇒ état pur).
+        assert_eq!(l.staked_of(Ledger::GENESIS_ADDR_0), 10 * MICRO);
+        assert_eq!(l.staked_of(Ledger::GENESIS_ADDR_1), 5 * MICRO);
+        assert_eq!(l.staked_of(Ledger::GENESIS_ADDR_2), 0);
+        // Soldes dépensables = colonne « solde » du mapping (enjeu retiré).
+        assert_eq!(l.balance_of(Ledger::GENESIS_ADDR_0), 50 * MICRO);
+        assert_eq!(l.balance_of(Ledger::GENESIS_ADDR_1), 25 * MICRO);
+        assert_eq!(l.balance_of(Ledger::GENESIS_ADDR_2), 10 * MICRO);
     }
 
     // ─── TOKENOMICS v2 — invariants de CONFIANCE (offre prouvable) ──────────
@@ -1600,17 +2853,17 @@ mod tests {
 
     #[test]
     fn trust_burn_reduces_total_supply() {
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
-        ledger.mine_tx(&id.public_key_hex, 100 * MICRO, 0.0);
-        ledger.seal_block(&id.public_key_hex, 0.0); // pending → chaîne (compté dans l'offre)
+        ledger.mine_tx(&id, 100 * MICRO, 0.0);
+        ledger.seal_block(&id, 0.0); // pending → chaîne (compté dans l'offre)
         let before = ledger.total_supply();
         let to = "e".repeat(64);
         let (_tx, _burn, burn_uqta) = ledger
-            .transfer_with_burn(&id.public_key_hex, &to, 50 * MICRO, &crypto)
+            .transfer_with_burn(&id, &to, 50 * MICRO, &crypto)
             .unwrap();
-        ledger.seal_block(&id.public_key_hex, 0.0);
+        ledger.seal_block(&id, 0.0);
         assert!(burn_uqta > 0);
         // Déflation réelle : l'offre diminue EXACTEMENT du montant brûlé.
         assert_eq!(
@@ -1623,15 +2876,15 @@ mod tests {
     #[test]
     fn trust_supply_equals_sum_of_balances() {
         // Invariant fort : offre en circulation == somme des soldes de comptes.
-        let mut crypto = CryptoEngine::new();
-        let a = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let a = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
-        ledger.mine_tx(&a.public_key_hex, 100 * MICRO, 0.0);
+        ledger.mine_tx(&a, 100 * MICRO, 0.0);
         let b = "f".repeat(64);
         ledger
-            .transfer_with_burn(&a.public_key_hex, &b, 30 * MICRO, &crypto)
+            .transfer_with_burn(&a, &b, 30 * MICRO, &crypto)
             .unwrap();
-        ledger.seal_block(&a.public_key_hex, 0.0); // chaîne et cache cohérents
+        ledger.seal_block(&a, 0.0); // chaîne et cache cohérents
         let sum: i128 = ledger.balance_cache.values().sum();
         assert_eq!(
             sum as u64,
@@ -1652,13 +2905,13 @@ mod tests {
         );
         assert_eq!(tx.tx_type, TxType::Mining);
         // Un transfert (sans burn) ne crée AUCUNE offre.
-        let mut crypto = CryptoEngine::new();
-        let s = crypto.generate_keypair();
-        ledger.mine_tx(&s.public_key_hex, 10 * MICRO, 0.0);
+        let mut crypto = pq_wallet();
+        let s = gen_addr(&mut crypto);
+        ledger.mine_tx(&s, 10 * MICRO, 0.0);
         let supply = ledger.total_supply();
         let r = "b".repeat(64);
         ledger
-            .transfer_tx(&s.public_key_hex, &r, 2 * MICRO, &crypto)
+            .transfer_tx(&s, &r, 2 * MICRO, &crypto)
             .unwrap();
         assert_eq!(
             ledger.total_supply(),
@@ -1769,17 +3022,489 @@ mod tests {
         assert_eq!(ledger.chain_height(), 1, "chaîne non étendue");
     }
 
+    // ─── FORK-CAP-1: le chemin fork-reorg applique la MÊME validation ───────
+    // d'émission que le chemin linéaire. L'audit HARDEN-AUDIT-1 a confirmé 2×
+    // que la branche de reorg sautait `validate_block_emission`, laissant un
+    // adversaire réseau minter au-delà des 100M via un bloc de remplacement.
+    // Ces tests pilotent la BRANCHE REORG (même hauteur, hash gagnant), là où
+    // les anciens tests de plafond ne pilotaient que le chemin happy (tip+1).
+
+    /// Construit une chaîne genesis + 1 bloc scellé (tip à la hauteur 1), pour
+    /// qu'un reorg soit possible (`tip.index >= 1`). Renvoie le ledger, le tip
+    /// honnête, et le hash de genesis auquel le fork doit se rattacher.
+    fn forkcap_two_block_chain() -> (Ledger, Block, String) {
+        let mut ledger = Ledger::new();
+        let genesis_hash = ledger.chain.last().unwrap().hash.clone();
+        let honest_miner = "f".repeat(64);
+        ledger.mine_tx(&honest_miner, 2 * MICRO, 0.0); // émission légitime
+        let tip = ledger.seal_block(&honest_miner, 0.0);
+        assert_eq!(tip.index, 1, "setup: le tip doit être à la hauteur 1 pour un reorg");
+        (ledger, tip, genesis_hash)
+    }
+
+    /// Forge un bloc de fork avec un hash CORRECT (même pré-image que la prod)
+    /// qui bat lexicographiquement `must_beat`, pour gagner le tie-break et
+    /// atteindre la validation. Le timestamp (libre, seulement haché) sert de
+    /// nonce de grind — BLAKE3 est ~uniforme, donc quelques essais suffisent.
+    fn forge_winning_fork(
+        index: u64,
+        prev_hash: &str,
+        miner: &str,
+        txs: Vec<Transaction>,
+        must_beat: &str,
+    ) -> Block {
+        for nonce in 0..1_000_000u64 {
+            let ts = format!("forkcap-grind-{nonce}");
+            let block = Ledger::forge_block_at(index, prev_hash, &ts, miner, txs.clone());
+            if block.hash.as_str() > must_beat {
+                return block;
+            }
+        }
+        panic!("impossible de grinder un hash de fork au-dessus du tip honnête");
+    }
+
+    /// Après un reorg REJETÉ : la chaîne n'a pas bougé, le tip honnête reste, et
+    /// la masse en circulation ne dépasse JAMAIS le plafond dur.
+    fn forkcap_assert_rejected(ledger: &Ledger, honest_tip: &Block) {
+        assert_eq!(ledger.chain.len(), 2, "chaîne non réorganisée (reorg rejeté)");
+        assert_eq!(
+            ledger.chain.last().unwrap().hash,
+            honest_tip.hash,
+            "le tip honnête doit être conservé"
+        );
+        assert_eq!(
+            ledger.stats().total_mined,
+            2 * MICRO,
+            "offre minée inchangée par le bloc rejeté"
+        );
+        assert!(
+            ledger.total_supply() <= crate::p2p::reputation::MAX_SUPPLY_MICRO,
+            "la masse ne dépasse JAMAIS 100M"
+        );
+    }
+
+    #[test]
+    fn forkcap_reorg_rejects_multiple_mining_rewards() {
+        // (a) Plus d'une récompense de minage dans le bloc de reorg.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let attacker = "a".repeat(64);
+        let r1 = ledger.build_unsigned_tx("NETWORK", &attacker, MICRO, TxType::Mining);
+        let r2 = ledger.build_unsigned_tx("NETWORK", &attacker, MICRO, TxType::Mining);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, &attacker, vec![r1, r2], &tip.hash);
+        assert!(
+            evil.hash.as_str() > tip.hash.as_str(),
+            "le fork doit gagner le tie-break pour atteindre la validation"
+        );
+
+        let res = ledger.integrate_remote_block(evil);
+        assert!(res.is_err(), "(a) reorg à ≥2 récompenses de minage doit être REJETÉ");
+        forkcap_assert_rejected(&ledger, &tip);
+    }
+
+    #[test]
+    fn forkcap_reorg_rejects_emission_past_hard_cap() {
+        // (b) Récompense sur-dimensionnée poussant la masse au-delà du plafond.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let attacker = "a".repeat(64);
+        let huge = crate::p2p::reputation::MAX_SUPPLY_MICRO + 5 * MICRO;
+        let reward = ledger.build_unsigned_tx("NETWORK", &attacker, huge, TxType::Mining);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, &attacker, vec![reward], &tip.hash);
+
+        let res = ledger.integrate_remote_block(evil);
+        assert!(
+            res.is_err(),
+            "(b) reorg dépassant le plafond dur 100M doit être REJETÉ"
+        );
+        forkcap_assert_rejected(&ledger, &tip);
+    }
+
+    #[test]
+    fn forkcap_reorg_rejects_emission_per_block_bound() {
+        // (b′) 1M QUANTA d'un coup — très sous 100M, mais des milliers de fois
+        // l'émission/tick légitime : la borne PAR BLOC doit aussi le rejeter sur
+        // le chemin de reorg.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let attacker = "a".repeat(64);
+        let greedy = 1_000_000 * MICRO;
+        let reward = ledger.build_unsigned_tx("NETWORK", &attacker, greedy, TxType::Mining);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, &attacker, vec![reward], &tip.hash);
+
+        let res = ledger.integrate_remote_block(evil);
+        assert!(
+            res.is_err(),
+            "(b′) reorg minant 1M QUANTA d'un coup doit être REJETÉ (borne par bloc)"
+        );
+        forkcap_assert_rejected(&ledger, &tip);
+    }
+
+    #[test]
+    fn forkcap_reorg_rejects_reward_to_non_miner() {
+        // (c) Récompense créditée à un autre que le mineur du bloc.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let miner = "a".repeat(64);
+        let someone_else = "c".repeat(64);
+        let reward = ledger.build_unsigned_tx("NETWORK", &someone_else, MICRO, TxType::Mining);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, &miner, vec![reward], &tip.hash);
+
+        let res = ledger.integrate_remote_block(evil);
+        assert!(
+            res.is_err(),
+            "(c) reorg créditant un non-mineur doit être REJETÉ"
+        );
+        forkcap_assert_rejected(&ledger, &tip);
+    }
+
+    #[test]
+    fn forkcap_reorg_accepts_honest_competing_block() {
+        // Contrôle positif (anti-masquage) : un fork HONNÊTE de même hauteur,
+        // émission légitime + hash gagnant, DOIT être accepté. Fermer le plafond
+        // ne doit pas rejeter les reorgs honnêtes ni « filtrer » par excès. Le
+        // `prior_mined` exclut le tip remplacé, donc 2 QUANTA valident contre une
+        // offre de 0, exactement comme un bloc à la hauteur 1.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let rival_miner = "e".repeat(64);
+        let reward = ledger.build_unsigned_tx("NETWORK", &rival_miner, 2 * MICRO, TxType::Mining);
+        let honest_fork =
+            forge_winning_fork(tip.index, &genesis_hash, &rival_miner, vec![reward], &tip.hash);
+
+        let res = ledger.integrate_remote_block(honest_fork.clone());
+        assert_eq!(
+            res,
+            Ok(true),
+            "un fork honnête de même hauteur (hash gagnant) doit être accepté"
+        );
+        assert_eq!(ledger.chain.len(), 2, "la chaîne reste à la même hauteur après reorg");
+        assert_eq!(
+            ledger.chain.last().unwrap().hash,
+            honest_fork.hash,
+            "le fork honnête devient le tip"
+        );
+        assert_eq!(
+            ledger.stats().total_mined,
+            2 * MICRO,
+            "offre minée cohérente après un reorg honnête (le nouveau bloc remplace l'ancien)"
+        );
+        assert!(
+            ledger.total_supply() <= crate::p2p::reputation::MAX_SUPPLY_MICRO,
+            "masse ≤ 100M"
+        );
+    }
+
+    // ─── GADGET-5B: multi-block fork reconciliation (reorg_to_fork) ─────────
+    // The ledger mechanics the GHOST engine drives at partition heal: a
+    // competing fork is adopted with full conservation (loser emission reverted,
+    // user txs re-queued, synthetic rewards dropped) and the finalized floor is
+    // absolute (a fork that would undo finalized history is refused).
+
+    /// **GADGET-5B §2 tooth — conservation revert is load-bearing.** Reorging to
+    /// a competing fork REVERTS the abandoned branch's emission (so it is never
+    /// double-minted) and RE-QUEUES its user txs (never lost, AUDIT-BLK-1), while
+    /// its synthetic reward is dropped — and `Σ(spendable+staked+unbonding)+burned
+    /// == minted` still holds globally afterwards.
+    #[test]
+    fn gadget5b_reorg_reverts_loser_emission_and_requeues_user_tx() {
+        let mut ledger = Ledger::new();
+        let mut wallet = pq_wallet();
+        let pk = gen_addr(&mut wallet);
+        let y = "d".repeat(64);
+
+        // G, b1 (mining → pk 100 QTA, funds the transfer).
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        let b1 = ledger.seal_block(&pk, 0.0);
+        assert_eq!(b1.index, 1);
+
+        // A signed transfer pk→y (10 QTA) + its 1% burn, deterministic.
+        let ts = "2026-06-25T00:00:00+00:00".to_string();
+        let (xfer, burn_opt, _) = ledger
+            .transfer_with_burn_at(&pk, &y, 10 * MICRO, &wallet, ts.clone(), true)
+            .expect("signed transfer");
+        let burn = burn_opt.expect("burn leg present");
+
+        // LOSER block (index 2): the user transfer + burn + a 5 QTA mining reward.
+        let loser_reward = ledger.build_unsigned_tx("NETWORK", &pk, 5 * MICRO, TxType::Mining);
+        let loser = Ledger::forge_block_at(
+            2,
+            &b1.hash,
+            &ts,
+            &pk,
+            vec![xfer.clone(), burn.clone(), loser_reward],
+        );
+        assert_eq!(ledger.integrate_remote_block(loser.clone()), Ok(true), "loser sealed at index 2");
+        assert_eq!(ledger.pending_count(), 0, "transfer + burn now sealed in the loser block");
+        assert_eq!(ledger.total_minted(), 105 * MICRO, "b1(100) + loser mining(5)");
+
+        // WINNER fork (index 2, rooted at b1): mining only (7 QTA) — replaces the loser.
+        let winner_reward = ledger.build_unsigned_tx("NETWORK", &pk, 7 * MICRO, TxType::Mining);
+        let winner = Ledger::forge_block_at(2, &b1.hash, &ts, &pk, vec![winner_reward]);
+
+        assert_eq!(
+            ledger.reorg_to_fork(std::slice::from_ref(&winner), 0),
+            Ok(true),
+            "the competing fork is adopted (floor 0, valid)"
+        );
+
+        // (a) the winner is the new tip.
+        assert_eq!(ledger.chain.last().unwrap().hash, winner.hash, "winner is the tip");
+        assert_eq!(ledger.chain.len(), 3, "same height after the reorg");
+
+        // (b) the loser's USER txs are re-queued; its mining reward is NOT.
+        let pending = ledger.pending_txs();
+        assert!(
+            pending.iter().any(|t| t.hash == xfer.hash && t.tx_type == TxType::Transfer),
+            "the loser's transfer is re-queued (AUDIT-BLK-1)"
+        );
+        assert!(
+            pending.iter().any(|t| t.hash == burn.hash && t.tx_type == TxType::Burn),
+            "the loser's burn (a user tx) is re-queued"
+        );
+        assert!(
+            pending.iter().all(|t| t.tx_type != TxType::Mining),
+            "the loser's mining reward is NOT re-queued — no double-mint (EMIT-1 §4.1)"
+        );
+
+        // (c) the loser's emission was UNDONE: minted counts the winner's 7 QTA,
+        //     not the dropped loser's 5 (b1 100 + winner 7 = 107).
+        assert_eq!(
+            ledger.total_minted(),
+            107 * MICRO,
+            "loser emission reverted, winner counted — the revert is load-bearing"
+        );
+
+        // (d) global conservation holds after reconciliation.
+        let spendable: u64 = ledger.all_balances().values().sum();
+        assert_eq!(
+            spendable + ledger.locked_stake_total() + ledger.total_burned(),
+            ledger.total_minted(),
+            "Σ(spendable+staked+unbonding)+burned == minted after reconciliation"
+        );
+    }
+
+    /// **GADGET-5B §4 tooth — finality preserved (the floor is absolute).** A fork
+    /// that would replace a **finalized** block can never win the reconciliation:
+    /// `reorg_to_fork` refuses to disturb any block at or below `floor_index`. The
+    /// positive control proves the floor blocks exactly — and only — what finality
+    /// protects (a fork above the floor still reorganizes).
+    #[test]
+    fn gadget5b_reorg_to_fork_refuses_below_finalized_floor() {
+        let mut ledger = Ledger::new();
+        let miner = "f".repeat(64);
+        ledger.mine_tx(&miner, 2 * MICRO, 0.0);
+        let b1 = ledger.seal_block(&miner, 0.0);
+        ledger.mine_tx(&miner, 2 * MICRO, 0.0);
+        let b2 = ledger.seal_block(&miner, 0.0);
+        assert_eq!(ledger.chain.len(), 3, "setup: G, b1, b2");
+
+        // A valid competing block at index 2, rooted at b1 — it would REPLACE b2.
+        let rival = "e".repeat(64);
+        let reward = ledger.build_unsigned_tx("NETWORK", &rival, 2 * MICRO, TxType::Mining);
+        let winner = Ledger::forge_block_at(2, &b1.hash, "fork-ts", &rival, vec![reward]);
+
+        // Floor at index 2 (b2 finalized): the fork roots BELOW the floor (at b1=1),
+        // so adopting it would undo finalized b2 → REFUSED, chain untouched.
+        assert_eq!(
+            ledger.reorg_to_fork(std::slice::from_ref(&winner), 2),
+            Ok(false),
+            "a fork that would replace a FINALIZED block is refused (5A floor, absolute)"
+        );
+        assert_eq!(ledger.chain.last().unwrap().hash, b2.hash, "finalized tip preserved");
+        assert_eq!(ledger.chain.len(), 3, "chain unchanged by the refused reorg");
+
+        // Positive control: floor at index 1 (only b1 finalized) ⇒ b2 is fair game,
+        // so the SAME fork is adopted. The floor protects exactly what is finalized.
+        assert_eq!(
+            ledger.reorg_to_fork(std::slice::from_ref(&winner), 1),
+            Ok(true),
+            "a fork above the finalized floor reorganizes normally"
+        );
+        assert_eq!(ledger.chain.last().unwrap().hash, winner.hash, "the fork is now the tip");
+    }
+
+    // ─── SLICE-CLASS (HARDEN-HYGIENE-1): char-safe log truncation ───────────
+
+    #[test]
+    fn slice_short_is_char_safe() {
+        assert_eq!(short("hello", 3), "hel"); // plain ASCII prefix
+        assert_eq!(short("hello", 10), "hello"); // max >= len → whole string
+        assert_eq!(short("", 5), "");
+        // A multi-byte char straddling the cut index is DROPPED, not split
+        // (byte-indexing there panics). "héllo": é occupies bytes 1..3.
+        assert_eq!(short("héllo", 2), "h");
+        assert_eq!(short("héllo", 1), "h");
+        assert_eq!(short("é", 1), ""); // cut inside the only char → empty, no panic
+        assert_eq!(short("ÿÿ", 99), "ÿÿ");
+        // The exact shape that panicked the hard slice: 13 bytes, cut at 12 lands
+        // mid-'é'. Must not panic.
+        let s = format!("g{}é", "f".repeat(10));
+        assert_eq!(short(&s, 12), &format!("g{}", "f".repeat(10)));
+    }
+
+    #[test]
+    fn slice_multibyte_block_hash_does_not_panic_in_fork_log() {
+        // A malicious peer sends a fork-height block whose `hash` is a short,
+        // multi-byte string lexicographically ABOVE the tip — reaching the
+        // fork-resolution log that used a HARD `&block.hash[..12]`, which
+        // panicked the single gossip-dispatch task (remote DoS). With `short` it
+        // logs safely and the block is REJECTED (hash mismatch), never panics.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        // 13 bytes: 'g' + ten 'f' + 'é'; byte 12 lands inside 'é'. 'g' (0x67) >
+        // any hex digit, so block.hash > tip.hash → enters the reorg `>` arm.
+        let evil_hash = format!("g{}é", "f".repeat(10));
+        assert!(
+            evil_hash.as_str() > tip.hash.as_str(),
+            "must win the tie-break to reach the log slice"
+        );
+        let evil = Block {
+            index: tip.index,
+            timestamp: "t".into(),
+            transactions: vec![],
+            prev_hash: genesis_hash,
+            hash: evil_hash,
+            miner: "z".repeat(64),
+            energy_kwh: 0.0,
+        };
+        let res = ledger.integrate_remote_block(evil); // pre-fix: PANIC at [..12]
+        assert!(res.is_err(), "bogus-hash fork block must be rejected, not panic");
+        assert_eq!(ledger.chain.len(), 2, "chain unchanged");
+    }
+
+    // ─── TX-AUTH-NONCE-1: nonce/hash authentication + hang bound ────────────
+
+    /// Build a tx signed over the canonical pre-image with an ATTACKER-CHOSEN
+    /// nonce (hash recomputed to match), the way a hostile peer crafts one.
+    /// Mirrors `build_signed_tx_at`'s encoding so a legit nonce verifies and a
+    /// tampered field is caught.
+    fn sign_tx_with_nonce(
+        crypto: &CryptoEngine,
+        from: &str,
+        to: &str,
+        amount: u64,
+        nonce: u64,
+    ) -> Transaction {
+        let id = format!("tx_evil_{nonce}");
+        let ts = "2026-01-01T00:00:00+00:00".to_string();
+        let tx_type = TxType::Transfer;
+        // PQ-MIG-3: bind the primary ML-DSA key into the pre-image, then sign both
+        // layers with it — mirrors `build_signed_tx_at`.
+        let pq_pk = crypto.pq_identity_hex().expect("ml-dsa primary");
+        let payload =
+            Ledger::tx_signing_preimage(&id, from, to, amount, &ts, &tx_type, nonce, &pq_pk);
+        let (classical, quantum, pq_pk) = crypto.sign_tx_authority(payload.as_bytes()).unwrap();
+        Transaction {
+            id,
+            from: from.into(),
+            to: to.into(),
+            amount,
+            tx_type,
+            timestamp: ts,
+            signature: hex::encode(&classical),
+            hash: hex::encode(blake3::hash(payload.as_bytes()).as_bytes()),
+            nonce,
+            pq_signature: Some(hex::encode(&quantum)),
+            pq_public_key: Some(pq_pk),
+        }
+    }
+
+    #[test]
+    fn txauth_far_ahead_nonce_rejected_no_hang() {
+        // §5 anti-hang: a validly-SIGNED tx with a nonce near u64::MAX (far beyond
+        // MAX_NONCE_GAP) must be REJECTED in O(1) — never the old ~2^64 increment
+        // loop under the ledger lock. (The test completing at all = no hang.)
+        let mut crypto = pq_wallet();
+        let pk = gen_addr(&mut crypto);
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block("GENESIS", 0.0);
+        let to = "d".repeat(64);
+
+        let evil = sign_tx_with_nonce(&crypto, &pk, &to, 5 * MICRO, u64::MAX);
+        assert!(
+            Ledger::verify_tx(&evil).unwrap(),
+            "the crafted tx is correctly signed — the GAP BOUND rejects it, not the signature"
+        );
+        let before_hw = ledger.get_nonce(&pk);
+        let applied = ledger.apply_remote_tx_checked(evil);
+        assert!(!applied, "a nonce far ahead of the high-water must be rejected (gap bound)");
+        assert_eq!(
+            ledger.get_nonce(&pk),
+            before_hw,
+            "the rejected tx must not advance/poison the nonce high-water"
+        );
+    }
+
+    #[test]
+    fn txauth_forged_nonce_breaks_signature() {
+        // §5: altering a signed tx's nonce (with the hash recomputed to bypass §3)
+        // must invalidate the SIGNATURE — the nonce is now in the signed pre-image.
+        let mut crypto = pq_wallet();
+        let pk = gen_addr(&mut crypto);
+        let to = "d".repeat(64);
+        let tx = sign_tx_with_nonce(&crypto, &pk, &to, 10 * MICRO, 7);
+        assert!(Ledger::verify_tx(&tx).unwrap(), "the untouched signed tx verifies");
+
+        let mut forged = tx.clone();
+        forged.nonce = 8;
+        let payload = Ledger::tx_signing_preimage(
+            &forged.id, &forged.from, &forged.to, forged.amount, &forged.timestamp,
+            &forged.tx_type, forged.nonce, forged.pq_public_key.as_deref().unwrap_or(""),
+        );
+        forged.hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        assert!(
+            !Ledger::verify_tx(&forged).unwrap(),
+            "altering the signed nonce invalidates the signature (§2)"
+        );
+    }
+
+    #[test]
+    fn txauth_malleable_hash_rejected() {
+        // §5: a wire hash that disagrees with the recomputed content hash is
+        // rejected (§3 — no hash malleability past the dedup).
+        let mut crypto = pq_wallet();
+        let pk = gen_addr(&mut crypto);
+        let to = "d".repeat(64);
+        let tx = sign_tx_with_nonce(&crypto, &pk, &to, 10 * MICRO, 3);
+        let mut forged = tx.clone();
+        forged.hash = "0".repeat(64);
+        assert!(
+            !Ledger::verify_tx(&forged).unwrap(),
+            "a wire hash != the recomputed content hash must be rejected (§3)"
+        );
+    }
+
+    #[test]
+    fn txauth_valid_signed_tx_verifies_and_hash_binds_nonce() {
+        // §5 happy path: the real production path (transfer_tx) still verifies, and
+        // tx.hash now commits to the nonce. C1 byte-identical determinism is
+        // covered by determinism_meta_test_128_runs_are_byte_identical (green).
+        let mut crypto = pq_wallet();
+        let pk = gen_addr(&mut crypto);
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block("GENESIS", 0.0);
+        let to = "d".repeat(64);
+        let tx = ledger.transfer_tx(&pk, &to, 10 * MICRO, &crypto).unwrap();
+        assert!(Ledger::verify_tx(&tx).unwrap(), "a freshly-signed tx verifies (nonce in the pre-image)");
+        let payload = Ledger::tx_signing_preimage(
+            &tx.id, &tx.from, &tx.to, tx.amount, &tx.timestamp, &tx.tx_type, tx.nonce,
+            tx.pq_public_key.as_deref().unwrap_or(""),
+        );
+        assert_eq!(
+            tx.hash,
+            hex::encode(blake3::hash(payload.as_bytes()).as_bytes()),
+            "tx.hash commits to the nonce"
+        );
+    }
+
     #[test]
     fn transfer_with_burn_deducts_one_percent() {
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
         // Give sender 100 QUANTA
-        ledger.mine_tx(&id.public_key_hex, 100 * MICRO, 0.0);
+        ledger.mine_tx(&id, 100 * MICRO, 0.0);
 
         let to = "d".repeat(64);
         let (tx, burn_tx, burn_uqta) = ledger
-            .transfer_with_burn(&id.public_key_hex, &to, 10 * MICRO, &crypto)
+            .transfer_with_burn(&id, &to, 10 * MICRO, &crypto)
             .expect("transfer should succeed");
         // AUDIT-TX-1: burn leg must be present and signed for any burn > 0
         assert!(
@@ -1800,43 +3525,43 @@ mod tests {
         assert_eq!(tx.amount, 9_900_000, "tx amount = net after 1% burn");
 
         // Sender: 100 - 10 = 90 QUANTA
-        assert_eq!(ledger.balance_of(&id.public_key_hex), 90 * MICRO);
+        assert_eq!(ledger.balance_of(&id), 90 * MICRO);
         // Receiver: 10 - 0.1 = 9.9 QUANTA = 9_900_000 µQTA
         assert_eq!(ledger.balance_of(&to), 9_900_000);
     }
 
     #[test]
     fn double_spend_rejected() {
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
-        ledger.mine_tx(&id.public_key_hex, 5 * MICRO, 0.0);
+        ledger.mine_tx(&id, 5 * MICRO, 0.0);
 
         let to = "e".repeat(64);
         // First transfer: 5 QTA → should succeed
         assert!(ledger
-            .transfer_with_burn(&id.public_key_hex, &to, 5 * MICRO, &crypto)
+            .transfer_with_burn(&id, &to, 5 * MICRO, &crypto)
             .is_ok());
         // Second transfer: 5 QTA → should fail (balance is 0 now)
         assert!(ledger
-            .transfer_with_burn(&id.public_key_hex, &to, 5 * MICRO, &crypto)
+            .transfer_with_burn(&id, &to, 5 * MICRO, &crypto)
             .is_err());
     }
 
     #[test]
     fn balance_never_negative() {
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
-        ledger.mine_tx(&id.public_key_hex, MICRO, 0.0);
+        ledger.mine_tx(&id, MICRO, 0.0);
 
         let to = "f".repeat(64);
         // Try to send more than balance
         assert!(ledger
-            .transfer_with_burn(&id.public_key_hex, &to, 2 * MICRO, &crypto)
+            .transfer_with_burn(&id, &to, 2 * MICRO, &crypto)
             .is_err());
         // Balance unchanged
-        assert_eq!(ledger.balance_of(&id.public_key_hex), MICRO);
+        assert_eq!(ledger.balance_of(&id), MICRO);
     }
 
     #[test]
@@ -1918,14 +3643,14 @@ mod tests {
     /// verifiable.
     #[test]
     fn audit_tx1_burn_leg_is_signed_and_verifies() {
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
-        ledger.mine_tx(&id.public_key_hex, 100 * MICRO, 0.0);
+        ledger.mine_tx(&id, 100 * MICRO, 0.0);
 
         let to = "d".repeat(64);
         let (transfer, burn_opt, burn_uqta) = ledger
-            .transfer_with_burn(&id.public_key_hex, &to, 10 * MICRO, &crypto)
+            .transfer_with_burn(&id, &to, 10 * MICRO, &crypto)
             .expect("transfer must succeed");
 
         assert_eq!(burn_uqta, 100_000);
@@ -1946,24 +3671,24 @@ mod tests {
     /// cache below zero (saturated to 0 by `balance_of`, hiding the bug).
     #[test]
     fn audit_tx3_gross_balance_check_blocks_overdraw() {
-        let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
         // Sender holds 99_000 µQTA (= 0.099 QTA, just under the 0.1 QTA min).
         // This is the boundary case: balance == net (99_000 = 100_000 - 1_000)
         // but balance < gross (99_000 < 100_000). Old code would accept the
         // transfer (net check passes) then apply the unsigned burn,
         // overdrawing the sender by 1_000 µQTA.
-        ledger.mine_tx(&id.public_key_hex, 99_000, 0.0);
+        ledger.mine_tx(&id, 99_000, 0.0);
 
         let to = "e".repeat(64);
-        let result = ledger.transfer_with_burn(&id.public_key_hex, &to, 100_000, &crypto);
+        let result = ledger.transfer_with_burn(&id, &to, 100_000, &crypto);
         assert!(
             result.is_err(),
             "transfer where balance < gross must be rejected (AUDIT-TX-3)"
         );
         // Balance untouched.
-        assert_eq!(ledger.balance_of(&id.public_key_hex), 99_000);
+        assert_eq!(ledger.balance_of(&id), 99_000);
     }
 
     /// AUDIT-TX cross-ledger convergence: two independent ledgers receiving
@@ -1971,9 +3696,9 @@ mod tests {
     /// This exercises the same flow as A→B over gossip.
     #[test]
     fn audit_tx_cross_ledger_convergence() {
-        let mut crypto = CryptoEngine::new();
-        let id_a = crypto.generate_keypair();
-        let pk_a = id_a.public_key_hex.clone();
+        let mut crypto = pq_wallet();
+        let id_a = gen_addr(&mut crypto);
+        let pk_a = id_a.clone();
         let pk_b = "b".repeat(64);
 
         // Local ledger A: gives A 100 QTA, sends 10 to B with 1% burn.
@@ -2021,8 +3746,8 @@ mod tests {
     #[test]
     fn audit_blk1_fork_reorg_preserves_exclusive_txs() {
         // A real signer so the loser can carry an exclusive USER transfer.
-        let mut crypto = CryptoEngine::new();
-        let signer = crypto.generate_keypair().public_key_hex;
+        let mut crypto = pq_wallet();
+        let signer = gen_addr(&mut crypto);
         let pk_x = "e".repeat(64);
 
         // Loser fork: the signer is funded and makes a transfer the winner never
@@ -2130,9 +3855,9 @@ mod tests {
     /// applied — the previous strict equality dropped the second arrival.
     #[test]
     fn audit_tx_out_of_order_replay_both_apply() {
-        let mut crypto = CryptoEngine::new();
-        let id_a = crypto.generate_keypair();
-        let pk_a = id_a.public_key_hex.clone();
+        let mut crypto = pq_wallet();
+        let id_a = gen_addr(&mut crypto);
+        let pk_a = id_a.clone();
         let pk_b = "b".repeat(64);
 
         let mut node_a = Ledger::new();
@@ -2202,5 +3927,1076 @@ mod tests {
             "content tamper ⇒ block hash mismatch ⇒ rejected"
         );
         assert_eq!(node.chain_height(), 1, "chain unchanged");
+    }
+
+    // ─── ONCHAIN-STAKE-1: on-chain stake state ──────────────────────────────
+
+    /// The conservation LHS the harness checks (§5): spendable + locked-stake +
+    /// burned. It must equal `total_minted` at **every** step of a stake lifecycle
+    /// — staking moves coins into the `STAKE` sink, it never destroys them.
+    fn conservation_lhs(l: &Ledger) -> u64 {
+        let spendable: u64 = l.all_balances().values().sum();
+        spendable + l.locked_stake_total() + l.total_burned()
+    }
+
+    /// **ONCHAIN-STAKE-1 §5 — conservation through Stake → Unstake → unlock.**
+    /// Each phase moves coins between the spendable, staked, and unbonding pools;
+    /// conservation (`Σ = minted`) holds at every step, and the funds become
+    /// spendable again only once the unlock height is reached. HARDEN-STAKE-1: a
+    /// Stake **locks** spendable funds the instant it is admitted (mempool), while
+    /// its consensus **weight** is committed only on seal.
+    #[test]
+    fn onchain_stake_conservation_through_stake_unstake_unlock() {
+        let mut crypto = pq_wallet();
+        let id = gen_addr(&mut crypto);
+        let pk = id.clone();
+
+        let mut l = Ledger::new();
+        // Fund 100 QUANTA on-chain.
+        l.mine_tx(&pk, 100 * MICRO, 0.0);
+        l.seal_block(&pk, 0.0);
+        let minted = l.total_minted();
+        assert_eq!(l.balance_of(&pk), 100 * MICRO, "funded spendable");
+        assert_eq!(conservation_lhs(&l), minted, "conservation after funding");
+
+        // ── Stake 40: spendable LOCKS immediately (100 → 60) at mempool, but the
+        //    consensus bonded weight is only committed on seal.
+        l.stake_tx(&pk, 40 * MICRO, &crypto).expect("stake builds");
+        assert_eq!(l.balance_of(&pk), 60 * MICRO, "stake LOCKS spendable at mempool");
+        assert_eq!(l.staked_of(&pk), 0, "but bonded weight not committed until sealed");
+        assert_eq!(l.locked_stake_total(), 40 * MICRO, "40 locked in the STAKE sink");
+        assert_eq!(conservation_lhs(&l), minted, "conservation while pending stake");
+        l.seal_block(&pk, 0.0);
+        assert_eq!(l.balance_of(&pk), 60 * MICRO, "spendable stays locked");
+        assert_eq!(l.staked_of(&pk), 40 * MICRO, "40 now bonded (consensus weight)");
+        assert_eq!(conservation_lhs(&l), minted, "conservation after stake");
+
+        // ── Unstake 25: bonded 40 → 15, unbonding 0 → 25 (still locked).
+        l.unstake_tx(&pk, 25 * MICRO, &crypto).expect("unstake builds");
+        l.seal_block(&pk, 0.0);
+        let unbond_block = l.chain_height() - 1; // index that sealed the unstake
+        let unlock = unbond_block + UNBONDING_PERIOD_BLOCKS;
+        assert_eq!(l.staked_of(&pk), 15 * MICRO, "15 still bonded");
+        assert_eq!(l.unbonding_of(&pk), 25 * MICRO, "25 unbonding");
+        assert_eq!(
+            l.balance_of(&pk),
+            60 * MICRO,
+            "unbonding funds are NOT spendable yet"
+        );
+        assert_eq!(conservation_lhs(&l), minted, "conservation after unstake");
+
+        // ── Just before the unlock height: still locked (height-indexed, §3).
+        l.mature_unbonding(unlock - 1);
+        assert_eq!(
+            l.unbonding_of(&pk),
+            25 * MICRO,
+            "must not unlock before the unbonding period elapses"
+        );
+        assert_eq!(l.balance_of(&pk), 60 * MICRO, "still locked one block early");
+        assert_eq!(conservation_lhs(&l), minted, "conservation while locked");
+
+        // ── At the unlock height (production reaches this via the per-seal
+        //    `apply_block_stake_effects(block.index)`): funds return to spendable.
+        l.mature_unbonding(unlock);
+        assert_eq!(l.unbonding_of(&pk), 0, "unbonding fully matured");
+        assert_eq!(l.staked_of(&pk), 15 * MICRO, "still-bonded stake untouched");
+        assert_eq!(
+            l.balance_of(&pk),
+            85 * MICRO,
+            "60 spendable + 25 matured = 85"
+        );
+        assert_eq!(conservation_lhs(&l), minted, "conservation after unlock");
+    }
+
+    /// **ONCHAIN-STAKE-1 §7 — anti-divergence (the seal), with teeth.** Two nodes
+    /// holding the **same chain** derive the **same** validator weights and elect
+    /// the **same** leader at every slot — even though their *local* leaderboards
+    /// differ. Non-vacuity: the OLD source (a node-local leaderboard) would have
+    /// elected different leaders on those very inputs, so the agreement comes from
+    /// the change of source (chain, not leaderboard), not from identical inputs.
+    #[test]
+    fn onchain_stake_weight_identical_across_nodes_despite_local_leaderboards() {
+        use crate::p2p::pos_consensus::{build_validator_set, elect_leader};
+
+        // Build a chain where three accounts bond different amounts.
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+        let mut crypto_c = pq_wallet();
+        let carol = gen_addr(&mut crypto_c);
+
+        let mut node1 = Ledger::new();
+        for (pk, c, fund, stake) in [
+            (&alice, &crypto_a, 10 * MICRO, 5 * MICRO),
+            (&bob, &crypto_b, 10 * MICRO, 3 * MICRO),
+            (&carol, &crypto_c, 10 * MICRO, 4 * MICRO),
+        ] {
+            node1.mine_tx(pk, fund, 0.0);
+            node1.seal_block(pk, 0.0);
+            node1.stake_tx(pk, stake, c).expect("stake builds");
+            node1.seal_block(pk, 0.0);
+        }
+
+        // node2 holds the SAME chain (restored from node1's snapshot) — its stake
+        // state is rebuilt deterministically from the chain.
+        let node2 = Ledger::restore(node1.snapshot());
+
+        // On-chain stake snapshots coincide exactly.
+        assert_eq!(
+            node1.validator_stakes(),
+            node2.validator_stakes(),
+            "same chain ⇒ identical on-chain stake snapshot"
+        );
+
+        // Validator sets built from the chain (reputation OFF the path: empty map).
+        let no_rep = std::collections::HashMap::new();
+        let vals1 = build_validator_set(&node1.validator_stakes(), &no_rep);
+        let vals2 = build_validator_set(&node2.validator_stakes(), &no_rep);
+
+        // The two nodes elect the SAME leader at every slot.
+        for slot in 0..2_000u64 {
+            assert_eq!(
+                elect_leader("beacon", slot, &vals1),
+                elect_leader("beacon", slot, &vals2),
+                "chain-sourced weight must elect the same leader on both nodes (slot {slot})"
+            );
+        }
+
+        // TEETH — the OLD source (node-local leaderboards) would have diverged.
+        // Simulate two nodes whose *local* views disagree (the exact hazard
+        // ONCHAIN-STAKE-1 closes): node A sees alice richest, node B sees bob
+        // richest. Build validator sets from those (the pre-fix path) and show
+        // they elect different leaders on at least one slot.
+        let local_a = std::collections::HashMap::from([
+            (alice.clone(), 9 * MICRO),
+            (bob.clone(), MICRO),
+            (carol.clone(), MICRO),
+        ]);
+        let local_b = std::collections::HashMap::from([
+            (alice.clone(), MICRO),
+            (bob.clone(), 9 * MICRO),
+            (carol.clone(), MICRO),
+        ]);
+        let old_a = build_validator_set(&local_a, &no_rep);
+        let old_b = build_validator_set(&local_b, &no_rep);
+        let old_would_diverge = (0..2_000u64)
+            .any(|slot| elect_leader("beacon", slot, &old_a) != elect_leader("beacon", slot, &old_b));
+        assert!(
+            old_would_diverge,
+            "non-vacuity: locally-sourced stake WOULD have forked the leader — \
+             the new agreement is due to the on-chain source, not identical inputs"
+        );
+    }
+
+    /// **ONCHAIN-STAKE-1 — live ≡ restored stake state.** A node that sealed a
+    /// full Stake → Unstake → maturation history reaches **byte-identical** stake
+    /// state (bonded map, unbonding, spendable cache, validator snapshot) after a
+    /// snapshot → restore. This is the determinism property a synced/restarted node
+    /// needs: the stake state is reconstructed purely from the chain, with the same
+    /// block-index-anchored unlock heights and matured-fund credits — the live seal
+    /// path and the `rebuild_cache` replay path agree.
+    #[test]
+    fn onchain_stake_state_survives_snapshot_restore_byte_identical() {
+        let mut crypto = pq_wallet();
+        let pk = gen_addr(&mut crypto);
+
+        let mut live = Ledger::new();
+        live.mine_tx(&pk, 100 * MICRO, 0.0);
+        live.seal_block(&pk, 0.0);
+        live.stake_tx(&pk, 60 * MICRO, &crypto).expect("stake");
+        live.seal_block(&pk, 0.0);
+        live.unstake_tx(&pk, 20 * MICRO, &crypto).expect("unstake");
+        live.seal_block(&pk, 0.0);
+
+        // A comparable fingerprint of the full stake-relevant state.
+        let snap_of = |l: &Ledger| {
+            let mut bals: Vec<(String, i128)> = l.balance_cache.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            bals.sort();
+            let mut stk: Vec<(String, u64)> = l.staked.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            stk.sort();
+            (
+                bals,
+                stk,
+                l.staked_total(),
+                l.unbonding_total(),
+                l.unbonding_of(&pk),
+                l.balance_of(&pk),
+            )
+        };
+
+        let restored = Ledger::restore(live.snapshot());
+        assert_eq!(
+            snap_of(&live),
+            snap_of(&restored),
+            "restored node must rebuild byte-identical stake state from the chain"
+        );
+
+        // And maturing both to the same height keeps them identical (the credit
+        // fold replays deterministically too).
+        let target = restored.chain_height() - 1 + UNBONDING_PERIOD_BLOCKS;
+        let mut live2 = live;
+        let mut restored2 = restored;
+        live2.mature_unbonding(target);
+        restored2.mature_unbonding(target);
+        assert_eq!(
+            snap_of(&live2),
+            snap_of(&restored2),
+            "maturation folds identically on both"
+        );
+        assert_eq!(live2.balance_of(&pk), 60 * MICRO, "40 bonded + 20 matured returns 60 spendable");
+    }
+
+    /// **HARDEN-STAKE-1 (regression) — a pending Stake LOCKS funds; no double-spend,
+    /// no conservation break.** The adversarial review found that, before the fix,
+    /// a pending Stake did not reduce `balance_of`, so a concurrent transfer could
+    /// spend the same coins → on seal the balance cache went negative, the `.max(0)`
+    /// clamp hid it, and `Σ spendable + locked_stake + burned` exceeded `minted`
+    /// (µQTA fabricated). Now the Stake debits the spendable balance into the
+    /// `STAKE` sink at admission, so the racing transfer is rejected and
+    /// conservation holds — at every step, including across a seal.
+    #[test]
+    fn harden_stake_pending_stake_locks_funds_no_double_spend() {
+        let mut crypto = pq_wallet();
+        let pk = gen_addr(&mut crypto);
+        let bob = "b".repeat(64);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&pk, 100 * MICRO, 0.0);
+        l.seal_block(&pk, 0.0);
+        let minted = l.total_minted();
+
+        // Stake the FULL balance — funds lock immediately (mempool).
+        l.stake_tx(&pk, 100 * MICRO, &crypto).expect("stake builds");
+        assert_eq!(l.balance_of(&pk), 0, "the staked funds are locked NOW");
+
+        // The racing transfer of the same coins must be REJECTED (the exact
+        // double-spend the review reproduced as a conservation break).
+        let racing = l.transfer_with_burn(&pk, &bob, 50 * MICRO, &crypto);
+        assert!(
+            racing.is_err(),
+            "a transfer of already-staked funds must be rejected (no double-spend)"
+        );
+
+        // Seal the Stake; the balance cache never went negative, conservation holds.
+        l.seal_block(&pk, 0.0);
+        let spendable: u64 = l.all_balances().values().sum();
+        assert_eq!(spendable, 0, "all funds locked in stake, none spendable");
+        assert_eq!(l.locked_stake_total(), 100 * MICRO, "100 locked in the STAKE sink");
+        assert_eq!(l.staked_of(&pk), 100 * MICRO, "100 bonded");
+        assert_eq!(
+            spendable + l.locked_stake_total() + l.total_burned(),
+            minted,
+            "conservation holds — no µQTA fabricated by the (now rejected) double-spend"
+        );
+        // The raw balance cache is non-negative everywhere (the clamp can hide
+        // nothing): the sum of raw entries equals minted − burned exactly.
+        let raw_sum: i128 = l.balance_cache.values().sum();
+        assert_eq!(
+            raw_sum,
+            (minted - l.total_burned()) as i128,
+            "raw cache conserves with no hidden negative deficit"
+        );
+        assert!(
+            l.balance_cache.values().all(|v| *v >= 0),
+            "no balance_cache entry is negative (the bug's signature is absent)"
+        );
+    }
+
+    // ── COVER-1: block-level coverage validation (no spending what you don't have) ──
+
+    /// Forge a block whose hash exceeds `threshold`, so `integrate_remote_block`
+    /// takes the fork-reorg branch (remote wins on the lexicographically higher
+    /// hash). Deterministic: only the block timestamp (part of the hash pre-image)
+    /// is varied, over a fixed sequence, and the first hash that clears the bar is
+    /// returned. The txs — hence the Merkle root — are untouched.
+    #[cfg(test)]
+    fn forge_block_hash_above(
+        index: u64,
+        prev_hash: &str,
+        miner: &str,
+        txs: &[Transaction],
+        threshold: &str,
+    ) -> Block {
+        for i in 0..100_000u32 {
+            let ts = format!("2026-02-01T00:00:00.{i:06}Z");
+            let b = Ledger::forge_block_at(index, prev_hash, &ts, miner, txs.to_vec());
+            if b.hash.as_str() > threshold {
+                return b;
+            }
+        }
+        panic!("could not forge a block with hash above the threshold");
+    }
+
+    /// **COVER-1 §6.1 — an uncovered transfer makes the block INVALID.** Alice
+    /// holds 10 on-chain; a block carrying a (validly-signed) transfer of 50 from
+    /// her is rejected at validation — the spend of coins that don't exist never
+    /// touches the ledger. The signature is genuine (so the rejection is coverage,
+    /// not a forged sig): `build_signed_tx` does not itself check coverage — that
+    /// is exactly the hole COVER-1 closes at the block.
+    #[test]
+    fn cover1_uncovered_transfer_block_rejected() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let evil = l
+            .build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
+                "2026-01-01T00:00:00Z".into(), false)
+            .expect("an over-spend tx still produces a valid signature");
+        let block = Ledger::forge_block_at(tip.index + 1, &tip.hash,
+            "2026-01-01T00:00:01Z", &alice, vec![evil]);
+
+        let res = l.integrate_remote_block(block);
+        let err = res.expect_err("a transfer exceeding the on-chain balance must be rejected");
+        assert!(err.contains("non couverte"), "rejected for coverage, got: {err}");
+        // The rejection touched nothing.
+        assert_eq!(l.chain_height(), 2, "chain unchanged by a rejected block");
+        assert_eq!(l.balance_of(&alice), 10 * MICRO, "balance untouched");
+    }
+
+    /// **COVER-1 §6.2 — an uncovered Stake makes the block INVALID.** Identical to
+    /// the transfer case but with a `Stake`: staking is a spend (it moves coins
+    /// into the locked sink), so it is covered the same way — you cannot bond
+    /// coins you don't have (which would forge consensus weight).
+    #[test]
+    fn cover1_uncovered_stake_block_rejected() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let evil = l
+            .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 50 * MICRO, TxType::Stake, &crypto_a,
+                "2026-01-01T00:00:00Z".into(), false)
+            .expect("an over-stake tx still signs");
+        let block = Ledger::forge_block_at(tip.index + 1, &tip.hash,
+            "2026-01-01T00:00:01Z", &alice, vec![evil]);
+
+        let err = l.integrate_remote_block(block)
+            .expect_err("a Stake exceeding the on-chain balance must be rejected");
+        assert!(err.contains("non couverte"), "rejected for coverage, got: {err}");
+        assert_eq!(l.staked_of(&alice), 0, "no consensus weight forged from absent coins");
+    }
+
+    /// **COVER-1 §6.3 — coverage is SEQUENTIAL within a block.** Alice holds 100.
+    /// A block `[→Bob 50, →Carol 60]` is rejected: the first leg passes (50 left),
+    /// the second is then uncovered (50 < 60). The *same* first leg with a second
+    /// leg of 40 (total 90 ≤ 100) is accepted — proving it is the running-balance
+    /// depletion that rejects, not merely the presence of two txs. The order is
+    /// the block's tx order, deterministic on every node.
+    #[test]
+    fn cover1_sequential_coverage_within_block() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+        let mut crypto_c = pq_wallet();
+        let carol = gen_addr(&mut crypto_c);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        // Over-budget sequence: 50 then 60 — second leg becomes uncovered.
+        let a0 = l.build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-01-01T00:00:00Z".into(), false).unwrap();
+        let a1 = l.build_signed_tx_at(&alice, &carol, 60 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-01-01T00:00:01Z".into(), false).unwrap();
+        let bad = Ledger::forge_block_at(tip.index + 1, &tip.hash,
+            "2026-01-01T00:00:02Z", &alice, vec![a0, a1]);
+        let err = l.integrate_remote_block(bad)
+            .expect_err("the second leg is uncovered once the first depletes the balance");
+        assert!(err.contains("non couverte"), "got: {err}");
+
+        // In-budget sequence on the SAME start state (the rejection mutated nothing):
+        // 50 then 40 — total 90 ≤ 100, both covered sequentially.
+        let b0 = l.build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-01-01T00:00:03Z".into(), false).unwrap();
+        let b1 = l.build_signed_tx_at(&alice, &carol, 40 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-01-01T00:00:04Z".into(), false).unwrap();
+        let good = Ledger::forge_block_at(tip.index + 1, &tip.hash,
+            "2026-01-01T00:00:05Z", &alice, vec![b0, b1]);
+        assert_eq!(l.integrate_remote_block(good), Ok(true),
+            "a sequence within the budget is accepted (no liveness regression)");
+        assert_eq!(l.balance_of(&alice), 10 * MICRO, "100 − 50 − 40 = 10");
+        assert_eq!(l.balance_of(&bob), 50 * MICRO);
+        assert_eq!(l.balance_of(&carol), 40 * MICRO);
+    }
+
+    /// **COVER-1 §6.4 — BOTH paths reject the uncovered, identically.** The same
+    /// uncovered transfer (Alice → Bob 50) is rejected on the **linear** path (a
+    /// block extending the tip) AND on the **fork-reorg** path (a higher-hash block
+    /// replacing the tip) — proving the coverage check lives on the *shared*
+    /// validator, not just one path (the FORK-CAP lesson). The reorg is checked
+    /// against the chain WITHOUT the tip it would replace, and the rejected reorg
+    /// truncates nothing (AUDIT-BLK-2 preserved).
+    #[test]
+    fn cover1_both_paths_reject_uncovered() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        // Chain: genesis(0), block1(1: +10 alice), block2 = tip T(2: +10 alice).
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let block1 = l.block_at(1).unwrap().clone();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(2).unwrap().clone();
+        let minted = l.total_minted();
+
+        // One uncovered tx (50 > alice's balance on EITHER prefix: 10 vs 20).
+        let evil = l.build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-01-01T00:00:00Z".into(), false).unwrap();
+
+        // LINEAR path — block at height 3 extending T (alice has 20 ≤ chain through T).
+        let linear = Ledger::forge_block_at(tip.index + 1, &tip.hash,
+            "2026-01-01T00:00:01Z", &alice, vec![evil.clone()]);
+        let lin_err = l.integrate_remote_block(linear)
+            .expect_err("linear integration rejects the uncovered spend");
+        assert!(lin_err.contains("non couverte"), "linear: {lin_err}");
+
+        // FORK-REORG path — a higher-hash block at height 2 replacing T, checked
+        // against the chain WITHOUT T (alice has 10 there).
+        let reorg = forge_block_hash_above(tip.index, &block1.hash, &alice, &[evil], &tip.hash);
+        assert!(reorg.hash.as_str() > tip.hash.as_str(), "must trigger the reorg branch");
+        let reorg_err = l.integrate_remote_block(reorg)
+            .expect_err("fork-reorg rejects the uncovered winner exactly like the linear path");
+        assert!(reorg_err.contains("non couverte"), "reorg: {reorg_err}");
+
+        // Neither rejection mutated the chain — T is still the tip, nothing truncated.
+        assert_eq!(l.chain_height(), 3, "rejected blocks leave the chain intact");
+        assert_eq!(l.block_at(2).unwrap().hash, tip.hash, "tip unchanged (no truncation)");
+        assert_eq!(conservation_lhs(&l), minted, "conservation intact after both rejections");
+    }
+
+    /// **COVER-1 §6.5 — a fully-covered block PASSES (no liveness regression), and
+    /// §3 intra-block credits count.** Alice holds 0 on-chain, but a block credits
+    /// her a 5-QUANTA mining reward and then spends 3 of it to Bob, in that order.
+    /// The reward (synthetic `NETWORK` sender, exempt) funds the same-block spend
+    /// sequentially, so the block is covered and integrates.
+    #[test]
+    fn cover1_valid_block_with_intra_block_credit_passes() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        let genesis = l.block_at(0).unwrap().clone();
+
+        // A NETWORK→alice mining reward, minted on a throwaway ledger.
+        let mining_tx = {
+            let mut tmp = Ledger::new();
+            tmp.mine_tx(&alice, 5 * MICRO, 0.0)
+        };
+        // Alice spends 3 of the reward she receives IN THE SAME BLOCK (§3).
+        let spend = l.build_signed_tx_at(&alice, &bob, 3 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-03-01T00:00:00Z".into(), false).unwrap();
+        // miner == alice (EMIT-1: the single reward is credited to block.miner).
+        let block = Ledger::forge_block_at(1, &genesis.hash, "2026-03-01T00:00:01Z",
+            &alice, vec![mining_tx, spend]);
+
+        assert_eq!(l.integrate_remote_block(block), Ok(true),
+            "reward-funds-same-block-spend is covered sequentially (§3)");
+        assert_eq!(l.balance_of(&alice), 2 * MICRO, "5 reward − 3 spent = 2");
+        assert_eq!(l.balance_of(&bob), 3 * MICRO, "bob received 3");
+        assert_eq!(conservation_lhs(&l), l.total_minted(), "conservation holds for the accepted block");
+    }
+
+    /// **COVER-1 §6.6 — rejecting the uncovered keeps conservation exact.** With
+    /// the spend rejected at validation it never reaches the cache, so the class
+    /// "uncovered spend breaks/masks conservation" is closed AT validation: `Σ
+    /// spendable + locked + burned == minted` holds, and no balance entry is
+    /// negative. (Determinism — C1 — is the separate 128-run meta-test; this change
+    /// only reads the chain and a `Vec`, both order-deterministic.)
+    #[test]
+    fn cover1_rejected_uncovered_preserves_conservation() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let minted = l.total_minted();
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let evil = l.build_signed_tx_at(&alice, &bob, 500 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-01-01T00:00:00Z".into(), false).unwrap();
+        let block = Ledger::forge_block_at(tip.index + 1, &tip.hash,
+            "2026-01-01T00:00:01Z", &alice, vec![evil]);
+        assert!(l.integrate_remote_block(block).is_err(), "uncovered block rejected");
+
+        assert_eq!(conservation_lhs(&l), minted, "conservation exact after the rejection");
+        assert_eq!(l.balance_of(&alice), 100 * MICRO, "balance untouched by the rejected spend");
+        assert!(l.balance_cache.values().all(|v| *v >= 0), "no negative cache entry — nothing leaked in");
+    }
+
+    /// **COVER-1 — no-drift guard for `onchain_spendable_before`.** The pure
+    /// chain-replay the coverage check relies on must equal the ledger's own
+    /// (chain-only) balance cache, or the verdict could diverge from reality. After
+    /// a mixed history (mine, transfer+burn, stake, unstake) sealed with an empty
+    /// mempool, the replay of the chain up to the tip matches `balance_cache`
+    /// entry-for-entry — generic moves, the STAKE-sink lock, and Unstake's
+    /// no-spendable-effect all mirrored.
+    #[test]
+    fn cover1_onchain_replay_matches_live_cache_no_drift() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        l.transfer_with_burn(&alice, &bob, 20 * MICRO, &crypto_a).expect("transfer");
+        l.seal_block(&alice, 0.0);
+        l.stake_tx(&alice, 30 * MICRO, &crypto_a).expect("stake");
+        l.seal_block(&alice, 0.0);
+        l.unstake_tx(&alice, 10 * MICRO, &crypto_a).expect("unstake");
+        l.seal_block(&alice, 0.0);
+        assert_eq!(l.pending_count(), 0, "all txs sealed — cache is chain-only");
+
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+        let replay = l.onchain_spendable_before(&tip);
+        let norm = |m: &HashMap<String, i128>| {
+            let mut v: Vec<(String, i128)> =
+                m.iter().filter(|(_, x)| **x != 0).map(|(k, x)| (k.clone(), *x)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(norm(&replay), norm(&l.balance_cache),
+            "onchain replay up to the tip must equal the live chain-only cache (no drift)");
+    }
+
+    // ── COVER-2: coverage at SEAL (exclude uncovered, build a valid block) ──
+
+    /// Seal a block AND assert the §3 invariant: a self-produced block always
+    /// passes `validate_block_against_prev` (the integration check). Captures the
+    /// pre-seal tip + on-chain balances, seals, then validates the result against
+    /// them — exactly what a peer integrating this block would compute.
+    #[cfg(test)]
+    fn seal_and_validate(l: &mut Ledger, miner: &str, ts: &str) -> Block {
+        let prev = l.block_at(l.chain_height() - 1).unwrap().clone();
+        let onchain = l.onchain_spendable_before(&prev);
+        let bindings = l.pq_bindings_before(&prev);
+        let block = l.seal_block_at(miner, 0.0, ts.to_string());
+        assert!(
+            Ledger::validate_block_against_prev(&block, &prev, &onchain, &bindings).is_ok(),
+            "COVER-2 §3: a self-sealed block must always pass validation (block #{})",
+            block.index
+        );
+        block
+    }
+
+    /// **COVER-2 §6.1 — an uncovered transfer is EXCLUDED at seal.** A node admits
+    /// an uncovered transfer via `replay_remote_tx` (the no-coverage-gate mempool
+    /// path COVER-1 §5 leaves open), then seals: the tx is ABSENT from the block,
+    /// the block passes integration validation (§3), and conservation is restored
+    /// (the cache revert undoes the transient phantom the uncovered pending tx
+    /// created at admission).
+    #[test]
+    fn cover2_uncovered_transfer_excluded_at_seal() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let minted = l.total_minted();
+
+        let evil = l.build_signed_tx_at(&alice, &bob, 200 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-04-01T00:00:00Z".into(), false).unwrap();
+        let evil_hash = evil.hash.clone();
+        assert!(l.replay_remote_tx(evil), "admitted to pending (no coverage gate at admission)");
+
+        let block = seal_and_validate(&mut l, &alice, "2026-04-01T00:00:01Z");
+        assert!(!block.transactions.iter().any(|t| t.hash == evil_hash),
+            "the uncovered tx is EXCLUDED from the sealed block");
+        assert_eq!(conservation_lhs(&l), minted, "conservation restored — phantom undone by the revert");
+        assert_eq!(l.balance_of(&alice), 100 * MICRO, "alice's coins are intact (the spend never happened)");
+        assert_eq!(l.balance_of(&bob), 0, "bob received nothing");
+    }
+
+    /// **COVER-2 §6.2 — an uncovered Stake is EXCLUDED at seal.** Same as the
+    /// transfer case: no consensus weight is bonded from coins that don't exist.
+    #[test]
+    fn cover2_uncovered_stake_excluded_at_seal() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let minted = l.total_minted();
+
+        let evil = l.build_signed_tx_at(&alice, Ledger::STAKE_SINK, 200 * MICRO, TxType::Stake, &crypto_a,
+            "2026-04-01T00:00:00Z".into(), false).unwrap();
+        let evil_hash = evil.hash.clone();
+        assert!(l.replay_remote_tx(evil));
+
+        let block = seal_and_validate(&mut l, &alice, "2026-04-01T00:00:01Z");
+        assert!(!block.transactions.iter().any(|t| t.hash == evil_hash), "uncovered stake excluded");
+        assert_eq!(l.staked_of(&alice), 0, "no consensus weight bonded from absent coins");
+        assert_eq!(conservation_lhs(&l), minted, "conservation restored");
+        assert_eq!(l.balance_of(&alice), 100 * MICRO, "coins intact");
+    }
+
+    /// **COVER-2 §6.3 — sequential exclusion at seal.** Two admitted txs: the first
+    /// (60) is covered, the second (60) becomes uncovered once the first depletes
+    /// the balance (40 < 60). The first is sealed, the second excluded — the
+    /// running-balance depletion, not the count, drives the exclusion.
+    #[test]
+    fn cover2_sequential_exclusion_at_seal() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+        let mut crypto_c = pq_wallet();
+        let carol = gen_addr(&mut crypto_c);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let minted = l.total_minted();
+
+        let t1 = l.build_signed_tx_at(&alice, &bob, 60 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-04-01T00:00:00Z".into(), false).unwrap();
+        let t1_hash = t1.hash.clone();
+        let t2 = l.build_signed_tx_at(&alice, &carol, 60 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-04-01T00:00:01Z".into(), false).unwrap();
+        let t2_hash = t2.hash.clone();
+        assert!(l.replay_remote_tx(t1));
+        assert!(l.replay_remote_tx(t2));
+
+        let block = seal_and_validate(&mut l, &alice, "2026-04-01T00:00:02Z");
+        assert!(block.transactions.iter().any(|t| t.hash == t1_hash), "the covered leg is sealed");
+        assert!(!block.transactions.iter().any(|t| t.hash == t2_hash), "the now-uncovered leg is excluded");
+        assert_eq!(l.balance_of(&alice), 40 * MICRO, "100 − 60 (only the covered leg) = 40");
+        assert_eq!(l.balance_of(&bob), 60 * MICRO);
+        assert_eq!(l.balance_of(&carol), 0, "carol got nothing — her funding leg was excluded");
+        assert_eq!(conservation_lhs(&l), minted, "conservation holds");
+    }
+
+    /// **COVER-2 §6.4 — the auto-corruption scenario is CLOSED.** node_a admits a
+    /// covered tx AND a malicious uncovered tx via gossip replay, then seals.
+    /// COVER-2 excludes the uncovered one, so node_a's block is valid — and the
+    /// decisive proof is that a PEER (node_b) integrates it cleanly (`Ok(true)`)
+    /// and the two nodes converge. A node can no longer corrupt its own chain.
+    #[test]
+    fn cover2_auto_corruption_scenario_closed() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+        let mut crypto_c = pq_wallet();
+        let carol = gen_addr(&mut crypto_c);
+
+        let mut node_a = Ledger::new();
+        node_a.mine_tx(&alice, 100 * MICRO, 0.0);
+        node_a.seal_block(&alice, 0.0);
+        let mut node_b = Ledger::restore(node_a.snapshot());
+
+        let covered = node_a.build_signed_tx_at(&alice, &bob, 30 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-04-01T00:00:00Z".into(), false).unwrap();
+        let cov_hash = covered.hash.clone();
+        let evil = node_a.build_signed_tx_at(&alice, &carol, 200 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-04-01T00:00:01Z".into(), false).unwrap();
+        let evil_hash = evil.hash.clone();
+        assert!(node_a.replay_remote_tx(covered));
+        assert!(node_a.replay_remote_tx(evil));
+
+        let block = node_a.seal_block_at(&alice, 0.0, "2026-04-01T00:00:02Z".into());
+        assert!(block.transactions.iter().any(|t| t.hash == cov_hash), "covered tx sealed");
+        assert!(!block.transactions.iter().any(|t| t.hash == evil_hash),
+            "uncovered tx excluded — chain not corrupted");
+
+        // Decisive: a peer ACCEPTS node_a's self-sealed block (no divergence).
+        assert_eq!(node_b.integrate_remote_block(block), Ok(true),
+            "a peer accepts the self-sealed block — auto-corruption closed");
+        assert_eq!(node_b.balance_of(&alice), 70 * MICRO, "covered transfer applied on the peer");
+        assert_eq!(node_a.balance_of(&alice), node_b.balance_of(&alice), "nodes converge (alice)");
+        assert_eq!(node_a.balance_of(&bob), node_b.balance_of(&bob), "nodes converge (bob)");
+    }
+
+    /// **COVER-2 §3 (closing invariant) — every block `seal_block_at` produces
+    /// passes `validate_block_against_prev`.** Exercised across a covered mempool,
+    /// a fully-uncovered mempool (→ empty but valid block), and a mix. The
+    /// self-produced block is integration-valid in all cases — the property that
+    /// proves a node can no longer corrupt its own chain.
+    #[test]
+    fn cover2_self_sealed_block_always_validates() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+
+        // (a) covered mempool (just the mining reward) — seal_and_validate asserts §3.
+        seal_and_validate(&mut l, &alice, "2026-05-01T00:00:01Z");
+        assert_eq!(l.balance_of(&alice), 100 * MICRO);
+
+        // (b) fully-uncovered mempool → all excluded → empty but valid block.
+        let e1 = l.build_signed_tx_at(&alice, &bob, 500 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-05-01T01:00:00Z".into(), false).unwrap();
+        l.replay_remote_tx(e1);
+        let empty = seal_and_validate(&mut l, &alice, "2026-05-01T01:00:01Z");
+        assert!(empty.transactions.is_empty(), "all-uncovered mempool seals an empty (valid) block");
+        assert_eq!(l.balance_of(&alice), 100 * MICRO, "uncovered spend never happened");
+
+        // (c) mixed: one covered, one uncovered.
+        let c = l.build_signed_tx_at(&alice, &bob, 20 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-05-01T02:00:00Z".into(), false).unwrap();
+        l.replay_remote_tx(c);
+        let u = l.build_signed_tx_at(&alice, &bob, 900 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-05-01T02:00:01Z".into(), false).unwrap();
+        l.replay_remote_tx(u);
+        let block = seal_and_validate(&mut l, &alice, "2026-05-01T02:00:02Z");
+        assert_eq!(
+            block.transactions.iter().filter(|t| t.tx_type == TxType::Transfer).count(),
+            1,
+            "exactly the covered transfer is sealed"
+        );
+        assert_eq!(l.balance_of(&bob), 20 * MICRO);
+    }
+
+    /// **COVER-2 §6 — no regression: covered txs seal normally.** An honestly-built
+    /// covered transfer (+ its burn leg) is sealed intact — liveness preserved, the
+    /// exclusion logic touches only genuinely-uncovered txs.
+    #[test]
+    fn cover2_covered_txs_sealed_normally_no_regression() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+
+        let (tx, burn, _) = l.transfer_with_burn(&alice, &bob, 50 * MICRO, &crypto_a)
+            .expect("covered transfer builds");
+        let tx_hash = tx.hash.clone();
+        let burn_hash = burn.as_ref().map(|b| b.hash.clone());
+
+        let block = seal_and_validate(&mut l, &alice, "2026-06-01T00:00:00Z");
+        assert!(block.transactions.iter().any(|t| t.hash == tx_hash),
+            "covered transfer IS sealed (liveness preserved)");
+        if let Some(bh) = burn_hash {
+            assert!(block.transactions.iter().any(|t| t.hash == bh), "the burn leg is sealed too");
+        }
+        assert_eq!(l.balance_of(&alice), 50 * MICRO, "alice: 100 − 50 = 50");
+        assert_eq!(l.balance_of(&bob), 49_500_000, "bob: 50 − 1% burn = 49.5");
+    }
+
+    /// **COVER-2 — exclusion is per-tx and dependency-aware.** A tx funded ONLY by
+    /// an excluded tx is ITSELF excluded (the excluded tx's credit never enters the
+    /// running balance), while an INDEPENDENTLY-covered tx that comes *after* an
+    /// excluded one is still kept. Proves seal doesn't "drop everything after the
+    /// first uncovered" (a liveness bug) nor keep a tx funded by phantom coins (a
+    /// safety bug). Cache + conservation are restored regardless.
+    #[test]
+    fn cover2_dependent_exclusion_keeps_independent_covered() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_z = pq_wallet();
+        let zoe = gen_addr(&mut crypto_z); // unfunded sender
+        let dave = "d".repeat(64);
+        let erin = "e".repeat(64);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let minted = l.total_minted();
+
+        // tx_A: zoe→dave 50 — UNCOVERED (zoe has 0).
+        let tx_a = l.build_signed_tx_at(&zoe, &dave, 50 * MICRO, TxType::Transfer, &crypto_z,
+            "2026-07-01T00:00:00Z".into(), false).unwrap();
+        let a_hash = tx_a.hash.clone();
+        // tx_B: dave→erin 40 — would be covered ONLY by tx_A's phantom credit.
+        // (dave is signed by a throwaway key; replay_remote_tx doesn't verify sigs.)
+        let mut crypto_d = pq_wallet();
+        let _ = crypto_d.generate_keypair();
+        let tx_b = l.build_signed_tx_at(&dave, &erin, 40 * MICRO, TxType::Transfer, &crypto_d,
+            "2026-07-01T00:00:01Z".into(), false).unwrap();
+        let b_hash = tx_b.hash.clone();
+        // tx_C: alice→erin 30 — INDEPENDENTLY covered (alice has 100), AFTER the excluded ones.
+        let tx_c = l.build_signed_tx_at(&alice, &erin, 30 * MICRO, TxType::Transfer, &crypto_a,
+            "2026-07-01T00:00:02Z".into(), false).unwrap();
+        let c_hash = tx_c.hash.clone();
+        assert!(l.replay_remote_tx(tx_a));
+        assert!(l.replay_remote_tx(tx_b));
+        assert!(l.replay_remote_tx(tx_c));
+
+        let block = seal_and_validate(&mut l, &alice, "2026-07-01T00:00:03Z");
+        assert!(!block.transactions.iter().any(|t| t.hash == a_hash), "tx_A (uncovered) excluded");
+        assert!(!block.transactions.iter().any(|t| t.hash == b_hash),
+            "tx_B excluded — its only funding (tx_A) was excluded, so it is NOT covered by phantom coins");
+        assert!(block.transactions.iter().any(|t| t.hash == c_hash),
+            "tx_C kept — independently covered despite following excluded txs (no over-pruning)");
+        assert_eq!(l.balance_of(&alice), 70 * MICRO, "100 − 30 (only tx_C) = 70");
+        assert_eq!(l.balance_of(&erin), 30 * MICRO, "erin got only tx_C's 30");
+        assert_eq!(l.balance_of(&dave), 0, "dave: phantom credit reverted");
+        assert_eq!(conservation_lhs(&l), minted, "conservation restored after dependency-aware exclusion");
+    }
+
+    /// **COVER-2 — an out-of-order COVERED tx survives exclusion-elsewhere + reorg
+    /// (no permanent loss).** Rebuts the eviction-liveness concern: even if a peer
+    /// excludes a covered-but-out-of-order tx at seal AND its (T1-only) block wins
+    /// the fork, the node that HELD the tx covered re-queues it on reorg
+    /// (AUDIT-BLK-1) and re-seals it once its funding is on-chain. The tx is never
+    /// lost: it always rides into a block via the holder, then propagates.
+    #[test]
+    fn cover2_out_of_order_covered_tx_survives_exclusion_and_reorg() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+        let mut crypto_c = pq_wallet();
+        let carol = gen_addr(&mut crypto_c);
+
+        // node_a holds T1 (Alice→Bob 30) then T2 (Bob→Carol 20) IN ORDER — both
+        // covered (T1 funds T2) — and seals a block with both.
+        let mut node_a = Ledger::new();
+        node_a.mine_tx(&alice, 100 * MICRO, 0.0);
+        node_a.seal_block(&alice, 0.0);
+        let tip = node_a.block_at(node_a.chain_height() - 1).unwrap().clone();
+
+        let t1 = node_a.transfer_tx_at(&alice, &bob, 30 * MICRO, &crypto_a,
+            "2026-08-01T00:00:00Z".into(), false).unwrap();
+        let t2 = node_a.transfer_tx_at(&bob, &carol, 20 * MICRO, &crypto_b,
+            "2026-08-01T00:00:01Z".into(), false).unwrap();
+        let t2_hash = t2.hash.clone();
+        let block_a = node_a.seal_block_at(&alice, 0.0, "2026-08-01T00:00:02Z".into());
+        assert!(block_a.transactions.iter().any(|t| t.hash == t2_hash), "node_a sealed the covered T2");
+
+        // A competing block at the same height carries ONLY T1 (the shape a peer
+        // that excluded the out-of-order T2 would seal). Forge it with a higher
+        // hash so it wins the deterministic fork tie-break.
+        let block_b = forge_block_hash_above(block_a.index, &tip.hash, &alice, &[t1], &block_a.hash);
+        assert!(block_b.hash.as_str() > block_a.hash.as_str(), "block_b wins the fork");
+
+        // node_a reorgs to the winner → AUDIT-BLK-1 re-queues T2 (absent from the
+        // winning block), so it is NOT lost despite being excluded elsewhere.
+        assert_eq!(node_a.integrate_remote_block(block_b), Ok(true), "reorg to higher-hash block");
+        assert!(node_a.pending_txs().iter().any(|t| t.hash == t2_hash),
+            "the covered tx is RE-QUEUED on reorg (AUDIT-BLK-1) — not permanently lost");
+
+        // node_a re-seals: T1 is now on-chain, so T2 is covered again and sealed.
+        let block_c = node_a.seal_block_at(&alice, 0.0, "2026-08-01T00:00:03Z".into());
+        assert!(block_c.transactions.iter().any(|t| t.hash == t2_hash),
+            "T2 rides into a block once its funding is on-chain — survives end to end");
+        assert_eq!(node_a.balance_of(&carol), 20 * MICRO, "carol ultimately receives her 20");
+    }
+
+    // ───────────────────── PQ-MIG-3 §4 : les dents (CRYPTO-ID-1) ─────────────
+    //
+    // L'autorité d'une transaction = signature ML-DSA valide depuis la clé
+    // RÉVÉLÉE **et** cette clé est celle LIÉE au compte (immuable). Ces tests
+    // prouvent la fermeture de CRYPTO-ID-1 : attacher sa propre clé ML-DSA à un
+    // compte étranger ne passe plus.
+
+    /// A wallet with a CHOSEN Ed25519 seed and a CHOSEN ML-DSA primary seed, so a
+    /// test can model "same Ed25519 account, different ML-DSA key" deterministically.
+    fn wallet_seeds(ed: u8, pq: u8) -> CryptoEngine {
+        let mut c = CryptoEngine::new();
+        c.import_keypair(&[ed; 32]).expect("ed seed");
+        c.import_pq_identity(&[pq; 32]).expect("pq seed");
+        c
+    }
+
+    /// §4 chemin nominal : une tx correctement signée (clé révélée = clé liée,
+    /// signature ML-DSA valide) est ACCEPTÉE par `verify_tx` et ne viole aucune
+    /// liaison.
+    #[test]
+    fn pqmig3_nominal_signed_tx_accepted() {
+        let victim = wallet_seeds(0x11, 0x22);
+        let pk = victim.pq_address_hex().expect("ml-dsa address");
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block(&pk, 0.0);
+        let tx = ledger.transfer_tx(&pk, &"d".repeat(64), 10 * MICRO, &victim).unwrap();
+        assert!(Ledger::verify_tx(&tx).unwrap(), "ML-DSA-signed tx verifies");
+        let tip = ledger.chain.last().unwrap().clone();
+        let bindings = ledger.pq_bindings_before(&tip);
+        assert!(
+            Ledger::binding_violations(&bindings, std::slice::from_ref(&tx)).is_empty(),
+            "first signed tx establishes the binding — not a violation"
+        );
+        ledger.seal_block(&pk, 0.0);
+        assert!(ledger.balance_of(&"d".repeat(64)) > 0, "nominal tx integrated end to end");
+    }
+
+    /// §4 plus aucun repli Ed25519 : une tx ne présentant qu'une signature Ed25519
+    /// (couche ML-DSA absente) est REJETÉE.
+    #[test]
+    fn pqmig3_ed25519_only_tx_rejected() {
+        let victim = wallet_seeds(0x11, 0x22);
+        let pk = victim.pq_address_hex().expect("ml-dsa address");
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block(&pk, 0.0);
+        let mut tx = ledger.transfer_tx(&pk, &"d".repeat(64), 10 * MICRO, &victim).unwrap();
+        tx.pq_signature = None;
+        tx.pq_public_key = None;
+        assert!(
+            !Ledger::verify_tx(&tx).unwrap(),
+            "Ed25519-only tx rejected — the fallback is gone"
+        );
+    }
+
+    /// §4 signature ML-DSA invalide rejetée.
+    #[test]
+    fn pqmig3_invalid_ml_dsa_signature_rejected() {
+        let victim = wallet_seeds(0x11, 0x22);
+        let pk = victim.pq_address_hex().expect("ml-dsa address");
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block(&pk, 0.0);
+        let tx = ledger.transfer_tx(&pk, &"d".repeat(64), 10 * MICRO, &victim).unwrap();
+        let mut bad = tx.clone();
+        let mut sig = hex::decode(bad.pq_signature.as_ref().unwrap()).unwrap();
+        sig[0] ^= 0xFF;
+        bad.pq_signature = Some(hex::encode(sig));
+        assert!(!Ledger::verify_tx(&bad).unwrap(), "corrupted ML-DSA signature rejected");
+    }
+
+    /// §4 substitution de clé rejetée : remplacer la clé révélée (sans re-signer)
+    /// change la préimage ⇒ les deux signatures échouent ⇒ rejet.
+    #[test]
+    fn pqmig3_key_substitution_rejected() {
+        let victim = wallet_seeds(0x11, 0x22);
+        let pk = victim.pq_address_hex().expect("ml-dsa address");
+        let other = wallet_seeds(0x33, 0x44);
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block(&pk, 0.0);
+        let tx = ledger.transfer_tx(&pk, &"d".repeat(64), 10 * MICRO, &victim).unwrap();
+        let mut swapped = tx.clone();
+        swapped.pq_public_key = Some(other.pq_identity_hex().unwrap());
+        assert!(
+            !Ledger::verify_tx(&swapped).unwrap(),
+            "swapping the revealed key (pre-image changes) invalidates the signatures"
+        );
+    }
+
+    /// §4 / PQ-MIG-3B — **LE** test : clé NON LIÉE rejetée. L'attaque CRYPTO-ID-1 :
+    /// un adversaire vise le compte `from` de la victime mais ne possède que **sa
+    /// propre** clé ML-DSA K_a. Sous le modèle (b), `from` EST l'adresse `addr(K_v)`,
+    /// donc la clé révélée doit hasher vers `from` : `verify_tx` **rejette
+    /// directement** (la liaison est intrinsèque, `lie(from, K_a)` faux). Casser
+    /// Ed25519 ne donne aucun pouvoir — l'adresse ne dérive plus d'une clé Ed25519.
+    #[test]
+    fn pqmig3_unbound_key_rejected_closes_crypto_id_1() {
+        // Victim's ACCOUNT is its ML-DSA address addr(K_v). It funds + seals a tx.
+        let victim = wallet_seeds(0x11, 0x22);
+        let pk = victim.pq_address_hex().expect("ml-dsa address"); // = addr(K_v)
+        let kv = victim.pq_identity_hex().unwrap();
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&pk, 100 * MICRO, 0.0);
+        ledger.seal_block(&pk, 0.0);
+        let legit = ledger.transfer_tx(&pk, &"d".repeat(64), 10 * MICRO, &victim).unwrap();
+        assert!(Ledger::verify_tx(&legit).unwrap());
+        ledger.seal_block(&pk, 0.0);
+        let tip = ledger.chain.last().unwrap().clone();
+        let bindings = ledger.pq_bindings_before(&tip);
+
+        // Attacker: even with the victim's Ed25519 seed (a modelled quantum break),
+        // it can only ML-DSA-sign with its OWN independent primary K_a ≠ K_v.
+        let attacker = wallet_seeds(0x11, 0x99);
+        let ka = attacker.pq_identity_hex().unwrap();
+        assert_ne!(ka, kv, "attacker's ML-DSA key differs from the victim's");
+
+        // Evil tx: claims `from = addr(K_v)` but reveals/signs with K_a.
+        let evil = sign_tx_with_nonce(&attacker, &pk, &"e".repeat(64), 5 * MICRO, ledger.get_nonce(&pk));
+        // INTRINSIC closure: the revealed key does NOT hash to `from` ⇒ `verify_tx`
+        // REJECTS it outright (no Ed25519 check, no registry needed) — this IS the
+        // closure of CRYPTO-ID-1 under model (b).
+        assert!(
+            !Ledger::verify_tx(&evil).unwrap(),
+            "unbound key (≠ the one whose address is `from`) MUST be rejected by verify_tx"
+        );
+        assert!(
+            !CryptoEngine::address_hex_binds_key_hex(&evil.from, evil.pq_public_key.as_deref().unwrap()),
+            "lie(from, K_a) is false — the account commits to K_v, not K_a"
+        );
+        // Defense-in-depth: the retained on-chain binding registry ALSO flags it.
+        assert_eq!(
+            Ledger::binding_violations(&bindings, std::slice::from_ref(&evil)),
+            vec![0],
+            "binding registry (backstop) also rejects the unbound key"
+        );
+        // …and the full consensus path rejects a block carrying it.
+        let tx_root = Ledger::compute_merkle_root(std::slice::from_ref(&evil));
+        let idx = tip.index + 1;
+        let ts = "2026-09-09T00:00:00Z";
+        let payload = format!("{}:{}:{}:{}:{}:{}", idx, tip.hash, ts, pk, 1, tx_root);
+        let evil_block = Block {
+            index: idx,
+            timestamp: ts.into(),
+            transactions: vec![evil.clone()],
+            prev_hash: tip.hash.clone(),
+            hash: hex::encode(blake3::hash(payload.as_bytes()).as_bytes()),
+            miner: pk.clone(),
+            energy_kwh: 0.0,
+        };
+        let onchain = ledger.onchain_spendable_before(&tip);
+        assert!(
+            Ledger::validate_block_against_prev(&evil_block, &tip, &onchain, &bindings).is_err(),
+            "a block carrying the unbound-key tx is rejected by validation"
+        );
+    }
+
+    // ── PQ-MIG-3B : from = adresse ML-DSA, autorité PURE ML-DSA + liaison ────────
+    //
+    // ADR-007 (b) : `tx.from` est désormais l'**adresse ML-DSA** (PQ-MIG-2,
+    // `BLAKE3(ADDR_DOMAIN ‖ pk)`). L'autorité d'une tx = signature ML-DSA valide
+    // de la clé révélée **et** `lie(from, clé)` — la clé révélée hashe vers `from`.
+    // Le co-facteur Ed25519 disparaît du chemin d'autorité (l'adresse n'est plus
+    // une clé Ed25519). La faille CRYPTO-ID-1 se ferme **intrinsèquement** : le
+    // compte (`from`) commet cryptographiquement la clé, donc on ne peut pas
+    // attacher une autre clé à un compte étranger.
+
+    /// PQ-MIG-3B — chemin nominal : une tx dont `from` est l'**adresse ML-DSA** du
+    /// signataire, révélant la clé qui hashe vers cette adresse, avec une signature
+    /// ML-DSA valide, est ACCEPTÉE. (Échoue avant 3B : l'ancien `verify_tx` exigeait
+    /// une signature Ed25519 valide *de `from`*, impossible quand `from` est une
+    /// adresse et non une clé Ed25519.)
+    #[test]
+    fn pqmig3b_nominal_address_tx_accepted() {
+        let mut wallet = pq_wallet();
+        wallet.generate_keypair(); // couche Ed25519 (transport) ; primaire posé par pq_wallet
+        let addr = wallet.pq_address_hex().expect("ml-dsa address");
+        let mut ledger = Ledger::new();
+        ledger.mine_tx(&addr, 100 * MICRO, 0.0);
+        ledger.seal_block(&addr, 0.0);
+        let tx = ledger.transfer_tx(&addr, &"d".repeat(64), 10 * MICRO, &wallet).unwrap();
+        assert!(
+            Ledger::verify_tx(&tx).unwrap(),
+            "address-from tx with a valid ML-DSA sig and lie(from,key) holding must verify"
+        );
+        assert!(
+            CryptoEngine::address_hex_binds_key_hex(&tx.from, tx.pq_public_key.as_deref().unwrap()),
+            "the revealed key intrinsically hashes to `from` (the address IS the binding)"
+        );
     }
 }

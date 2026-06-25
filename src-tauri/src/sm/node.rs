@@ -19,6 +19,10 @@
 use super::{
     effect::Effect,
     event::{Event, PeerId, TimerId},
+    finality::{FinalizedSet, EPOCH_LENGTH_BLOCKS},
+    finality_rule::{FinalityState, StepOutcome},
+    finality_vote::FinalityCertificate,
+    fork_choice::{anchors, ghost_head, BlockTree, LatestVotes},
     rng::Rng,
 };
 use crate::{
@@ -29,6 +33,7 @@ use crate::{
     },
     security::CryptoEngine,
 };
+use std::collections::{HashMap, HashSet};
 
 /// Inspectable outcomes of consensus-relevant inbound messages (C3).
 ///
@@ -85,6 +90,16 @@ pub struct Node {
     /// fire to `now_ms` would reschedule the same instant forever — a tight
     /// loop in the simulator.
     next_seal_at_ms: u64,
+    /// **GADGET-1 → GADGET-3**: this node's finality state — the justified set
+    /// (GADGET-3 §1) alongside the finalized set (GADGET-1), both init
+    /// `{genesis}` (genesis is justified **and** finalized by definition,
+    /// `DESIGN-FINALITY-GADGET` §4). GADGET-3's justify/finalize rule now grows
+    /// it via [`Node::apply_finality_certificate`], so the harness
+    /// finality-safety invariant (which reads [`Node::finalized`]) guards **real**
+    /// finalized history, not just genesis. The rule is a pure function of
+    /// (certificate, stake snapshot) — no clock, no entropy — so the `sm/`
+    /// sans-IO / C1 determinism guarantee is untouched.
+    finality: FinalityState,
 }
 
 /// Consensus seal cadence (ms). Mirrors production
@@ -98,21 +113,8 @@ impl Node {
     /// New observer node: fresh genesis ledger, virtual time 0, no signing
     /// identity (cannot emit signed messages).
     pub fn new() -> Self {
-        Self {
-            ledger: Ledger::new(),
-            now_ms: 0,
-            identity: None,
-            out_nonce: 0,
-            telemetry: ConsensusTelemetry::default(),
-            validators: Vec::new(),
-            seal_timer_armed: false,
-            next_seal_at_ms: 0,
-        }
-    }
-
-    /// Wrap an existing ledger (e.g. one restored from a snapshot by the
-    /// shell). Observer — no signing identity.
-    pub fn from_ledger(ledger: Ledger) -> Self {
+        let ledger = Ledger::new();
+        let finality = Self::genesis_finality(&ledger);
         Self {
             ledger,
             now_ms: 0,
@@ -122,6 +124,39 @@ impl Node {
             validators: Vec::new(),
             seal_timer_armed: false,
             next_seal_at_ms: 0,
+            finality,
+        }
+    }
+
+    /// GADGET-1/3: the genesis-only finality state for a given ledger — its
+    /// block 0 hash, justified **and** finalized by definition (design §4).
+    /// Panic-free: a fresh/restored ledger always carries genesis at position 0,
+    /// but we read it via `first()` so a malformed empty chain degrades to an
+    /// empty hash, never a panic (Constitution Rust rule 2).
+    fn genesis_finality(ledger: &Ledger) -> FinalityState {
+        FinalityState::genesis_only(
+            ledger
+                .chain
+                .first()
+                .map(|b| b.hash.clone())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Wrap an existing ledger (e.g. one restored from a snapshot by the
+    /// shell). Observer — no signing identity.
+    pub fn from_ledger(ledger: Ledger) -> Self {
+        let finality = Self::genesis_finality(&ledger);
+        Self {
+            ledger,
+            now_ms: 0,
+            identity: None,
+            out_nonce: 0,
+            telemetry: ConsensusTelemetry::default(),
+            validators: Vec::new(),
+            seal_timer_armed: false,
+            next_seal_at_ms: 0,
+            finality,
         }
     }
 
@@ -130,8 +165,10 @@ impl Node {
     /// simulation shell passes a seed-derived one so the whole run is
     /// replayable.
     pub fn with_identity(identity: CryptoEngine) -> Self {
+        let ledger = Ledger::new();
+        let finality = Self::genesis_finality(&ledger);
         Self {
-            ledger: Ledger::new(),
+            ledger,
             now_ms: 0,
             identity: Some(identity),
             out_nonce: 0,
@@ -139,6 +176,7 @@ impl Node {
             validators: Vec::new(),
             seal_timer_armed: false,
             next_seal_at_ms: 0,
+            finality,
         }
     }
 
@@ -166,6 +204,52 @@ impl Node {
     /// the shell and tests seed ledger state through this accessor.
     pub fn ledger_mut(&mut self) -> &mut Ledger {
         &mut self.ledger
+    }
+
+    /// **GADGET-1**: read-only view of this node's finalized checkpoint set, so
+    /// the harness finality-safety invariant can assert that no two nodes hold a
+    /// conflicting finalized checkpoint at the same epoch. Init genesis-only;
+    /// **GADGET-3**'s justify/finalize rule grows it past genesis via
+    /// [`Node::apply_finality_certificate`], so the invariant now guards real
+    /// finalized history.
+    pub fn finalized(&self) -> &FinalizedSet {
+        self.finality.finalized()
+    }
+
+    /// **GADGET-3**: read-only view of this node's justified checkpoint set (the
+    /// state the justify step grows; a checkpoint is justified before it can be
+    /// finalized).
+    pub fn justified(&self) -> &super::finality_rule::JustifiedSet {
+        self.finality.justified()
+    }
+
+    /// **GADGET-3 — the justify/finalize rule.** Apply one super-majority
+    /// certificate (a ⅔ link `source → target`, GADGET-2) through the two-step
+    /// rule, advancing this node's justified / finalized sets. `stakes` is the
+    /// on-chain stake snapshot the certificate is weighed against; its provenance
+    /// (re-keying [`Ledger::validator_stakes`] to the finality-vote identity) is
+    /// the open ADR-002 / identity reconciliation flagged in GADGET-2 §4, so it
+    /// is **supplied by the caller** rather than read here, and no live gossip
+    /// path is wired yet (mirroring GADGET-2). Pure — no clock, no entropy.
+    /// Returns what the step advanced.
+    pub fn apply_finality_certificate<C: FinalityCertificate>(
+        &mut self,
+        cert: &C,
+        stakes: &HashMap<String, u64>,
+    ) -> StepOutcome {
+        self.finality
+            .apply_certificate(cert, stakes, EPOCH_LENGTH_BLOCKS)
+    }
+
+    /// **GADGET-1 — test injection only.** Record a checkpoint as finalized
+    /// **without any justification check**, bypassing the real
+    /// [`Node::apply_finality_certificate`] rule. Exists purely so the harness
+    /// teeth test can **plant** a cross-node conflict and prove the
+    /// finality-safety invariant bites. `#[cfg(test)]` keeps it out of the
+    /// production surface.
+    #[cfg(test)]
+    pub(crate) fn record_finalized_for_test(&mut self, cp: super::finality::Checkpoint) {
+        self.finality.record_finalized_for_test(cp);
     }
 
     /// T0.4 tr.2: set the validator set this node elects against (transitional
@@ -290,27 +374,129 @@ impl Node {
     }
 
     /// Chain-sync requester side: integrate a received segment block-by-block
-    /// via the shared `integrate_remote_block`. DoS-capped at 50; **stops
-    /// on the first parse/validation failure** (AUDIT-SYNC-1: later blocks
-    /// can't extend a tip the failed one was meant to provide). Outcomes
-    /// feed C3 telemetry.
+    /// via the shared `integrate_remote_block`. DoS-capped at 50. A block that
+    /// won't extend our chain linearly (a **competing fork** off some common
+    /// ancestor, the partition-heal case) is **not** rejected outright — it is
+    /// held and, once the whole segment is read, handed to the GADGET-5B GHOST
+    /// reconciliation ([`Node::reconcile_fork`]). A genuine *gap* (blocks rooted
+    /// at a block we don't hold) never forms a valid fork, so it stays a no-op —
+    /// AUDIT-SYNC-1's "don't waste effort on an unconnectable block" is preserved
+    /// by reconciliation declining it, not by a hard `break`. Outcomes feed C3
+    /// telemetry.
     fn on_chain_segment(&mut self, blocks_json: Vec<String>) {
         const MAX_CHAIN_SEGMENT_RECEIVED: usize = 50;
+        // Keep EVERY well-formed block of the segment (not only the ones that fail
+        // linear integration): a competing fork's tip can be *swallowed* by the
+        // single-block fork path (it returns `Ok(false)` "keep ours" when its hash
+        // is the lower one), so reconstructing the fork from `Err`s alone would miss
+        // it. The full set feeds the GHOST union tree below.
+        let mut received: Vec<Block> = Vec::new();
+        let mut forked = false;
         for block_str in blocks_json.into_iter().take(MAX_CHAIN_SEGMENT_RECEIVED) {
             match serde_json::from_str::<Block>(&block_str) {
-                Ok(block) => match self.ledger.integrate_remote_block(block) {
-                    Ok(true) => self.telemetry.blocks_integrated += 1,
-                    Ok(false) => self.telemetry.blocks_duplicate += 1,
-                    Err(_) => {
-                        self.telemetry.blocks_rejected += 1;
-                        break;
+                Ok(block) => {
+                    received.push(block.clone());
+                    match self.ledger.integrate_remote_block(block) {
+                        Ok(true) => self.telemetry.blocks_integrated += 1,
+                        Ok(false) => self.telemetry.blocks_duplicate += 1,
+                        // Couldn't extend linearly → a competing fork (or a gap):
+                        // hand the whole segment to GHOST reconciliation rather than
+                        // rejecting outright (GADGET-5B).
+                        Err(_) => forked = true,
                     }
-                },
-                Err(_) => {
-                    self.telemetry.blocks_rejected += 1;
-                    break;
                 }
+                // A malformed entry is dropped; the rest of the (bounded) segment is
+                // still read, so one bad block can't hide a reconcilable fork.
+                Err(_) => self.telemetry.blocks_rejected += 1,
             }
+        }
+        if forked {
+            self.reconcile_fork(received);
+        }
+    }
+
+    /// **GADGET-5B — partition reconciliation via the GADGET-5A GHOST engine.**
+    /// At partition heal, build the **union block tree** (local chain ∪ the
+    /// `competing` fork received over sync), run the finality-anchored GHOST head
+    /// — anchored at the last **justified** checkpoint, floored at the last
+    /// **finalized** (absolute) — and, when it lands on the competing fork,
+    /// reorganize the ledger to it with full conservation
+    /// ([`Ledger::reorg_to_fork`]: the abandoned branch's emission/state reverted,
+    /// its user txs re-queued, its rewards never re-minted).
+    ///
+    /// **Determinism (C1).** Pure: no clock, no entropy, and **no map iteration in
+    /// the verdict** — the tree is built from the ordered chain/segment, the head
+    /// from the engine's `BTreeMap`/`BTreeSet` (smallest-hash tie-break), the
+    /// winning chain reconstructed by a **bounded** parent walk. So two healed
+    /// partitions, seeing the same blocks, converge on the **same** head.
+    ///
+    /// Vote gossip is not wired yet (the deferred vote-key ↔ stake-key
+    /// reconciliation), so the latest-vote store is empty here — the block tree,
+    /// the finality floor and on-chain stake already make the choice deterministic
+    /// and convergent; once votes flow, the engine's weight (§2) drives it
+    /// unchanged.
+    fn reconcile_fork(&mut self, competing: Vec<Block>) {
+        let Some(local_tip) = self.ledger.chain.last().map(|b| b.hash.clone()) else {
+            return;
+        };
+        // Union block tree + a hash → Block backing store (to rebuild the winner).
+        // The local chain's block 0 is the genesis ROOT; everything else links to
+        // its parent. A competing block links to its parent (in either set).
+        let mut tree = BlockTree::new();
+        let mut by_hash: HashMap<String, Block> = HashMap::new();
+        for (i, b) in self.ledger.chain.iter().enumerate() {
+            if i == 0 {
+                tree.add_root(&b.hash);
+            } else {
+                tree.add_block(&b.hash, &b.prev_hash);
+            }
+            by_hash.insert(b.hash.clone(), b.clone());
+        }
+        for b in &competing {
+            tree.add_block(&b.hash, &b.prev_hash);
+            by_hash.entry(b.hash.clone()).or_insert_with(|| b.clone());
+        }
+        // GHOST head: anchored at last justified, floored at last finalized.
+        let (anchor, floor) = anchors(&self.finality);
+        let stakes = self.ledger.validator_stakes();
+        let votes = LatestVotes::new();
+        let head = ghost_head(&tree, &votes, &stakes, &anchor, &floor);
+        if head == local_tip {
+            return; // GHOST keeps our chain — nothing to reorganize
+        }
+        // Reconstruct the winning chain: walk parents from `head` down to the first
+        // block already on our chain (the common ancestor), collecting the blocks
+        // ABOVE it. Bounded by the known-block count (no hang on cyclic input).
+        let local: HashSet<String> = self.ledger.chain.iter().map(|b| b.hash.clone()).collect();
+        let mut winners: Vec<Block> = Vec::new();
+        let mut cur = head;
+        for _ in 0..=by_hash.len() {
+            if local.contains(&cur) {
+                break; // common ancestor reached
+            }
+            let Some(b) = by_hash.get(&cur) else {
+                return; // a winning block we don't actually hold — abort, keep ours
+            };
+            winners.push(b.clone());
+            cur = b.prev_hash.clone();
+        }
+        if winners.is_empty() {
+            return;
+        }
+        winners.reverse(); // ascending index for the ledger reorg
+        // The last finalized block's index — the reorg floor (never popped).
+        let floor_index = self
+            .ledger
+            .chain
+            .iter()
+            .find(|b| b.hash == floor)
+            .map(|b| b.index)
+            .unwrap_or(0);
+        if let Ok(true) = self.ledger.reorg_to_fork(&winners, floor_index) {
+            self.telemetry.blocks_integrated = self
+                .telemetry
+                .blocks_integrated
+                .saturating_add(winners.len() as u64);
         }
     }
 
@@ -336,7 +522,12 @@ impl Node {
             self.now_ms = now_ms;
         }
         let now = self.now_ms;
-        let pk = self.identity.as_ref()?.get_identity().ok()?.public_key_hex;
+        // PQ-MIG-3B: the **value** identity — the miner-reward target and the
+        // proposer-election key — is this node's ML-DSA address (`from`/`to` are
+        // addresses everywhere now, and `validator_stakes()` is keyed by
+        // address). The envelope carrying the block is still signed by the
+        // Ed25519 **transport** key (see `sign_envelope`), which is deferred.
+        let pk = self.identity.as_ref()?.pq_address_hex()?;
         if !self.is_elected_proposer_at(now, &pk, validators) {
             return None;
         }
@@ -563,6 +754,7 @@ mod tests {
     fn conservation_holds_through_node_ticks() {
         let mut crypto = CryptoEngine::new();
         let _ = crypto.generate_keypair();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3
         let acc = [
             "a".repeat(64),
             "b".repeat(64),
@@ -629,14 +821,19 @@ mod tests {
     fn broadcast_tx_is_applied_to_ledger_through_core() {
         let mut crypto = CryptoEngine::new();
         let id = crypto.generate_keypair();
+        crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3
+        // PQ-MIG-3B: the **value** identity (`from`/balance key) is the ML-DSA
+        // address; the **transport** identity (gossip envelope sender) stays the
+        // Ed25519 key.
+        let addr = crypto.pq_address_hex().expect("ml-dsa address");
         let sender = id.public_key_hex.clone();
         let recipient = "r".repeat(64);
 
         // Origin builds a SIGNED transfer (sender funded so it's valid).
         let mut origin = Ledger::new();
-        origin.mine_tx(&sender, 50 * MICRO, 0.0);
+        origin.mine_tx(&addr, 50 * MICRO, 0.0);
         let (tx, _burn, _amt) = origin
-            .transfer_with_burn(&sender, &recipient, 10 * MICRO, &crypto)
+            .transfer_with_burn(&addr, &recipient, 10 * MICRO, &crypto)
             .expect("transfer builds");
         let credited = tx.amount; // net after the 1% burn
         let tx_json = serde_json::to_string(&tx).unwrap();
@@ -707,12 +904,30 @@ mod tests {
 
     /// Deterministic signing identity derived from a seed (Ed25519 accepts any
     /// 32 bytes as the secret). Same seed ⇒ same key ⇒ reproducible signatures.
+    ///
+    /// PQ-MIG-3: also establishes the **independent ML-DSA primary** (the
+    /// tx-authority key the ledger binds), its seed derived from the Ed25519 seed
+    /// via a domain-separated BLAKE3 hash — reproducible (C1) yet structurally
+    /// independent of the Ed25519 seed bytes.
     fn seeded_identity(seed: u64) -> CryptoEngine {
         let mut sk = [0x11u8; 32];
         sk[..8].copy_from_slice(&seed.to_le_bytes());
         let mut c = CryptoEngine::new();
         c.import_keypair(&sk).expect("valid 32-byte ed25519 secret");
+        let mut pq_seed = [0u8; 32];
+        pq_seed.copy_from_slice(&CryptoEngine::blake3_hash(
+            &[b"QUANTA-PQ-PRIMARY-sim:".as_ref(), &sk].concat(),
+        ));
+        c.import_pq_identity(&pq_seed).expect("ml-dsa primary");
         c
+    }
+
+    /// PQ-MIG-3B: the **value** identity of an engine — its ML-DSA *address*
+    /// (`BLAKE3(ADDR_DOMAIN ‖ pq_pubkey)`), the key under which balance, stake,
+    /// reward and `from`/`to` are recorded. Distinct from `public_key_hex`, the
+    /// Ed25519 **transport** identity used only to sign gossip envelopes.
+    fn addr_of(crypto: &CryptoEngine) -> String {
+        crypto.pq_address_hex().expect("ml-dsa address")
     }
 
     /// A signed gossip envelope wrapping `msg` from `crypto`'s identity,
@@ -952,7 +1167,7 @@ mod tests {
 
         // ── Build all input envelopes ONCE (frozen bytes) ──
         let alice = seeded_identity(2);
-        let alice_pk = alice.get_identity().unwrap().public_key_hex;
+        let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let carol = seeded_identity(4);
         let dave = seeded_identity(5);
         let bob = "b".repeat(64);
@@ -1182,7 +1397,7 @@ mod tests {
     #[test]
     fn remote_tx_admitted_regardless_of_tx_age() {
         let alice = seeded_identity(2);
-        let alice_pk = alice.get_identity().unwrap().public_key_hex;
+        let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let bob = "b".repeat(64);
 
         let mut origin = Ledger::new();
@@ -1296,7 +1511,7 @@ mod tests {
     fn consensus_telemetry_counts_duplicates_and_tx_outcomes() {
         let now0 = 1_800_000_000_000_u64;
         let alice = seeded_identity(2);
-        let alice_pk = alice.get_identity().unwrap().public_key_hex;
+        let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let bob = "b".repeat(64);
 
         let mut origin = Ledger::new();
@@ -1348,7 +1563,7 @@ mod tests {
     /// all sealed into one block extending the shared genesis.
     fn sealed_block_with_transfer(recipient: &str, mint: u64) -> Block {
         let alice = seeded_identity(2);
-        let alice_pk = alice.get_identity().unwrap().public_key_hex;
+        let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let mut o = Ledger::new();
         o.mine_tx(&alice_pk, mint, 0.0);
         let _ = o.transfer_with_burn(&alice_pk, recipient, 10 * MICRO, &alice);
@@ -1534,7 +1749,7 @@ mod tests {
     fn verified_tx_typestate_gates_admission_on_signature() {
         use crate::p2p::ledger::VerifiedTx;
         let alice = seeded_identity(2);
-        let alice_pk = alice.get_identity().unwrap().public_key_hex;
+        let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let mut origin = Ledger::new();
         origin.mine_tx(&alice_pk, 50 * MICRO, 0.0);
         let (xfer, _burn, _amt) = origin
@@ -1546,12 +1761,18 @@ mod tests {
             VerifiedTx::new(xfer.clone()).is_some(),
             "a valid signature must mint a VerifiedTx token"
         );
-        // Tampering the signature makes the token un-mintable — the single gate.
+        // Tampering the **authority** signature makes the token un-mintable — the
+        // single gate. PQ-MIG-3B: authority is PURE ML-DSA (`pq_signature`); the
+        // Ed25519 `signature` is a vestigial co-factor off the authority path, so
+        // corrupting it would NOT reject. We corrupt the ML-DSA signature (same
+        // length ⇒ still valid hex, wrong bytes) — that is what the gate checks.
         let mut tampered = xfer;
-        tampered.signature = "0".repeat(128); // valid hex, wrong bytes
+        if let Some(sig) = tampered.pq_signature.as_mut() {
+            *sig = "0".repeat(sig.len());
+        }
         assert!(
             VerifiedTx::new(tampered).is_none(),
-            "a tampered signature must be rejected by the single admission gate"
+            "a tampered ML-DSA authority signature must be rejected by the single admission gate"
         );
     }
 
@@ -1565,7 +1786,10 @@ mod tests {
     #[test]
     fn elected_leader_seals_a_valid_block_at_injected_time() {
         let mut node = Node::with_identity(seeded_identity(1));
-        let pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+        // PQ-MIG-3B: the validator identity, the elected-proposer key, and the
+        // block's miner-reward target are all the ML-DSA **address** now
+        // (`validator_stakes()` is address-keyed). The envelope stays Ed25519-signed.
+        let pk = addr_of(&seeded_identity(1));
         node.ledger_mut().mine_tx(&pk, 5 * MICRO, 0.0); // something to seal
 
         // We are the only staked validator → we are the elected leader.
@@ -1606,11 +1830,12 @@ mod tests {
     #[test]
     fn non_leader_does_not_seal() {
         let mut node = Node::with_identity(seeded_identity(1));
-        let pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+        // PQ-MIG-3B: address-keyed identities (value path) — see C7 above.
+        let pk = addr_of(&seeded_identity(1));
         node.ledger_mut().mine_tx(&pk, 5 * MICRO, 0.0);
 
         // Someone else is the sole staked validator → they are the leader.
-        let other = seeded_identity(2).get_identity().unwrap().public_key_hex;
+        let other = addr_of(&seeded_identity(2));
         let validators = vec![Validator {
             pk: other,
             stake: MIN_VALIDATOR_STAKE,
@@ -1638,7 +1863,8 @@ mod tests {
     /// pending tx so the pending content is identical across runs.
     #[test]
     fn block_proposal_is_byte_deterministic() {
-        let pk = seeded_identity(1).get_identity().unwrap().public_key_hex;
+        // PQ-MIG-3B: address-keyed validator + miner target (see C7 above).
+        let pk = addr_of(&seeded_identity(1));
         // One frozen mining tx → identical pending content in every run.
         let frozen_tx = {
             let mut o = Ledger::new();
