@@ -50,6 +50,14 @@ pub use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
 /// iteration order reaches a verdict.
 type Link = (Checkpoint, Checkpoint);
 
+/// DoS bound: the maximum number of distinct pending certificate links the pool
+/// holds. A vote's target hash is attacker-chosen (not checked against a real
+/// block until GADGET-3), so without a cap a single min-stake validator could
+/// grow the pool without limit. Generous enough to never bite honest traffic
+/// (finality advances a handful of epochs at a time); on overflow the stalest
+/// links are evicted deterministically. See [`FinalityTracker::ingest_vote`].
+const MAX_PENDING_LINKS: usize = 4096;
+
 /// **The live finality gadget state (LIVE-1).** Bundles the fork-choice latest
 /// votes, the justify/finalize state, the block tree GHOST walks, and the
 /// per-link vote pool that turns individual votes into ⅔ certificates. Held by
@@ -74,6 +82,9 @@ pub struct FinalityTracker {
     /// the whole live path agreeing on one value and lets IO tests exercise the
     /// justify/finalize path at a small `E` without sealing 32 real blocks.
     epoch_len: u64,
+    /// DoS bound on `pool` size ([`MAX_PENDING_LINKS`] in production). A field so a
+    /// test can use a tiny cap without signing thousands of votes.
+    max_pending_links: usize,
 }
 
 /// What ingesting one vote advanced — for observability/tests. `accepted` false
@@ -108,6 +119,12 @@ impl FinalityTracker {
     /// in `epoch_len`, so this changes only *how often* checkpoints fall, never
     /// the logic. `epoch_len` is clamped to `≥ 1` (mirrors the `sm/` helpers).
     pub fn with_epoch_len(genesis_hash: String, epoch_len: u64) -> Self {
+        Self::with_caps(genesis_hash, epoch_len, MAX_PENDING_LINKS)
+    }
+
+    /// As [`Self::with_epoch_len`] but with an explicit pool cap — for the DoS-bound
+    /// test (a tiny cap avoids signing thousands of votes).
+    pub fn with_caps(genesis_hash: String, epoch_len: u64, max_pending_links: usize) -> Self {
         let mut tree = BlockTree::new();
         tree.add_root(&genesis_hash);
         Self {
@@ -116,6 +133,7 @@ impl FinalityTracker {
             tree,
             pool: BTreeMap::new(),
             epoch_len: epoch_len.max(1),
+            max_pending_links: max_pending_links.max(1),
         }
     }
 
@@ -128,6 +146,12 @@ impl FinalityTracker {
     /// Read-only view of the latest votes (fork-choice input).
     pub fn latest_votes(&self) -> &LatestVotes {
         &self.latest
+    }
+
+    /// Number of distinct pending certificate links (bounded by `MAX_PENDING_LINKS`).
+    #[cfg(test)]
+    pub(crate) fn pending_links(&self) -> usize {
+        self.pool.len()
     }
 
     /// LIVE-2 — the chain height of the **last finalized** checkpoint (the finality
@@ -190,23 +214,51 @@ impl FinalityTracker {
                 .map(|_| crate::sm::finality_slashing::FaultProof::new(prior.clone(), vote.clone()))
         });
 
-        // Fork-choice (GADGET-5A): the latest vote per validator drives GHOST.
+        // Fork-choice (GADGET-5A): the latest vote per validator drives GHOST. The
+        // latest-vote store is bounded by the validator set (one entry per key), so
+        // it is not a memory-growth vector.
         self.latest.observe(vote.clone());
-
-        // Accumulate toward a certificate for this vote's link.
-        let link: Link = (vote.source.clone(), vote.target.clone());
-        let entry = self.pool.entry(link.clone()).or_default();
-        // De-dup a validator's repeat vote for the SAME link (idempotent gossip);
-        // the certificate also rejects double-counting, this just bounds the pool.
-        if !entry.iter().any(|v| v.validator == vote.validator) {
-            entry.push(vote.clone());
-        }
 
         let mut outcome = IngestOutcome {
             accepted: true,
             detected_fault,
             ..Default::default()
         };
+
+        // ── DoS guard on the certificate pool (bounded memory) ──────────────────
+        // A vote's `target` hash is NOT checked against a real block (that is
+        // GADGET-3's job with the chain), so a single min-stake validator could
+        // gossip endless well-formed votes with distinct target hashes — each a new
+        // `Link` — and, never reaching ⅔ alone, never trigger the justify/finalize
+        // prune → unbounded `pool` growth → OOM on every node. Two bounds close it:
+        //   1. **Stale links can't advance finality** — a link whose target epoch is
+        //      at/below the last finalized epoch is dead weight (finality is
+        //      append-only, epochs only rise); never pool it.
+        //   2. **Hard cap** — cap the number of distinct pending links; on overflow
+        //      evict the lowest-key link (BTreeMap order → the lowest source epoch,
+        //      the stalest; deterministic). Evicting a genuinely-accumulating link is
+        //      harmless: its certificate re-forms as its votes re-gossip.
+        // This is IO-layer liveness/memory state, not a consensus verdict — eviction
+        // never changes the finalized set (a real ⅔ certificate finalizes regardless
+        // of pool contents), so C1/safety are untouched.
+        let finalized_epoch = self
+            .state
+            .finalized()
+            .iter()
+            .last()
+            .map(|c| c.epoch)
+            .unwrap_or(0);
+        if vote.target.epoch <= finalized_epoch {
+            return outcome; // stale — observed for fork-choice, but not pooled
+        }
+
+        let link: Link = (vote.source.clone(), vote.target.clone());
+        let entry = self.pool.entry(link.clone()).or_default();
+        // De-dup a validator's repeat vote for the SAME link (idempotent gossip);
+        // the certificate also rejects double-counting, this just bounds the Vec.
+        if !entry.iter().any(|v| v.validator == vote.validator) {
+            entry.push(vote.clone());
+        }
 
         // Try to form and apply a ⅔ certificate for the link (GADGET-2 → 3).
         let votes = entry.clone();
@@ -215,12 +267,19 @@ impl FinalityTracker {
             let step = self.state.apply_certificate(&cert, &stakes, self.epoch_len);
             outcome.justified = step.justified;
             outcome.finalized = step.finalized;
-            // Once a link's certificate has been applied it can advance finality
-            // no further; drop the pool entry so it can't be re-applied and to
-            // bound memory. (A later, distinct link accumulates its own entry.)
+            // Once a link's certificate has been applied it can advance finality no
+            // further; drop the pool entry so it can't be re-applied and to bound memory.
             if step.justified || step.finalized {
                 self.pool.remove(&link);
             }
+        }
+
+        // Hard cap (bound #2): evict the lowest-key (stalest) links until under cap.
+        while self.pool.len() > self.max_pending_links {
+            let Some(oldest) = self.pool.keys().next().cloned() else {
+                break;
+            };
+            self.pool.remove(&oldest);
         }
         outcome
     }
@@ -639,6 +698,57 @@ mod tests {
         assert_eq!(restored.locked_stake_total(), live_locked, "restored locked-stake matches live");
         assert_eq!(restored.total_burned(), live_burned, "restored burned matches live");
         assert!(conserves(&restored), "restored node conserves");
+    }
+
+    #[test]
+    fn audit_pool_is_bounded_against_a_vote_flood() {
+        // HIGH (adversarial audit): a single min-stake validator could gossip endless
+        // well-formed votes with distinct target hashes — each a new pool link, never
+        // pruned (a sub-⅔ attacker never finalizes) → unbounded memory. The cap must
+        // hold the pool at MAX_PENDING_LINKS regardless of how many the attacker sends.
+        let a = identity(1);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        // Tiny cap so the flood is cheap (the production cap MAX_PENDING_LINKS
+        // exercises the SAME `while pool.len() > self.max_pending_links` eviction).
+        const CAP: usize = 16;
+        let mut tracker = FinalityTracker::with_caps(ledger.genesis_hash(), E, CAP);
+        let g = cp(0, ledger.genesis_hash().as_str());
+        // Flood well past the cap with distinct-target (epoch 1) votes.
+        for i in 0..(CAP + 50) {
+            let target = cp(1, &format!("flood-{i}"));
+            let v = signed_vote(&a, &g, &target);
+            assert!(tracker.ingest_vote(v, &ledger).accepted, "each flood vote is well-formed");
+        }
+        assert!(
+            tracker.pending_links() <= CAP,
+            "the pool stays bounded under a vote flood (got {})",
+            tracker.pending_links(),
+        );
+    }
+
+    #[test]
+    fn audit_stale_links_below_finality_are_not_pooled() {
+        // A vote whose target epoch is at/below the last finalized epoch can never
+        // advance finality (finality is append-only) — it must not enter the pool
+        // (else it is a free memory-growth vector below the floor).
+        let a = identity(1);
+        let b = identity(2);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO), (&b, 5 * MICRO)]);
+        let mut tracker = FinalityTracker::with_epoch_len(ledger.genesis_hash(), E);
+        let g = cp(0, ledger.genesis_hash().as_str());
+        let c1 = cp(1, "c1-hash");
+        let c2 = cp(2, "c2-hash");
+        // Finalize c1 (epoch 1) via g→c1 then c1→c2.
+        tracker.ingest_vote(signed_vote(&a, &g, &c1), &ledger);
+        tracker.ingest_vote(signed_vote(&b, &g, &c1), &ledger);
+        tracker.ingest_vote(signed_vote(&a, &c1, &c2), &ledger);
+        tracker.ingest_vote(signed_vote(&b, &c1, &c2), &ledger);
+        let before = tracker.pending_links();
+        // A fresh vote for epoch 1 (≤ finalized epoch 1) is accepted for fork-choice
+        // but NOT pooled.
+        let stale = tracker.ingest_vote(signed_vote(&a, &g, &cp(1, "stale-epoch1")), &ledger);
+        assert!(stale.accepted, "the stale vote still verifies (fork-choice observes it)");
+        assert_eq!(tracker.pending_links(), before, "a link at/below the finalized epoch is not pooled");
     }
 
     #[test]
