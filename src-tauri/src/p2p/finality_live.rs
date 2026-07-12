@@ -752,6 +752,191 @@ mod tests {
     }
 
     #[test]
+    fn audit_two_distinct_proofs_for_one_offender_queue_one_slash() {
+        // CRITICAL/HIGH (audit): two DISTINCT-but-valid proofs for the SAME offender
+        // — here the order-symmetric FaultProof(a,b) vs (b,a), which both verify and
+        // name the same offender but serialize (and hash) differently — must NOT both
+        // queue a slash. Without the per-offender mempool guard, each debits the full
+        // still-uncommitted stake from the shared STAKE sink → the sink goes negative
+        // and burned double-counts → a conservation break on a non-sealing node.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        assert!(conserves(&ledger), "conserves before");
+        let p1 = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        // The order-symmetric sibling: swap the two votes → a distinct proof_json →
+        // distinct slash-tx hash → NOT caught by hash dedup.
+        let p2 = FaultProof::new(p1.vote_b.clone(), p1.vote_a.clone());
+        assert!(ledger.build_slash_tx(&p1).unwrap().hash != ledger.build_slash_tx(&p2).unwrap().hash,
+            "the two proofs really do produce different slash-tx hashes (else the test is vacuous)");
+
+        assert!(ledger.queue_slash(&p1).is_some(), "first slash queued");
+        assert!(ledger.queue_slash(&p2).is_none(), "second slash of the SAME offender is refused");
+        assert!(conserves(&ledger), "conserves after (no double STAKE-sink debit)");
+        // Exactly one Slash pending.
+        let pending_slashes = ledger.pending_slash_count_for_test();
+        assert_eq!(pending_slashes, 1, "exactly one slash pending for the offender");
+
+        // And sealing applies it once — conservation intact end to end.
+        let addr = a.pq_address_hex().unwrap();
+        ledger.seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into()).unwrap();
+        assert_eq!(ledger.staked_of(&addr), 0, "offender slashed once");
+        assert!(conserves(&ledger), "conserves after seal");
+    }
+
+    #[test]
+    fn audit_pending_slash_survives_mempool_ttl_prune() {
+        // HIGH (audit 788): a queued `Slash` carries the fixed `GENESIS_TIMESTAMP` by
+        // design (deterministic hash / C1 — a wall-clock stamp would desync nodes). If
+        // `prune_mempool` TTL-evicted it like ordinary mempool traffic, the slash would
+        // be dropped ~every prune (30 s) long before a seal (~120 s) could include it →
+        // accountable-safety slashing would be **inoperative in production**. A pending
+        // slash must survive an arbitrarily-late prune, then still seal normally.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        ledger.queue_slash(&proof).expect("slash queued");
+        assert_eq!(ledger.pending_slash_count_for_test(), 1, "one slash pending");
+
+        // Prune FAR past the TTL (a year beyond genesis) — an ordinary tx would be
+        // evicted; the network-authored slash must not be.
+        let far_future = chrono::DateTime::parse_from_rfc3339("2027-01-01T00:00:00+00:00")
+            .unwrap()
+            .timestamp();
+        ledger.prune_mempool_at(far_future);
+        assert_eq!(
+            ledger.pending_slash_count_for_test(),
+            1,
+            "the slash survives an arbitrarily-late TTL prune (788)"
+        );
+        assert!(conserves(&ledger), "conservation intact after prune");
+
+        // And it still seals — slashing is operative end to end.
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into())
+            .expect("seal after the late prune");
+        assert_eq!(ledger.staked_of(&addr), 0, "the slash still seals after a late prune");
+        assert!(conserves(&ledger), "conserves end to end");
+    }
+
+    #[test]
+    fn audit_pending_slash_evicted_when_a_block_slashes_the_same_offender() {
+        // HIGH (audit 2318): node R holds a *pending* slash P2 for offender O. A remote
+        // block that slashes O via a DIFFERENT valid proof P1 arrives and is integrated.
+        // Once the block zeroes O's bonded stake, P2 is redundant — and TTL-exempt (788),
+        // so it would linger forever with its admission-time STAKE-sink debit uncorrected
+        // → `total_burned` double-counts a stake that no longer exists → a **permanent**
+        // conservation break. The redundant pending slash must be evicted at block-apply
+        // so conservation is exact **at block time** (not merely at the next prune).
+        let o = identity(1);
+        let addr = o.pq_address_hex().unwrap();
+
+        // Sealer S builds the canonical slash block for O from proof p1.
+        let mut sealer = staked_ledger(&[(&o, 5 * MICRO)]);
+        let p1 = double_vote_proof(&o, sealer.genesis_hash().as_str());
+        sealer.queue_slash(&p1).expect("p1 queued on the sealer");
+        let slash_block = sealer
+            .seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into())
+            .expect("sealer seals the slash block");
+        assert!(
+            slash_block
+                .transactions
+                .iter()
+                .any(|t| t.tx_type == crate::p2p::ledger::TxType::Slash),
+            "the sealed block really slashes O"
+        );
+
+        // Receiver R independently queued a DIFFERENT valid proof p2 for the SAME O
+        // (the order-symmetric sibling → a distinct tx hash, so not caught by dedup).
+        let mut receiver = staked_ledger(&[(&o, 5 * MICRO)]);
+        let p2 = FaultProof::new(p1.vote_b.clone(), p1.vote_a.clone());
+        receiver.queue_slash(&p2).expect("p2 queued on the receiver");
+        assert_eq!(receiver.pending_slash_count_for_test(), 1, "R has a pending slash for O");
+        assert!(conserves(&receiver), "R conserves before the block");
+
+        // The slash block arrives. R applies it AND evicts its now-redundant pending P2.
+        assert_eq!(
+            receiver.integrate_remote_block(slash_block),
+            Ok(true),
+            "R accepts the remote slash block"
+        );
+        assert_eq!(receiver.staked_of(&addr), 0, "O is slashed on R");
+        assert_eq!(
+            receiver.pending_slash_count_for_test(),
+            0,
+            "the redundant pending slash was evicted (2318)"
+        );
+        assert!(
+            conserves(&receiver),
+            "R conserves EXACTLY at block time — no double-counted burn"
+        );
+    }
+
+    #[test]
+    fn audit_reorg_does_not_requeue_a_popped_slash() {
+        use crate::p2p::ledger::TxType;
+        // HIGH (audit 2450): a `Slash` sits on a losing fork. When the reorg pops that
+        // branch, the slash must NOT be re-queued into the mempool — it is
+        // network-authored (belongs to a block, its authority is an embedded proof), and
+        // re-queuing would re-debit the STAKE sink / risk a double-slash if the winning
+        // fork re-slashes. Same rule as a synthetic mining reward (EMIT-1 §4.1).
+        let o = identity(1);
+        let addr = o.pq_address_hex().unwrap();
+        let mut ledger = staked_ledger(&[(&o, 5 * MICRO)]); // chain height 1, O bonded 5
+        let b1_hash = ledger.chain.last().unwrap().hash.clone();
+        assert!(conserves(&ledger), "conserves before");
+
+        // LOSER block (index 2): a mining reward + a slash of O.
+        let p = double_vote_proof(&o, ledger.genesis_hash().as_str());
+        let slash_tx = ledger.build_slash_tx(&p).expect("slash tx");
+        let loser_reward = ledger.build_unsigned_tx("NETWORK", &addr, 3 * MICRO, TxType::Mining);
+        let loser = Ledger::forge_block_at(
+            2,
+            &b1_hash,
+            "2026-07-12T00:00:00+00:00",
+            &addr,
+            vec![loser_reward, slash_tx],
+        );
+        assert_eq!(
+            ledger.integrate_remote_block(loser),
+            Ok(true),
+            "loser (mining + slash) sealed at index 2"
+        );
+        assert_eq!(ledger.staked_of(&addr), 0, "O slashed on the loser branch");
+        assert!(conserves(&ledger), "conserves after the loser slash");
+
+        // WINNER fork (index 2, rooted at b1): a larger mining reward, NO slash.
+        let winner_reward = ledger.build_unsigned_tx("NETWORK", &addr, 5 * MICRO, TxType::Mining);
+        let winner = Ledger::forge_block_at(
+            2,
+            &b1_hash,
+            "2026-07-12T00:00:00+00:00",
+            &addr,
+            vec![winner_reward],
+        );
+        assert_eq!(
+            ledger.reorg_to_fork(std::slice::from_ref(&winner), 0),
+            Ok(true),
+            "the competing fork is adopted (floor 0, valid)"
+        );
+
+        // The popped slash is NOT re-queued; O's bonded stake is restored by the
+        // revert; conservation holds (no re-queued slash double-debit).
+        assert_eq!(ledger.chain.last().unwrap().hash, winner.hash, "winner is the tip");
+        assert_eq!(
+            ledger.pending_slash_count_for_test(),
+            0,
+            "the popped slash was NOT re-queued (2450)"
+        );
+        assert_eq!(
+            ledger.staked_of(&addr),
+            5 * MICRO,
+            "O's bonded stake restored by the reorg revert (its slash is gone with the loser)"
+        );
+        assert!(conserves(&ledger), "conserves after the reorg");
+    }
+
+    #[test]
     fn live3_slash_of_unbonded_offender_is_noop() {
         // Nothing to slash: a proof against a key with no bonded stake queues
         // nothing (and would be rejected in-block anyway — verify_proof requires an

@@ -3823,3 +3823,83 @@ conservation + émission verts ; clippy `--all-targets` propre. **Suivi CLOS** :
 `Move::Slash` + `slash_scenario` + le sweep dédié `t0_8_slash_sweep_conserves` (slashing multi-seed
 sous fautes réseau, conservation/émission/sûreté vérifiées **par pas**) et `t0_8_slash_sweep_is_reproducible`
 (C1 sous slashing). La couverture fuzz continue du chemin de slash est en place.
+
+---
+
+## Audit exhaustif multi-agents (ultracode) — durcissement post-livraison (2026-07-12)
+
+Après LIVE-1→3 + la revue adversariale (4 failles), un **audit exhaustif** a été lancé
+(workflow multi-agents : un chercheur profond par domaine — conservation/émission, sûreté
+consensus, slashing, crypto/PQ, P2P/dispatch, déterminisme — chaque trouvaille vérifiée par
+3 sceptiques en réfutation). Trouvaille CONFIRMÉE et corrigée :
+
+- **HIGH — croissance mémoire non bornée du `pool` de votes (`FinalityTracker`).** Le hash de
+  `target` d'un vote n'est pas vérifié contre un vrai bloc (c'est le rôle de GADGET-3 avec la
+  chaîne) : un seul validateur à l'enjeu minimal pouvait gossiper une infinité de votes bien
+  formés à `target` distincts — chacun un nouveau lien, jamais élagué (un attaquant sous-⅔ ne
+  finalise jamais) → OOM sur chaque nœud. Corrigé (`finality_live.rs::ingest_vote`) : (1) un lien
+  dont l'époque cible est ≤ l'époque finalisée n'est jamais mis en pool (la finalité ne monte que) ;
+  (2) plafond dur `max_pending_links` (4096 en prod) avec éviction déterministe du plus ancien lien.
+  État IO (liveness/mémoire), pas un verdict de consensus → l'éviction ne change jamais l'ensemble
+  finalisé (un vrai certificat ⅔ finalise quel que soit le contenu du pool), C1/sûreté intacts.
+  Tests : `audit_pool_is_bounded_against_a_vote_flood`, `audit_stale_links_below_finality_are_not_pooled`.
+
+**Portes** : 395 tests / 0 échec ; C1 128-runs byte-identique ; sweep multi-seed conservation +
+émission + **slashing** verts ; clippy `--all-targets` propre.
+
+### Grappe « cycle de vie du slash » — 4 confirmées & corrigées + 3 évaluées (2026-07-12)
+
+L'audit exhaustif (agents coupés par la limite de session) a laissé une grappe de trouvailles
+sur le **cycle de vie d'une tx `Slash`** dans le mempool/fork. Chacune **revérifiée à la main
+contre le code** (les vérificateurs sceptiques n'ont pas tous fini), puis corrigée avec un test
+de régression encodant la panne :
+
+- **HIGH 788 — le slash était inopérant en production (éviction TTL).** Une tx `Slash` porte le
+  `GENESIS_TIMESTAMP` fixe **par conception** (hash déterministe / C1 — un horodatage mural
+  casserait l'accord inter-nœuds), donc toujours « périmé » face à l'heure réelle. `prune_mempool`
+  (toutes les ~30 s) l'évinçait comme du trafic mempool ordinaire — **avant** que le seal (~120 s)
+  ne puisse l'inclure → le slashing ne se déclenchait **jamais** en vif. Corrigé : le `Slash` est
+  **exempté de l'éviction TTL** (Passe 1) ; il est nettoyé au seal (exclusion COVER-2 d'un offenseur
+  déjà slashé) et ne peut pas s'accumuler (un slash pending par offenseur, ci-dessous). Test :
+  `audit_pending_slash_survives_mempool_ttl_prune`.
+- **HIGH 2318 — slash pending redondant non évincé → rupture de conservation permanente.** Le nœud R
+  tient un `Slash` **pending** pour l'offenseur O ; un bloc distant slashe O via une **autre** preuve
+  valide. Une fois le bloc appliqué (staked[O]→0), le slash pending est redondant — et exempté du TTL
+  (788), donc il **traînait indéfiniment** avec son débit sink d'admission non corrigé → `total_burned`
+  double-comptait un enjeu qui n'existe plus. Corrigé : `evict_stale_pending_slashes` (même règle
+  `invalid_slash_indices` que seal/réception) appelé **à l'application du bloc** (seal + les deux
+  chemins d'`integrate`) ⇒ conservation exacte **au temps du bloc**, pas seulement au prochain prune.
+  Test : `audit_pending_slash_evicted_when_a_block_slashes_the_same_offender`.
+- **HIGH 2450 — un `Slash` poppé était re-mis en file au reorg.** Les boucles de re-queue
+  (`integrate_remote_block` swap de fork + `reorg_to_fork`) ne sautaient que les émetteurs
+  synthétiques (`NETWORK`/`ESCROW`). Un `Slash` (émetteur = adresse de l'offenseur) était re-mis en
+  file → re-débit du sink STAKE / risque de double-slash si le gagnant re-slashe. Corrigé : le `Slash`
+  est **réseau-autorisé** (autorité = preuve embarquée, appartient à un bloc, pas au mempool) — même
+  saut que les synthétiques. Test : `audit_reorg_does_not_requeue_a_popped_slash`.
+- **MEDIUM 911 — deux preuves distinctes pour un offenseur mettaient 2 slashs en file.** Deux preuves
+  valides mais **distinctes** (p. ex. `FaultProof(a,b)` vs `(b,a)`, hash différent → non attrapé par
+  la dédup) empilaient deux `Slash` pending pour le même O → double débit sink sur un nœud non-sealer.
+  Corrigé : garde par-offenseur dans `queue_slash` (refus si un `Slash` pending existe déjà pour ce
+  `from`). Test : `audit_two_distinct_proofs_for_one_offender_queue_one_slash`.
+
+**Évaluées** (vérifiées contre le code — pas de correctif nécessaire ou porté au roadmap) :
+
+- **2396 — « incohérence de montant au reorg » : RÉFUTÉE.** `revert_block_stake_effects` (bras `Slash`)
+  restaure `staked += tx.amount` — **le montant propre de la tx**, symétrique de l'apply ; `cache_revert_tx`
+  restaure le sink. Un slash poppé est donc inversé **exactement**. `gadget5b_reorg_*` et le nouveau
+  `audit_reorg_does_not_requeue_a_popped_slash` confirment la conservation à travers le reorg. Aucun bug.
+- **2359 — « fork-choice non conscient de la finalité » : déjà mitigée (défense en profondeur).** La
+  fonction `ghost_head` (LMD-GHOST) ne consulte pas le plancher, mais l'**enforcement** est au point
+  d'intégration : `integrate_remote_block`/`reorg_to_fork` **vetoent** tout reorg ≤ `finalized_floor_index`
+  (LIVE-2). Une suggestion de fork-choice sous le plancher est donc rejetée à l'application — l'histoire
+  finalisée reste irréversible. Test existant : `live2_integrate_refuses_to_reorg_a_finalized_tip`.
+- **837 — « unstake-and-run » : limitation de conception connue (roadmap).** Un offenseur qui `Unstake`
+  **avant** que son slash ne soit scellé déplace ses coins vers l'unbonding (le slash cible le *bonded*,
+  donc `staked=0` → rien à slasher ; dans le même bloc c'est déjà refusé, mais à cheval sur deux blocs il
+  échappe). Mitigation présente : les coins restent **verrouillés `UNBONDING_PERIOD_BLOCKS` (~2 sem.)**,
+  bien au-delà de la fenêtre de détection. Correctif complet (le slash atteint les coins en unbonding,
+  ou gel de l'`Unstake` d'un offenseur dès qu'une preuve existe) = **addition de conception**, au roadmap
+  avec le vrai VRF/VDF et le slashing d'inactivité — cohérent avec le nommage honnête du gadget.
+
+**Portes après la grappe** : **399 tests + 1 intégration / 0 échec** ; C1 128-runs byte-identique ;
+sweep multi-seed conservation + émission + **slashing** verts ; clippy `--all-targets` propre.

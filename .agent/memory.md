@@ -99,3 +99,27 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
 - Ne JAMAIS afficher un **prix/valeur fiat inventé** (le coût énergétique est un coût, pas un prix).
 - Ne pas réintroduire les features **web/social/marketplace** (sites, recherche, likes, forums, modération, compute).
 - Garder l'identité = **`@pseudo`** (pas un domaine payant).
+
+---
+
+## Cycle de vie d'une tx `Slash` (LIVE-3 — invariants durcis, ne pas régresser)
+- Un `Slash` est **réseau-autorisé** (autorité = `FaultProof` embarquée, PAS une signature) → il
+  appartient à un **bloc**, jamais au mempool utilisateur. Conséquences gravées :
+  - **Exempté de l'éviction TTL** de `prune_mempool` (il porte `GENESIS_TIMESTAMP` fixe par déterminisme/C1 ;
+    sinon il serait évincé avant le seal → slashing inopérant). Cf. `audit_pending_slash_survives_mempool_ttl_prune`.
+  - **Jamais re-mis en file au reorg** (boucles de re-queue de `integrate_remote_block`/`reorg_to_fork`) —
+    même saut que les émetteurs synthétiques `NETWORK`/`ESCROW`. Cf. `audit_reorg_does_not_requeue_a_popped_slash`.
+  - **Un seul `Slash` pending par offenseur** (`queue_slash` refuse un doublon même preuve-distincte).
+  - À l'application d'un bloc (seal + integrate), `evict_stale_pending_slashes` retire tout `Slash` pending
+    devenu redondant (offenseur déjà slashé → `staked=0`) et **révoque son débit sink** → conservation
+    exacte au temps du bloc. Cf. `audit_pending_slash_evicted_when_a_block_slashes_the_same_offender`.
+  - Conservation neutre : `cache_apply_tx(Slash)` débite le **sink STAKE** (pas le spendable), `total_burned`
+    compte le Slash ; `revert_block_stake_effects` restaure `staked += tx.amount` (montant propre, symétrique).
+
+## Limitations connues (roadmap — nommage honnête)
+- **Unstake-and-run (837)** : un offenseur qui `Unstake` **avant** que son slash ne soit scellé échappe au
+  slash (celui-ci cible le *bonded*, pas l'unbonding). Mitigé : coins verrouillés `UNBONDING_PERIOD_BLOCKS`
+  (~2 sem.) ≫ fenêtre de détection. Correctif complet (slash atteignant l'unbonding / gel de l'`Unstake`
+  sur preuve existante) = addition de conception, au roadmap avec le vrai VRF/VDF + slashing d'inactivité.
+- **Fork-choice (`ghost_head`) non conscient de la finalité** : sans danger — l'enforcement est le **veto de
+  plancher** LIVE-2 dans `integrate_remote_block`/`reorg_to_fork` (rejette tout reorg ≤ `finalized_floor_index`).

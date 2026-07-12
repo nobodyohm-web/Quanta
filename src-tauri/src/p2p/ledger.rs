@@ -414,6 +414,19 @@ impl Ledger {
 
         // Pass 1: TTL-based eviction.
         self.pending.retain(|tx| {
+            // LIVE-3 (audit HIGH): a `Slash` is **network-authored**, not user
+            // mempool traffic. It carries the fixed `GENESIS_TIMESTAMP` **by design**
+            // (deterministic hash / C1 — a wall-clock stamp would break cross-node
+            // agreement), which is always "stale" against real time. TTL-evicting it
+            // would drop every slash ~30 s after it is queued — before the ~120 s
+            // seal could include it — making accountable-safety slashing inoperative
+            // in production. Exempt it: a slash is instead cleaned up at seal when it
+            // becomes redundant (`invalid_slash_indices` excludes an offender already
+            // slashed on-chain), and it can't accumulate (one pending slash per
+            // offender, `queue_slash`).
+            if matches!(tx.tx_type, TxType::Slash) {
+                return true;
+            }
             let keep = match chrono::DateTime::parse_from_rfc3339(&tx.timestamp) {
                 Ok(ts) => (now - ts.timestamp()) <= Self::MEMPOOL_TTL_SECS,
                 // If timestamp is unparseable, treat as fresh — avoids
@@ -910,12 +923,70 @@ impl Ledger {
     /// slash (offender not bonded) or the slash is already pending/applied.
     pub fn queue_slash(&mut self, proof: &crate::sm::finality_slashing::FaultProof) -> Option<Transaction> {
         let tx = self.build_slash_tx(proof)?;
+        // **Per-offender mempool guard (audit CRITICAL/HIGH).** `seen_tx_hashes`
+        // dedups by tx HASH, but a slash hash binds the full fault proof, and TWO
+        // distinct-but-valid proofs can incriminate the SAME offender — e.g. two
+        // separate equivocations, or the order-symmetric `FaultProof(a,b)` vs `(b,a)`
+        // (both verify; both name the same `offender()`), which a live node reaches
+        // when two peers observe one equivocation in opposite vote-arrival order.
+        // Each would build a distinct-hash Slash tx whose amount = the offender's
+        // FULL still-uncommitted bonded stake, and each `cache_apply_tx` debits the
+        // shared STAKE sink → the sink goes negative and `total_burned` double-counts
+        // → a **permanent** conservation break on a non-sealing node (a queued Slash is
+        // now TTL-exempt from `prune_mempool`, audit 788, so it never self-heals). The
+        // in-block guard (`invalid_slash_indices`) only fires at seal, so it does not
+        // protect a node that never seals. Refuse a second slash
+        // of an offender that already has one pending (keyed on the offender address —
+        // every proof variant for one fault shares it). An **already-applied** slash
+        // needs no guard: the offender's bonded stake is then 0, so `build_slash_tx`
+        // already returns `None` (`slash_amount_for(0) == 0`).
+        if self
+            .pending
+            .iter()
+            .any(|t| t.tx_type == TxType::Slash && t.from == tx.from)
+        {
+            return None; // this offender already has a pending slash
+        }
         if !self.seen_tx_hashes.insert(tx.hash.clone()) {
             return None; // already queued or applied (dedup)
         }
         self.cache_apply_tx(&tx); // STAKE sink debit at admission (mirrors other txs)
         self.pending.push(tx.clone());
         Some(tx)
+    }
+
+    /// Test-only: number of `Slash` txs currently in the mempool.
+    #[cfg(test)]
+    pub(crate) fn pending_slash_count_for_test(&self) -> usize {
+        self.pending.iter().filter(|t| t.tx_type == TxType::Slash).count()
+    }
+
+    /// LIVE-3 (audit) — after a block is applied, drop any pending `Slash` that is
+    /// now **redundant** against the new on-chain state — chiefly one whose offender
+    /// was just slashed by the block (its bonded stake is now 0, so the pending slash
+    /// would over-debit the STAKE sink and inflate `total_burned` against a stake
+    /// that no longer exists). Reverts each dropped slash's cache effect so
+    /// conservation stays **exact at block time** (not merely self-healing at the next
+    /// mempool prune). Uses the SAME `invalid_slash_indices` rule the seal/receive
+    /// paths use, so "redundant" means exactly "would be excluded/rejected now".
+    /// Cheap no-op when no slash is pending.
+    fn evict_stale_pending_slashes(&mut self) {
+        if !self.pending.iter().any(|t| t.tx_type == TxType::Slash) {
+            return;
+        }
+        let snapshot = self.pending.clone();
+        let bad_hashes: Vec<String> = self
+            .invalid_slash_indices(&snapshot)
+            .into_iter()
+            .filter_map(|i| snapshot.get(i).map(|t| t.hash.clone()))
+            .collect();
+        for h in bad_hashes {
+            if let Some(pos) = self.pending.iter().position(|t| t.hash == h) {
+                let tx = self.pending.remove(pos);
+                self.cache_revert_tx(&tx); // undo its admission-time STAKE-sink debit
+                self.seen_tx_hashes.remove(&tx.hash);
+            }
+        }
     }
 
     /// ONCHAIN-STAKE-1 §4: the on-chain stake snapshot that feeds the validator
@@ -1729,6 +1800,11 @@ impl Ledger {
         // ONCHAIN-STAKE-1: apply this block's Stake/Unstake + height-triggered
         // maturation now that it is the chain tip (block-index-anchored).
         self.apply_block_stake_effects(&block);
+        // LIVE-3 (audit 2318): if this block slashed an offender, any *pending* slash
+        // for the same offender is now redundant — evict it so its admission-time
+        // STAKE-sink debit is reverted (else `total_burned` would double-count a
+        // stake that no longer exists). No-op unless a slash is pending.
+        self.evict_stale_pending_slashes();
         block
     }
 
@@ -2331,6 +2407,10 @@ impl Ledger {
             // it is moved into the chain (block-index-anchored, identical to seal).
             self.apply_block_stake_effects(&block);
             self.chain.push(block);
+            // LIVE-3 (audit 2318): a remote block that slashed an offender makes our
+            // own pending slash for the same offender redundant — evict it so its
+            // STAKE-sink debit is reverted and conservation stays exact at block time.
+            self.evict_stale_pending_slashes();
             return Ok(true);
         }
 
@@ -2447,7 +2527,12 @@ impl Ledger {
                     // mining reward would let it be sealed AGAIN into a later
                     // block — a double-mint the height-1 competition never owed.
                     // Its cache effect was reverted above and stays reverted.
-                    if Self::is_synthetic_sender(&tx.from) {
+                    // LIVE-3 (audit): a `Slash` is likewise **network-authored** (its
+                    // authority is an embedded proof, not a signature) and belongs to
+                    // a block, not the mempool. Re-queuing a popped slash would
+                    // re-debit the STAKE sink and could double-slash if the winner
+                    // re-slashes — skip it (its cache effect was reverted above).
+                    if Self::is_synthetic_sender(&tx.from) || matches!(tx.tx_type, TxType::Slash) {
                         continue;
                     }
                     self.cache_apply_tx(&tx);
@@ -2463,6 +2548,9 @@ impl Ledger {
                 // heights anchor to the same index the loser used).
                 self.apply_block_stake_effects(&block);
                 self.chain.push(block);
+                // LIVE-3 (audit 2318): the winning fork may slash an offender for whom
+                // we hold a pending slash — evict the now-redundant pending one.
+                self.evict_stale_pending_slashes();
                 return Ok(true);
             } else {
                 log::info!(
@@ -2544,7 +2632,13 @@ impl Ledger {
             .collect();
         for blk in popped {
             for tx in blk.transactions {
-                if winner_tx_hashes.contains(&tx.hash) || Self::is_synthetic_sender(&tx.from) {
+                // LIVE-3 (audit): a `Slash` is network-authored (belongs to a block,
+                // not the mempool) — never re-queue a popped one (it would re-debit
+                // the STAKE sink / risk a double-slash). Same rule as synthetic senders.
+                if winner_tx_hashes.contains(&tx.hash)
+                    || Self::is_synthetic_sender(&tx.from)
+                    || matches!(tx.tx_type, TxType::Slash)
+                {
                     continue;
                 }
                 trial.cache_apply_tx(&tx);
@@ -2799,8 +2893,9 @@ impl Ledger {
     }
 
     /// Build an unsigned (network-issued) tx. Used for Mining and reward
-    /// QUANTA.
-    fn build_unsigned_tx(
+    /// QUANTA. `pub(crate)` so cross-module tests (e.g. the LIVE-3 reorg teeth in
+    /// `finality_live`) can forge competing fork blocks with network-issued rewards.
+    pub(crate) fn build_unsigned_tx(
         &mut self,
         from: &str,
         to: &str,
