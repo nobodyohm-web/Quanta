@@ -49,6 +49,13 @@ ignore = [
     # cœur — PR dédiée + tests P2P).
     { id = "RUSTSEC-2026-0119", reason = "hickory-proto via iroh (pin exact =0.26.0-beta.4); DoS découverte DNS; fix = bump iroh (PR dédiée)" },
     { id = "RUSTSEC-2026-0120", reason = "hickory-net via iroh (pin exact =0.26.0-beta.4); DoS découverte DNS; fix = bump iroh (PR dédiée)" },
+    # quick-xml 0.38.4 via plist → netdev → iroh 0.98.1 (détection d'interfaces
+    # réseau). N'analyse QUE les plist LOCAUX du système (énumération des devices),
+    # jamais du XML distant/attaquant → les classes DoS (attribut dupliqué
+    # quadratique / allocation de namespaces non bornée) ne sont pas exposées.
+    # Fix = bump iroh (transport cœur — PR dédiée). Triage du 2026-07-12.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via plist/iroh; parse plist LOCAUX seulement (pas de XML distant); fix = bump iroh (PR dédiée)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via plist/iroh; parse plist LOCAUX seulement (pas de XML distant); fix = bump iroh (PR dédiée)" },
 ]
 
 [licenses]
