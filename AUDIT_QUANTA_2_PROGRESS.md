@@ -3819,6 +3819,7 @@ réelles, toutes corrigées avec un test de régression encodant l'attaque (comm
   changer le hash du bloc ; `slash_amount_for` clampe à l'enjeu (défense pour une future fraction > 1).
 
 **Portes après corrections** : 391 tests / 0 échec ; C1 128-runs byte-identique ; sweep multi-seed
-conservation + émission verts ; clippy `--all-targets` propre. **Reste (suivi)** : le harnais DST
-(`sim.rs`) ne génère pas encore de tx `Slash` — les attaques ci-dessus sont couvertes par des tests
-unitaires ciblés ; ajouter un `Move::Slash` au sweep donnerait une couverture fuzz continue.
+conservation + émission verts ; clippy `--all-targets` propre. **Suivi CLOS** : le harnais DST (`sim.rs`) génère désormais des tx `Slash` — `Move::Stake` +
+`Move::Slash` + `slash_scenario` + le sweep dédié `t0_8_slash_sweep_conserves` (slashing multi-seed
+sous fautes réseau, conservation/émission/sûreté vérifiées **par pas**) et `t0_8_slash_sweep_is_reproducible`
+(C1 sous slashing). La couverture fuzz continue du chemin de slash est en place.

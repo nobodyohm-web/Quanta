@@ -2158,6 +2158,39 @@ fn det_rfc3339(ts_ms: u64) -> String {
 /// leaf binds `tx_content_bytes` (from/to/amount/nonce/type/ts) + signature, so
 /// this reward roots into a block exactly as a real one would; `NETWORK` is a
 /// synthetic sender, so it needs no signature (`verify_tx` exempts it).
+/// LIVE-3 sweep — a deterministic **double-vote** fault proof by `offender`: two
+/// conflicting finality votes for the SAME target epoch (`genesis → cA` and
+/// `genesis → cB`), signed via the deterministic ML-DSA path (`sign_pq_det`, so
+/// the whole sweep stays byte-reproducible / C1). The checkpoints sit on real
+/// `EPOCH_LENGTH_BLOCKS` boundaries so `verify_proof`/`verify_block_slashes`
+/// (which use the production constant) accept the fault.
+fn det_double_vote_proof(
+    offender: &CryptoEngine,
+    genesis_hash: &str,
+) -> crate::sm::finality_slashing::FaultProof {
+    use crate::sm::finality::{Checkpoint, EPOCH_LENGTH_BLOCKS};
+    use crate::sm::finality_vote::Vote;
+    let g = Checkpoint { epoch: 0, height: 0, hash: genesis_hash.to_string() };
+    let pk = offender.pq_identity_hex().expect("offender ml-dsa primary");
+    let mk = |target_hash: &str| -> Vote {
+        let target = Checkpoint {
+            epoch: 1,
+            height: EPOCH_LENGTH_BLOCKS,
+            hash: target_hash.to_string(),
+        };
+        let mut v = Vote {
+            source: g.clone(),
+            target,
+            voting_epoch: 1,
+            validator: pk.clone(),
+            signature: Vec::new(),
+        };
+        v.signature = offender.sign_pq_det(&v.signable_bytes()).expect("det ml-dsa sign");
+        v
+    };
+    crate::sm::finality_slashing::FaultProof::new(mk("slash-vote-a"), mk("slash-vote-b"))
+}
+
 fn det_mining_tx(pk: &str, amount: u64, ts_ms: u64, seq: u64) -> Transaction {
     let ts = det_rfc3339(ts_ms);
     let hash = hex::encode(
@@ -2374,6 +2407,24 @@ enum Move {
         to: usize,
         amount: u64,
         at_ms: u64,
+    },
+    /// LIVE-3 sweep — node `idx` **bonds** `amount` µQTA of its spendable balance
+    /// (a signed `Stake` tx into its pending, sealed by its next block). Best-effort:
+    /// underfunded ⇒ no-op. Prerequisite for a slashable validator.
+    Stake {
+        idx: usize,
+        amount: u64,
+        at_ms: u64,
+    },
+    /// LIVE-3 sweep — an **equivocation slash**. The validator at `offender_idx`
+    /// double-votes (two conflicting finality votes); node `on_idx` builds the
+    /// resulting `FaultProof` and **queues the slash** on its own ledger
+    /// (`queue_slash`), destroying the offender's bonded stake STAKE→BURN in the
+    /// next sealed block. Best-effort: an unbonded offender ⇒ no-op. Drives the
+    /// slash accounting through the **per-step conservation check** of the sweep.
+    Slash {
+        offender_idx: usize,
+        on_idx: usize,
     },
     /// Drive the event loop (checked) for up to `steps` events.
     Run { steps: u64 },
@@ -2702,6 +2753,71 @@ fn scenario_equivocation(seed: u64, r: &mut Blake3Rng) -> ScenarioPlan {
     }
 }
 
+/// **LIVE-3 sweep archetype** — the accountable-safety slash under a seeded fault
+/// profile, driven through the SAME per-step-checked executor as every other
+/// archetype, so the STAKE→BURN accounting is verified for **conservation +
+/// emission + safety** continuously across the seed range (not just by the
+/// hand-written unit teeth). Timeline: node 0 mines → bonds part of it → then
+/// **equivocates** (a double-vote fault) and is **slashed** on its own ledger;
+/// the slash rides its next sealed block. A seeded `SetFaults` stresses the path
+/// under drop/dup/delay. Kept **separate** from the random `scenario()` generator
+/// so the existing sweep's seed→archetype mapping (and its coverage assertions)
+/// are untouched.
+fn slash_scenario(seed: u64) -> ScenarioPlan {
+    let mut r = Blake3Rng::from_seed(seed);
+    let t0 = SIM_EPOCH_MS;
+    let faults = FaultProfile {
+        drop_ppm: sd_range(&mut r, 0, 300_000),
+        dup_ppm: sd_range(&mut r, 0, 150_000),
+        min_delay_ms: 1,
+        max_delay_ms: sd_range(&mut r, 2, 30),
+    };
+    // Bond a seed-varied fraction of the 50-QTA mining reward (always ≥ 1 QTA so
+    // there is real stake to slash).
+    let stake = MICRO * sd_range(&mut r, 1, 40);
+    let moves = vec![
+        Move::SetFaults(faults),
+        Move::TickAll { at_ms: t0 },
+        Move::Run { steps: 1_000 },
+        // node 0 mines → gets a 50-QTA spendable reward (sealed by the Propose).
+        Move::Propose { idx: 0, reward: 50 * MICRO },
+        Move::Run { steps: 1_000 },
+        // node 0 bonds part of it, then FORCE-seals the Stake (explicit Propose so
+        // it doesn't depend on the not-yet-staked node winning the election). The
+        // Stake tx now sits on-chain, revealing node 0's ML-DSA pubkey → it is a
+        // slashable validator with a chain-resolvable identity.
+        Move::Stake { idx: 0, amount: stake, at_ms: t0 },
+        Move::Propose { idx: 0, reward: 0 },
+        Move::Run { steps: 1_000 },
+        // node 0 equivocates; the slash is queued on its ledger against its sealed
+        // bonded stake …
+        Move::Slash { offender_idx: 0, on_idx: 0 },
+        // … then force-seal the slash. Conservation is checked per event step
+        // through every Run above and at each Propose's implicit settle.
+        Move::Propose { idx: 0, reward: 0 },
+        Move::Run { steps: 2_000 },
+    ];
+    ScenarioPlan {
+        seed,
+        n_nodes: 2,
+        id_seeds: vec![1, 2],
+        moves,
+        max_steps: 20_000,
+    }
+}
+
+/// Count `Slash` txs sealed across all nodes' chains — anti-vacuity for the slash
+/// sweep (a sweep that never actually slashes proves nothing).
+fn chain_slash_tally(plan: &ScenarioPlan) -> usize {
+    let (sim, _v, _s) = run_plan(plan);
+    sim.nodes
+        .values()
+        .flat_map(|node| node.ledger().chain.iter())
+        .flat_map(|b| b.transactions.iter())
+        .filter(|t| matches!(t.tx_type, TxType::Slash))
+        .count()
+}
+
 /// **§5.2 — the planted, KNOWN-bad scenario** (NOT in the random space): two
 /// staked validators seal different height-1 blocks on opposite sides of a
 /// partition that never heals — the documented ADR-001 split-brain. Run through
@@ -2891,6 +3007,28 @@ fn run_plan(plan: &ScenarioPlan) -> (Sim, Option<Violation>, Option<u64>) {
                     det_rfc3339(*at_ms),
                     true, // deterministic ML-DSA signing ⇒ byte-reproducible
                 );
+            }
+            Move::Stake { idx, amount, at_ms } => {
+                // LIVE-3 sweep: bond `amount` of node `idx`'s spendable balance. Signed
+                // + deterministic (byte-reproducible). Underfunded ⇒ Err ⇒ no-op (the
+                // sweep's per-step conservation check holds either way).
+                let crypto = seeded_identity(plan.id_seeds[*idx]);
+                let addr = addr_of(&crypto);
+                let _ = sim
+                    .node_mut(&nid(*idx))
+                    .ledger_mut()
+                    .stake_tx_at(&addr, *amount, &crypto, det_rfc3339(*at_ms), true);
+            }
+            Move::Slash { offender_idx, on_idx } => {
+                // LIVE-3 sweep: the offender double-votes; node `on_idx` queues the
+                // slash on its ledger. `queue_slash` slashes only a bonded offender
+                // (else None → no-op), and the STAKE→BURN move is conservation-neutral —
+                // the per-step check verifies that continuously across seeds.
+                let offender = seeded_identity(plan.id_seeds[*offender_idx]);
+                // All sim nodes share the standard empty genesis (Ledger::new).
+                let genesis_hash = Ledger::new().genesis_hash();
+                let proof = det_double_vote_proof(&offender, &genesis_hash);
+                let _ = sim.node_mut(&nid(*on_idx)).ledger_mut().queue_slash(&proof);
             }
             Move::Run { steps: budget } => {
                 check_after = false; // run_checked_steps already checks per step
@@ -3163,6 +3301,49 @@ fn t0_8_conservation_under_burn() {
         violations, 0,
         "conservation (Σ balances + burned == minted, with burns present) holds across the sweep"
     );
+}
+
+/// **LIVE-3 — the slash sweep (continuous fuzz of accountable-safety slashing).**
+/// Over the default seed range, run the slash archetype through the SAME per-step
+/// executor: an equivocating validator is slashed (STAKE→BURN) under seeded
+/// network faults. Asserts (a) slashes REALLY get sealed (anti-vacuity), and (b)
+/// **no invariant violation** — conservation `Σ(spendable+locked_stake+burned) ==
+/// minted`, the emission bound, and cross-node safety all hold with slashing
+/// active, at every step, on every seed. This is what turns the hand-written slash
+/// teeth into property-based coverage — the gap the adversarial review flagged.
+#[test]
+fn t0_8_slash_sweep_conserves() {
+    let mut total_slashes = 0usize;
+    let mut violations = 0usize;
+    for seed in 0..default_seed_count() {
+        let plan = slash_scenario(seed);
+        total_slashes += chain_slash_tally(&plan);
+        if execute_scenario(&plan).violation.is_some() {
+            violations += 1;
+        }
+    }
+    assert!(
+        total_slashes > 0,
+        "the slash sweep must seal real Slash txs, else slashing conservation is vacuous",
+    );
+    assert_eq!(
+        violations, 0,
+        "conservation + emission + safety hold across the sweep WITH slashing active (seed = the violation carrier)",
+    );
+}
+
+/// **LIVE-3 — the slash sweep is byte-reproducible (C1 under slashing).** The
+/// deterministic ML-DSA vote signing (`sign_pq_det`) + injected time keep the
+/// whole slash path reproducible: two runs of the same seed yield the identical
+/// byte trace. Slashing does not leak non-determinism into the verdict.
+#[test]
+fn t0_8_slash_sweep_is_reproducible() {
+    for seed in [0u64, 1, 7, 42] {
+        let plan = slash_scenario(seed);
+        let a = execute_scenario(&plan);
+        let b = execute_scenario(&plan);
+        assert_eq!(a.trace, b.trace, "slash scenario seed {seed} is byte-reproducible (C1)");
+    }
 }
 
 /// **Phase 1.4 — `coverage_transfers_and_burns` (anti-vacuity).** Over the
