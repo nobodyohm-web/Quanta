@@ -2208,7 +2208,8 @@ fn det_mining_tx(pk: &str, amount: u64, ts_ms: u64, seq: u64) -> Transaction {
         nonce: 0,
         pq_signature: None,
         pq_public_key: None,
-            fault_proof: None,
+        fault_proof: None,
+        slash_unbonding: None,
     }
 }
 

@@ -131,8 +131,8 @@ commit déterministe (sélection d'ancre via le beacon) produit l'ordre total.
 5. **Compat ledger** : l'ordre total du DAG doit alimenter le **même**
    `cache_apply_tx` / burn-and-mint / merkle root. Le ledger ne change pas ; sa
    *source d'ordre*, si.
-6. **Bump de protocole** : **réalisé** — `TORUS_PROTOCOL_VERSION = 3` est en vigueur
-   (`p2p/gossip.rs:32`) ; les pairs v2 et v3 ne peuvent pas co-consensus, la fenêtre de migration
+6. **Bump de protocole** : **réalisé** — `TORUS_PROTOCOL_VERSION = 4` est en vigueur
+   (`p2p/gossip.rs:32`) ; les pairs d'anciennes versions ne peuvent pas co-consensus, la fenêtre de migration
    a déjà été gérée pour ce bump. Un futur bump vers Phase 2 (DAG-BFT) en nécessitera un nouveau.
 7. **Aléa d'ancre** : la sélection d'ancre/leader de round réutilise le **beacon
    non-grindable** (Track C) ; un **VDF** par-dessus fermerait la rétention de
@@ -164,7 +164,7 @@ Ces quatre points, posés pour lancer la Phase 1, sont **tranchés** :
 3. **Signatures** : **100 % ML-DSA, sans BLS** — tranché en
    [[ADR-005 — Agrégation des votes & certificats de finalité]] ; les certificats de finalité sont
    un ensemble de votes ML-DSA (~165 Ko / 50 validateurs), pas d'agrégation BLS.
-4. **Compat** : le protocole est déjà à **`TORUS_PROTOCOL_VERSION = 3`** (`gossip.rs:32`) — la
+4. **Compat** : le protocole est déjà à **`TORUS_PROTOCOL_VERSION = 4`** (`gossip.rs`, 3→4 par LIVE-3B) — la
    fenêtre de migration v2/v3 est du passé.
 
 Référence : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité BFT]] ·

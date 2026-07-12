@@ -73,6 +73,7 @@ src-tauri/src/
 │   ├── dispatcher.rs      ← ⭐ Message handler (verify → process → dispatch, étape ⑨ FinalityVote)
 │   ├── mining_loop.rs     ← Mine tick 60s + PoS leader seal + cast des votes de finalité (LIVE-1)
 │   ├── finality_live.rs   ← ⭐ LIVE-1 : FinalityTracker (câblage IO du gadget) + bridge pubkey↔adresse
+│   ├── fork_heal.rs       ← ⭐ LIVE-4 : ForkReconciler (réconciliation de fork profonde — l'appelant réseau de reorg_to_fork)
 │   ├── willow_node.rs     ← ⭐ Iroh endpoint + stores + gossip topic
 │   ├── state_persistence.rs ← SQLite snapshot every 30s
 │   ├── username.rs        ← Registre d'identité @pseudo
@@ -206,12 +207,12 @@ sans-IO, C1), **prouvé en simulation DST**, et depuis **LIVE-1** ses votes circ
 - **Déterminisme** : tout verdict est une fonction pure (BTreeMap/BTreeSet ordonnés) — deux
   nœuds aux mêmes votes + même chaîne finalisent **identiquement** (la propriété que C1 garde).
 
-> **Câblage vivant (`DESIGN-LIVE-WIRING.md`) — LIVE-1→3 FAITS.**
+> **Câblage vivant (`DESIGN-LIVE-WIRING.md`) — LIVE-1→4 + 3B FAITS.**
 > - **LIVE-1 (votes)** — `GossipMessage::FinalityVote` + bras dispatcher (étape ⑨) + `FinalityTracker`
 >   (`p2p/finality_live.rs`) + cast au tick de mining ; pont `validator_stakes_by_pubkey` (enjeu re-clé
 >   depuis la chaîne) ; les votes gossippés peuplent `LatestVotes`/`FinalityState` du ledger vivant.
-> - **LIVE-2 (plancher de finalité)** — `Ledger::finalized_floor_index` (monotone, tip-clampé, persisté
->   au snapshot) alimenté par les certificats ⅔ ; `integrate_remote_block` **refuse** tout fork qui
+> - **LIVE-2 (plancher de finalité)** — `Ledger::finalized_floor_index` (monotone, **vérifié par hash**,
+>   persisté au snapshot) alimenté par les certificats ⅔ ; `integrate_remote_block` **refuse** tout fork qui
 >   remplacerait un bloc ≤ plancher (l'histoire finalisée est **irréversible** sur le réseau vivant ;
 >   le départage lexicographique libre ne joue qu'**au-dessus** du plancher — Gasper). Garde de sûreté
 >   pure : refuser un reorg ne mute aucun solde.
@@ -220,11 +221,28 @@ sans-IO, C1), **prouvé en simulation DST**, et depuis **LIVE-1** ses votes circ
 >   nœud) qui détruit l'enjeu de l'offenseur **STAKE→BURN**, **conservation neutre** (l'enjeu et le
 >   brûlé sont deux compartiments de `Σ(dépensable+staké+déverr.)+brûlé==miné`). Un proposeur malveillant
 >   ne peut pas punir un innocent (preuve réelle + adresse offenseur + montant = fraction ratifiée).
+> - **LIVE-3B (le slash atteint l'unbonding — « unstake-and-run » fermé, audit 837)** — base slashable =
+>   `staké + en-déverrouillage` (sémantique Casper : punissable tant que le retrait n'est pas complété).
+>   La tx `Slash` **porte sa ventilation de consommation** (`slash_unbonding` : entrées détruites, ordre
+>   déterministe `(unlock_height, tx_hash)`), liée au hash **et** au Merkle — chaque nœud la re-vérifie
+>   contre son **propre plan** (`expected_slash_consumption`, source unique build+verify) et un reorg
+>   restaure **exactement** les entrées consommées (montant + hauteur + tx d'origine). Deux cartes, deux
+>   rôles : `validator_stakes_by_pubkey` = poids de **vote** (bondé seul) ; `slashable_stakes_by_pubkey`
+>   = poids **punissable** (bondé + unbonding) pour `verify_proof` sur les chemins de slash.
+> - **LIVE-4 (réconciliation de fork profonde — l'appelant réseau de GADGET-5B)** — `p2p/fork_heal.rs` :
+>   `ForkReconciler`, tampon borné (1024, éviction déterministe du plus haut index) nourri des blocs qui
+>   échouent l'intégration linéaire ; assemble la branche concurrente enracinée chez nous, **règle de
+>   victoire vivante** = plus-longue-au-dessus-du-plancher + départage lexicographique du tip à hauteur
+>   égale (généralisation N-blocs de la règle 1-bloc existante — exactement un côté adopte, convergence
+>   symétrique) ; applique via `reorg_to_fork` (validation complète sur clone d'essai, plancher absolu) ;
+>   sonde l'ancêtre commun par fenêtres `RequestChain` descendantes (bornées au plancher). Sans nouveau
+>   message wire ; guérit aussi les fenêtres ChainSegment hors-ordre (NET-6). Deux partitions qui
+>   scellent chacune ≥2 blocs convergent désormais en vivant — le trou de convergence est fermé.
 >
 > Le cœur `sm/` reste inchangé (aucune règle nouvelle) ; C1 + conservation + sweep multi-seed verts.
 
-**Fichiers** : `sm/finality*.rs` + `fork_choice.rs` (47 tests) · `p2p/finality_live.rs` (14 tests LIVE-1→3) ·
-plancher + slash dans `p2p/ledger.rs` (LIVE-2/3 teeth)
+**Fichiers** : `sm/finality*.rs` + `fork_choice.rs` (47 tests) · `p2p/finality_live.rs` (25 tests LIVE-1→3B
++ grappe d'audit) · `p2p/fork_heal.rs` (8 tests LIVE-4) · plancher + slash dans `p2p/ledger.rs` (teeth)
 
 ---
 
@@ -252,7 +270,7 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 ### Network V2 hardening (NET-3 → NET-16)
 - **NET-3** : priority queue sortante 4-lanes (Critical/High/Medium/Low)
 - **NET-4** : Hello 120s + Ping 15s léger pour la liveness
-- **NET-5** : `TORUS_PROTOCOL_VERSION = 3` (bumpé 2→3 par PQ-MIG-5 : la genèse PQ est une rupture de protocole) ; peers incompatibles loggués
+- **NET-5** : `TORUS_PROTOCOL_VERSION = 4` (2→3 par PQ-MIG-5 : genèse PQ ; 3→4 par LIVE-3B : règles de consensus des slashes-unbonding — la genèse et l'historique existant restent inchangés) ; peers incompatibles loggués
 - **NET-6** : chain sync parallèle (fanout = 4 fenêtres × 50 blocs)
 - **NET-7** : ~~DAG sync incrémental~~ — retiré avec les modules web (le DAG de contenu social n'existe plus ; sans rapport avec le futur consensus DAG-BFT)
 - **NET-8** : ChainSegment gzip optionnel (50 MB inflate cap)
@@ -355,14 +373,18 @@ npx tauri build
 ## Tests
 
 ```
-379 tests, 0 failures
+413 tests lib + 1 intégration, 0 failures
 ├── sm/ (cœur sans-IO déterministe) — gadget de finalité + harnais DST :
 │     finality / finality_vote / finality_rule / finality_slashing / fork_choice
-│     (GADGET-1→5B), node (Event→Effect), sim (DST multi-seed, C1 128-runs),
-│     finality_live (LIVE-1 : bridge pubkey↔adresse, ingest, cast)
+│     (GADGET-1→5B), node (Event→Effect), sim (DST multi-seed, C1 128-runs,
+│     sweeps slashing t0_8)
+├── finality_live (25 tests) — LIVE-1→3 (bridge, ingest, cast, plancher, slash)
+│     + LIVE-3B (slash sur unbonding, ventilation, reorg exact) + grappe d'audit
+├── fork_heal (8 tests) — LIVE-4 : heal de partition symétrique, départage,
+│     plancher, hors-ordre, branche invalide purgée, tampon borné, sondes
 ├── pos_consensus (16 tests) — leader election, fairness, fallback
 ├── security_tests (41 tests) — signatures, replay, nonce, rate limit
-├── ledger (68 tests) — balance, fork, merkle, burn, AUDIT-TX/BLK, ONCHAIN-STAKE, COVER, PQ-MIG-5
+├── ledger (72 tests) — balance, fork, merkle, burn, AUDIT-TX/BLK, ONCHAIN-STAKE, COVER, PQ-MIG-5, LIVE-2/3
 ├── consensus CRDT (5 tests) — merge idempotent
 ├── integration_tests — paginated chain sync, AUDIT-SYNC compression
 ├── shapley — distribution énergie/travail/validation/uptime (somme = 1.0)
@@ -436,3 +458,6 @@ npx tauri build
 | 2026-07-12 | **🔌 LIVE-1 — câblage vivant du gadget : `GossipMessage::FinalityVote` + bras dispatcher (étape ⑨) + `FinalityTracker` (`p2p/finality_live.rs`) + cast au tick de mining ; pont `validator_stakes_by_pubkey` (enjeu re-clé depuis la chaîne) ; les votes gossippés peuplent `LatestVotes`/`FinalityState` du ledger vivant — cœur `sm/` inchangé, IO testée à part, C1 préservé — 379 tests** |
 | 2026-07-12 | **🔒 LIVE-2 — plancher de finalité vivant : `Ledger::finalized_floor_index` (monotone, tip-clampé, persisté) alimenté par les certificats ⅔ ; `integrate_remote_block` refuse tout fork ≤ plancher (histoire finalisée irréversible sur le réseau ; départage libre au-dessus, Gasper). Garde de sûreté pure — aucun solde muté — 384 tests** |
 | 2026-07-12 | **⚔️ LIVE-3 — slashing vivant : équivocation détectée à l'ingest → `FinalityFault` gossipé → tx `Slash` (autorité = preuve embarquée, re-vérifiée par `verify_block_slashes`) détruisant l'enjeu de l'offenseur **STAKE→BURN**, **conservation neutre par construction** ; un proposeur ne peut punir un innocent. `TxType::Slash` + accounting + verify + producteur→gossip→apply — C1 + conservation + sweep verts — 388 tests. **Le câblage vivant du gadget est complet (LIVE-1→3).**** |
+| 2026-07-12 | **🛡️ Grappe « cycle de vie du slash » (audit exhaustif) — 4 corrigées + 3 évaluées : TTL-exemption du `Slash` (788, le slashing devenait inopérant en vif), éviction du slash pending redondant à l'application du bloc (2318), jamais re-mis en file au reorg (2450), garde par-offenseur dans `queue_slash` (911) ; 2396 réfutée, 2359 déjà mitigée (veto plancher), 837 → LIVE-3B — 399 tests + 1 intégration** |
+| 2026-07-13 | **🌐 LIVE-4 — réconciliation de fork profonde en vivant : `p2p/fork_heal.rs` (`ForkReconciler`, tampon borné 1024 + éviction déterministe) nourri des blocs qui échouent l'intégration linéaire ; règle de victoire = plus-longue-au-dessus-du-plancher + départage lexicographique (généralisation N-blocs) ; application via `reorg_to_fork` (clone d'essai, plancher absolu) ; sondes d'ancêtre par `RequestChain` descendantes ; guérit aussi les fenêtres hors-ordre (NET-6). **Deux partitions ≥2 blocs convergent désormais** — le trou de convergence (GADGET-5B jamais appelé du réseau) est fermé — 407 tests + 1 intégration** |
+| 2026-07-13 | **⚔️ LIVE-3B — le slash atteint l'unbonding (« unstake-and-run » fermé, audit 837) : base slashable = staké + en-déverrouillage (sémantique Casper) ; la tx `Slash` porte sa **ventilation de consommation** (`slash_unbonding`, ordre déterministe, liée hash + Merkle) re-vérifiée par chaque nœud contre son propre plan (`expected_slash_consumption`) ; un reorg restaure **exactement** les entrées consommées ; deux cartes d'enjeu (vote = bondé ; slashable = bondé + unbonding pour `verify_proof`). Slashes bondés byte-identiques à avant (zéro dérive wire, C1 vert) — 413 tests + 1 intégration** |

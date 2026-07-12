@@ -567,8 +567,9 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
 }
 
 /// LIVE-3 — a gossiped fault proof. Deserialize → re-verify against the on-chain
-/// stake (GADGET-4 `verify_proof`) → queue a slash of the offender's bonded stake
-/// (STAKE → BURN), which the next sealed block includes. A malicious accuser
+/// stake (GADGET-4 `verify_proof`) → queue a slash of the offender's **slashable**
+/// stake (bonded + unbonding, LIVE-3B — STAKE → BURN), which the next sealed
+/// block includes. A malicious accuser
 /// cannot punish an innocent validator: the queued slash carries the proof and
 /// every node re-verifies it in block validation (`verify_block_slashes`). The
 /// envelope's Ed25519 signature (transport) was already checked upstream; the
@@ -586,14 +587,17 @@ async fn handle_finality_fault(state: &Arc<AppState>, sender: &str, proof_json: 
         }
     };
     // Verify + queue under a single write lock (queue_slash re-verifies via
-    // build_slash_tx → only slashes a bonded offender; the proof is re-checked
-    // in-block on every node). The offender's stake is read from the live ledger.
+    // build_slash_tx → only slashes a slashable offender — bonded or unbonding;
+    // the proof is re-checked in-block on every node). The offender's stake is
+    // read from the live ledger.
     let queued = {
         let mut ledger = state.node.ledger.write().await;
         // Re-verify the proof against on-chain stake before queueing, so a bogus
         // proof never even enters the mempool (defense-in-depth; block validation
-        // re-checks regardless).
-        let stakes = ledger.validator_stakes_by_pubkey();
+        // re-checks regardless). LIVE-3B: use the SLASHABLE weight (bonded +
+        // unbonding) — a fully-unstaked equivocator must stay punishable until
+        // its withdrawal completes (unstake-and-run closed).
+        let stakes = ledger.slashable_stakes_by_pubkey();
         if !crate::sm::finality_slashing::verify_proof(
             &proof,
             &stakes,
@@ -1077,7 +1081,7 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
     };
 
     let mut ledger = state.node.ledger.write().await;
-    match ledger.integrate_remote_block(block) {
+    match ledger.integrate_remote_block(block.clone()) {
         Ok(true) => {
             log::info!(
                 "◈ [Dispatch] ✓ Accepted remote block from {}",
@@ -1101,7 +1105,51 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
                 short(sender, 12),
                 reason
             );
+            drop(ledger);
+            // LIVE-4: a block that doesn't fit linearly may belong to a
+            // competing branch (partition) or an out-of-order window — hand it
+            // to the fork reconciler (bounded buffer → assemble → reorg_to_fork).
+            fork_heal_offer_and_resolve(state, vec![block]).await;
         }
+    }
+}
+
+/// LIVE-4 — feed blocks that failed linear integration to the fork
+/// reconciler, adopt any winning competing branch (partition heal, via
+/// [`crate::p2p::ledger::Ledger::reorg_to_fork`]), drain out-of-order linear
+/// extensions, and issue an ancestor probe when the buffered branch does not
+/// yet root in our chain. Pass an empty `candidates` to just re-resolve the
+/// existing buffer (e.g. after new linear integrations unlocked it).
+///
+/// Lock order: `ledger` (write) → `fork_heal` (write), **both released**
+/// before the probe broadcast (which takes gossip locks) — consistent with
+/// the project-wide `crypto → reputation → ledger → gossip` ordering.
+async fn fork_heal_offer_and_resolve(
+    state: &Arc<AppState>,
+    candidates: Vec<crate::p2p::ledger::Block>,
+) {
+    let outcome = {
+        let mut ledger = state.node.ledger.write().await;
+        let mut fh = state.node.fork_heal.write().await;
+        for b in candidates {
+            fh.offer(b, &ledger);
+        }
+        fh.resolve(&mut ledger)
+    };
+    let integrated = outcome.adopted + outcome.extended;
+    if integrated > 0 {
+        // CRIT-B: adopted/drained blocks were fully validated + integrated —
+        // they count toward the Shapley validation factor like any other.
+        state
+            .node
+            .blocks_validated
+            .fetch_add(integrated as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some((from, to)) = outcome.probe {
+        log::info!(
+            "◈ [LIVE-4] fork ancestor not held — probing chain window [{from}, {to})"
+        );
+        request_chain_range(state, from, to).await;
     }
 }
 
@@ -1206,8 +1254,12 @@ async fn handle_chain_segment(
 
     let mut integrated = 0u64;
     let mut rejected = 0u64;
+    // LIVE-4: blocks that failed linear integration — the segment's remainder
+    // is the same branch's continuation, so it all goes to the reconciler.
+    let mut fork_candidates: Vec<crate::p2p::ledger::Block> = Vec::new();
 
-    for block_str in &blocks_json {
+    let mut iter = blocks_json.iter();
+    while let Some(block_str) = iter.next() {
         let block: crate::p2p::ledger::Block = match serde_json::from_str(block_str) {
             Ok(b) => b,
             Err(e) => {
@@ -1225,7 +1277,7 @@ async fn handle_chain_segment(
         };
 
         let mut ledger = state.node.ledger.write().await;
-        match ledger.integrate_remote_block(block) {
+        match ledger.integrate_remote_block(block.clone()) {
             Ok(true) => {
                 integrated += 1;
                 state
@@ -1237,13 +1289,32 @@ async fn handle_chain_segment(
             Err(e) => {
                 log::warn!("◈ [Dispatch] ChainSegment block rejected: {}", e);
                 rejected += 1;
-                // AUDIT-SYNC-1: same rationale — once a block in the segment
-                // doesn't fit, every later one in the same segment will also
-                // fail. Bailing out lets the caller re-issue a fresh
-                // RequestChain instead of churning the lock pointlessly.
+                // AUDIT-SYNC-1: once a block in the segment doesn't fit
+                // LINEARLY, every later one in the same segment will also
+                // fail linearly — bail out of the linear loop. LIVE-4: but
+                // the whole remainder may be a competing branch (partition)
+                // or an out-of-order window, so hand it to the reconciler
+                // instead of dropping it on the floor.
+                drop(ledger);
+                fork_candidates.push(block);
+                for rest in iter.by_ref() {
+                    if let Ok(b) = serde_json::from_str::<crate::p2p::ledger::Block>(rest) {
+                        fork_candidates.push(b);
+                    }
+                }
                 break;
             }
         }
+    }
+
+    if !fork_candidates.is_empty() {
+        // LIVE-4: try to assemble/adopt a competing branch from everything
+        // buffered so far (and probe below it if its root is still unknown).
+        fork_heal_offer_and_resolve(state, fork_candidates).await;
+    } else if integrated > 0 && !state.node.fork_heal.read().await.is_empty() {
+        // Out-of-order windows: fresh linear blocks may have unlocked
+        // buffered orphans (NET-6 fan-out answers can land high-first).
+        fork_heal_offer_and_resolve(state, Vec::new()).await;
     }
 
     log::info!(

@@ -36,6 +36,31 @@ pub struct Transaction {
     /// punish an innocent validator). `None` for every other tx type.
     #[serde(default)]
     pub fault_proof: Option<String>,
+    /// LIVE-3B: for a `Slash` tx that (also) destroys **unbonding** stake —
+    /// closing the *unstake-and-run* escape (Casper semantics: slashable until
+    /// the withdrawal completes) — the exact unbonding entries consumed, in
+    /// deterministic `(unlock_height, tx_hash)` order. Every node **re-verifies**
+    /// this breakdown against its own pre-block computation (a proposer cannot
+    /// lie about what was destroyed), and a fork reorg **restores precisely
+    /// these entries** (amount + unlock height + origin tx) — the reversibility
+    /// property a bare total could not provide. `None` for a purely-bonded
+    /// slash (byte-identical wire form to pre-LIVE-3B) and every other tx type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slash_unbonding: Option<Vec<ConsumedUnbond>>,
+}
+
+/// LIVE-3B — one unbonding entry (partially) destroyed by a `Slash`.
+/// Identified by the origin `Unstake` tx hash (unique per entry), carrying the
+/// entry's `unlock_height` so a reorg can restore it exactly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsumedUnbond {
+    /// Hash of the `Unstake` tx that created the entry (its unique id).
+    pub tx_hash: String,
+    /// The entry's height-anchored unlock (`unstake_block_index + UNBONDING_PERIOD_BLOCKS`).
+    pub unlock_height: u64,
+    /// µQTA destroyed from this entry (≤ the entry's amount; the last consumed
+    /// entry may be partial under a fractional slash policy).
+    pub amount: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
