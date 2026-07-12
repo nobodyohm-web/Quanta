@@ -6,7 +6,7 @@
 > **Version** : v3.3 (crypto-only) | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
 > **Licence** : Apache-2.0
 > **Status** : ✅ P2P vérifié entre 2 machines physiques (06/05/2026) · ⚠️ alpha, non audité par un tiers
-> **Repo** : [github.com/nobodyohm-web/Torus](https://github.com/nobodyohm-web/Torus)
+> **Repo** : [github.com/nobodyohm-web/Quanta](https://github.com/nobodyohm-web/Quanta)
 
 ---
 
@@ -50,28 +50,39 @@ rare et vérifiable.
 
 ```
 src-tauri/src/
-├── lib.rs                 ← Commandes Tauri (40+ commandes)
+├── lib.rs                 ← Commandes Tauri (≈37 : 30 lib.rs + 7 commands_v3.rs)
+├── sm/                    ← ⭐ Cœur sans-IO déterministe (Phase 0, C1) — le consensus pur
+│   ├── mod.rs / node.rs   ← Node::handle Event→Effect (horloge + RNG injectés)
+│   ├── finality.rs        ← GADGET-1 époque/checkpoint (EPOCH_LENGTH_BLOCKS=32, ADR-009)
+│   ├── finality_vote.rs   ← GADGET-2 Vote ML-DSA + certificat ⅔ (MlDsaCertificate)
+│   ├── finality_rule.rs   ← GADGET-3 justify/finalize (FinalityState, Casper-FFG)
+│   ├── finality_slashing.rs ← GADGET-4 détection de faute (double vote + surround) + preuve + slash
+│   ├── fork_choice.rs     ← GADGET-5A LMD-GHOST (ghost_head/anchors) ; 5B = Ledger::reorg_to_fork
+│   ├── sim.rs             ← Harnais DST seedé (multi-seed, fautes réseau/byzantines, invariants)
+│   └── clock/effect/event/rng ← abstractions injectées
 ├── p2p/
 │   ├── mod.rs             ← PeerInfo, exports
-│   ├── pos_consensus.rs   ← ⭐ PoS leader election VRF (BLAKE3)
-│   ├── reputation.rs      ← Mining engine + trust score
-│   ├── ledger.rs          ← Blockchain (seal, validate, fork reorg, O(1) balance cache)
+│   ├── pos_consensus.rs   ← ⭐ PoS leader election (élection déterministe, beacon enterré)
+│   ├── reputation.rs      ← Mining engine + emission_for_tick (hors chemin de sécurité)
+│   ├── ledger.rs          ← Blockchain (seal, validate, fork reorg, O(1) balance cache, genèse PQ)
 │   ├── ledger_types.rs    ← Block, Transaction, TxType
-│   ├── shapley.rs         ← Distribution Shapley (énergie + utilité)
+│   ├── shapley.rs         ← Distribution Shapley (énergie/travail/validation/uptime)
 │   ├── consensus.rs       ← CRDT PN-Counters (convergent merge)
-│   ├── gossip.rs          ← ⭐ Protocol gossip (Hello, Tx, Block, Chain sync, Username)
-│   ├── gossip_tasks.rs    ← Background tasks (Hello broadcast 60s, trigger_hello_now)
-│   ├── dispatcher.rs      ← ⭐ Message handler (verify → process → dispatch)
-│   ├── mining_loop.rs     ← Mine tick 60s + PoS leader seal
+│   ├── gossip.rs          ← ⭐ Protocol gossip (10 variants : + FinalityVote LIVE-1)
+│   ├── gossip_tasks.rs    ← Background tasks (Hello broadcast 120s, trigger_hello_now)
+│   ├── dispatcher.rs      ← ⭐ Message handler (verify → process → dispatch, étape ⑨ FinalityVote)
+│   ├── mining_loop.rs     ← Mine tick 60s + PoS leader seal + cast des votes de finalité (LIVE-1)
+│   ├── finality_live.rs   ← ⭐ LIVE-1 : FinalityTracker (câblage IO du gadget) + bridge pubkey↔adresse
 │   ├── willow_node.rs     ← ⭐ Iroh endpoint + stores + gossip topic
 │   ├── state_persistence.rs ← SQLite snapshot every 30s
 │   ├── username.rs        ← Registre d'identité @pseudo
 │   ├── energy.rs          ← Oracle énergie (33 pays)
 │   └── sybil.rs           ← Anti-sybil PoC
 ├── security/
-│   ├── mod.rs             ← CryptoEngine (Ed25519)
+│   ├── mod.rs             ← CryptoEngine (Ed25519 transport + adresse ML-DSA, ADDR_DOMAIN)
 │   ├── pq_vault.rs        ← Identity vault (Argon2id + AES-256-GCM)
-│   └── hybrid_crypto.rs   ← ⭐ Signatures hybrides Ed25519 + ML-DSA-65 (FIPS 204, actif)
+│   ├── cipher.rs / crypto_agility.rs ← primitives symétriques + agilité crypto
+│   └── hybrid_crypto.rs   ← ⭐ ML-DSA-65 (FIPS 204) — autorité de compte PURE (PQ-MIG-3B) ; Ed25519 = transport
 └── storage/               ← libSQL persistence
 ```
 
@@ -150,16 +161,58 @@ Slot N (= chain height)
 > Le solde se scinde en **dépensable / staké / en-déverrouillage** ; staker **déplace** des
 > pièces (ne les brûle pas), donc la conservation compte
 > `Σ(dépensable + staké + déverrouillage) + brûlé == miné`. Déverrouillage **indexé par
-> hauteur** (`unlock = block.index + UNBONDING_PERIOD_BLOCKS`, 🛑 à figer ; contrainte gravée :
-> `≥ fenêtre de slashing`, ADR-003).
+> hauteur** (`unlock = block.index + UNBONDING_PERIOD_BLOCKS = 10_080`, **ratifié ajustable par
+> ADR-009** ; contrainte gravée `≥ fenêtre de slashing` garantie par const-assert dans
+> `sm/finality_slashing.rs`, ADR-003).
 
-> **Nommage honnête** : élection *déterministe et publiquement vérifiable*, **pas** un VRF
-> cryptographique (aucune clé secrète → leader publiquement prévisible). Le beacon enterré
-> bloque l'auto-grinding immédiat ; un vrai VRF (imprévisibilité) + un VDF (anti-grinding)
-> + le **slashing** de l'équivocation (absent aujourd'hui) sont au roadmap. Les identifiants
-> internes `vrf` sont des noms legacy gardés pour la compat de domaine/wire.
+> **Nommage honnête** : l'*élection du proposeur* est *déterministe et publiquement vérifiable*,
+> **pas** un VRF cryptographique (aucune clé secrète → leader publiquement prévisible). Le beacon
+> enterré bloque l'auto-grinding immédiat ; un vrai VRF (imprévisibilité) + un VDF (anti-grinding)
+> sont au roadmap. Le **slashing de l'équivocation** n'est **plus** absent : détecté et prouvable
+> dans le cœur (`sm/finality_slashing.rs`, GADGET-4 : double vote + surround, preuves ML-DSA,
+> brûlage) ; son câblage vivant (gossip de la preuve + mouvement STAKE→BURN sur le ledger réel)
+> reste LIVE-3. Les identifiants internes `vrf` sont des noms legacy gardés pour la compat.
 
-**Fichier** : `pos_consensus.rs` (9 tests)
+**Fichier** : `pos_consensus.rs` (16 tests). Le **gadget de finalité** (Casper-FFG) qui vient
+au-dessus de cette élection vit dans `sm/` — voir la section suivante.
+
+---
+
+## Gadget de finalité (Casper-FFG, GADGET-1→5B) — `sm/`
+
+Au-dessus de l'élection PoS, un **gadget de finalité de type Casper-FFG** rend l'histoire
+**irréversible** — quelque chose que Bitcoin n'a pas. Écrit **pur et déterministe** (`sm/`,
+sans-IO, C1), **prouvé en simulation DST**, et depuis **LIVE-1** ses votes circulent en vivant.
+
+```
+Époque = E blocs (E = 32, ADR-009)
+│
+├─ GADGET-1 checkpoint(hauteur, hash) à chaque frontière d'époque       (finality.rs)
+├─ GADGET-2 Vote ML-DSA-65 (source→target) + certificat ⅔ du stake      (finality_vote.rs)
+│            quorum gravé : backing×3 ≥ total×2 (QUORUM_NUM/DEN)
+├─ GADGET-3 justify puis finalize (2 liens consécutifs) → FinalityState  (finality_rule.rs)
+├─ GADGET-4 accountable safety : détecte double-vote + surround,          (finality_slashing.rs)
+│            preuve ML-DSA non-répudiable, slash (brûlé, plein, fenêtre=unbonding)
+└─ GADGET-5 fork-choice LMD-GHOST pondéré par le stake, ancré finalité   (fork_choice.rs)
+             (5A ghost_head/anchors) ; réconciliation de partition = Ledger::reorg_to_fork (5B)
+```
+
+- **Identité de vote = clé publique ML-DSA** ; l'enjeu est address-keyed (`validator_stakes()`).
+  Le pont `Ledger::validator_stakes_by_pubkey()` re-clé l'enjeu **purement depuis la chaîne**
+  (chaque tx `Stake` révèle sa `pq_public_key`) — le total pesé = vrai poids staké.
+- **PQ pur (ADR-005)** : aucune primitive classique sur le chemin de l'irréversibilité ; les
+  votes sont signés ML-DSA-65, jamais Ed25519.
+- **Déterminisme** : tout verdict est une fonction pure (BTreeMap/BTreeSet ordonnés) — deux
+  nœuds aux mêmes votes + même chaîne finalisent **identiquement** (la propriété que C1 garde).
+
+> **Câblage vivant (`DESIGN-LIVE-WIRING.md`)** : **LIVE-1 fait** — `GossipMessage::FinalityVote`,
+> bras dispatcher (étape ⑨), `FinalityTracker` (`p2p/finality_live.rs`), cast au tick de mining ;
+> les votes peuplent `LatestVotes`/`FinalityState` du ledger vivant. **Restent** : LIVE-2
+> (proposition finalité-consciente — le proposeur bâtit sur `ghost_head` plutôt que `chain.last()`)
+> et LIVE-3 (slashing vivant STAKE→BURN sur le ledger réel). Ces deux pièces touchent le chemin de
+> valeur / la conservation → chacune est un `/goal` chirurgical réservé (arbitrage consensus §4).
+
+**Fichiers** : `sm/finality*.rs` + `fork_choice.rs` (47 tests) · `p2p/finality_live.rs` (5 tests LIVE-1)
 
 ---
 
@@ -171,7 +224,7 @@ Node A → connect_peer(B_id) → Hello immédiat (chain_height)
 Node B ← reçoit Hello → compare chain_height
   Si B.height < A.height → RequestChain → ChainSegment sync
   Si B.height > A.height → A sync de B
-Hello périodique toutes les 60s pour liveness
+Hello périodique toutes les 120s (+ Ping léger 15s, NET-4) pour liveness
 Dead peer cleanup toutes les 30s (TTL = 5 min)
 ```
 
@@ -187,7 +240,7 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 ### Network V2 hardening (NET-3 → NET-16)
 - **NET-3** : priority queue sortante 4-lanes (Critical/High/Medium/Low)
 - **NET-4** : Hello 120s + Ping 15s léger pour la liveness
-- **NET-5** : `TORUS_PROTOCOL_VERSION = 2` ; peers incompatibles loggués
+- **NET-5** : `TORUS_PROTOCOL_VERSION = 3` (bumpé 2→3 par PQ-MIG-5 : la genèse PQ est une rupture de protocole) ; peers incompatibles loggués
 - **NET-6** : chain sync parallèle (fanout = 4 fenêtres × 50 blocs)
 - **NET-7** : ~~DAG sync incrémental~~ — retiré avec les modules web (le DAG de contenu social n'existe plus ; sans rapport avec le futur consensus DAG-BFT)
 - **NET-8** : ChainSegment gzip optionnel (50 MB inflate cap)
@@ -232,7 +285,7 @@ const MINE_INTERVAL_SECS: u64 = 60;        // 1 tx/min
 const SEAL_EVERY_N_TICKS: u32 = 2;          // seal toutes les 2 min
 
 // Consensus PoS
-const MIN_VALIDATOR_STAKE: u64 = 1_000_000; // 1 QUANTA minimum (🛑 valeur à figer §12)
+const MIN_VALIDATOR_STAKE: u64 = 1_000_000; // 1 QUANTA min (classe ajustable ratifiée ADR-009 ; valeur = placeholder d'Alexandre)
 const LEADER_TIMEOUT_SECS: u64 = 30;        // fallback après 30s
 const MAX_FALLBACK_ROUNDS: u32 = 3;         // 3 rounds de fallback
 const UNBONDING_PERIOD_BLOCKS: u64 = 10_080;// 🛑 ~2 sem. de blocs ; ≥ fenêtre de slashing (ADR-003)
@@ -242,10 +295,10 @@ const SNAPSHOT_INTERVAL: Duration = 30s;    // SQLite save toutes les 30s
 const MAX_RECENT_TX: usize = 500;           // ring buffer txs récentes
 
 // Gossip
-const HELLO_INTERVAL: u64 = 60;             // Hello broadcast toutes les 60s
+const HELLO_INTERVAL_SECS: u64 = 120;       // Hello broadcast 120s (+ Ping léger 15s, NET-4)
 const MAX_CHAIN_SEGMENT: u64 = 50;          // max blocs par segment sync
 const PEER_TTL: Duration = 300s;            // dead peer après 5 min sans Hello
-const MAX_MSG_PER_WINDOW: u32 = 30;         // rate limit par peer
+const BASE_MSG_PER_WINDOW: u32 = 30;        // base adaptative NET-13 (plancher MIN=15, plafond MAX=120)
 const RATE_WINDOW_SECS: u64 = 60;           // fenêtre rate limit
 const MAX_SEEN_MESSAGES: usize = 100_000;   // LRU dedup
 const MAX_RAW_ENVELOPE_BYTES: usize = 10MB; // DoS guard
@@ -290,11 +343,15 @@ npx tauri build
 ## Tests
 
 ```
-174 tests, 0 failures
-├── pos_consensus (9 tests) — leader election, fairness, fallback
-├── security_tests (80+ tests) — signatures, replay, nonce, rate limit
-├── ledger (20+ tests) — balance, fork, merkle, burn, AUDIT-TX/BLK
-├── consensus CRDT (3 tests) — merge idempotent
+379 tests, 0 failures
+├── sm/ (cœur sans-IO déterministe) — gadget de finalité + harnais DST :
+│     finality / finality_vote / finality_rule / finality_slashing / fork_choice
+│     (GADGET-1→5B), node (Event→Effect), sim (DST multi-seed, C1 128-runs),
+│     finality_live (LIVE-1 : bridge pubkey↔adresse, ingest, cast)
+├── pos_consensus (16 tests) — leader election, fairness, fallback
+├── security_tests (41 tests) — signatures, replay, nonce, rate limit
+├── ledger (68 tests) — balance, fork, merkle, burn, AUDIT-TX/BLK, ONCHAIN-STAKE, COVER, PQ-MIG-5
+├── consensus CRDT (5 tests) — merge idempotent
 ├── integration_tests — paginated chain sync, AUDIT-SYNC compression
 ├── shapley — distribution énergie/travail/validation/uptime (somme = 1.0)
 ├── reputation — mining engine + trust score
@@ -361,3 +418,7 @@ npx tauri build
 | 2026-06-23 | **🛡️ COVER-1 — validation de couverture au bloc : `validate_block_against_prev` (validateur partagé des deux chemins) rejette toute dépense/stake non couvert par le solde on-chain ; couverture séquentielle + crédits intra-bloc ; clamp `.max(0)` conservé (§4 « ne force pas ») ; dernier trou de validation fermé avant le gadget — 298 tests** |
 | 2026-06-23 | **🛡️ COVER-2 — couverture **symétrique** au seal : `seal_block_at` **exclut** les tx non couvertes (même règle que COVER-1, source unique `uncovered_tx_indices`) + revert cache + éviction ⇒ bloc **valide par construction** ; invariant « bloc auto-scellé passe la validation » (auto-corruption locale fermée) ; clamp/admission inchangés — 306 tests** |
 | 2026-06-25 | **🔐 PQ-MIG-3B — identité de compte **entièrement ML-DSA, sans astérisque** (ADR-007 b réalisé ; ADR-008 reversé) : `from`/`to` = **adresse ML-DSA** (`BLAKE3(ADDR_DOMAIN ‖ clé)`) **partout** — solde, récompense (`mine_tx`), enjeu/`validator_stakes`, `@pseudo` (`owner_pk` + `owner_key` révélée, signé ML-DSA + `lie`) ; autorité de `verify_tx` = **pur ML-DSA** (co-facteur Ed25519 retiré du chemin), CRYPTO-ID-1 close **par construction** ; **transport Ed25519 différé** (enveloppes/PeerId intacts) ; conservation/couverture/**C1** verts — 335 tests** |
+| 2026-06-25 | **⚖️ Gadget de finalité complet GADGET-1→5B (`sm/`) — checkpoints par époque (E=32) · votes ML-DSA + certificat ⅔ gravé · règle justify/finalize (Casper-FFG) · slashing détecté & prouvable (double-vote + surround) · fork-choice LMD-GHOST pondéré stake, ancré finalité + réconciliation de partition (`reorg_to_fork`) ; prouvé en simulation DST, C1 vert** |
+| 2026-06-25 | **🔐 PQ-MIG-5 — genèse post-quantique : état initial reconstruit sur adresses ML-DSA + validateurs initiaux, hash de genèse canonique content-bound (frozen), conservation exacte dès le bloc 0 ; `TORUS_PROTOCOL_VERSION` bumpé 2→3 (rupture de protocole) — 335→374 tests** |
+| 2026-06-25 | **📜 ADR-005/006/007/009 — agrégation PQ des votes (ADR-005) ; frontière gravé/ajustable ratifiée (ADR-006 par ADR-009) ; comptes ML-DSA réalisés (ADR-007 b) ; §12 figé (E=32, quorum ⅔, unbonding 10 080, slash brûlé/plein/fenêtre=unbonding) ; conception du câblage vivant (`DESIGN-LIVE-WIRING`)** |
+| 2026-07-12 | **🔌 LIVE-1 — câblage vivant du gadget : `GossipMessage::FinalityVote` + bras dispatcher (étape ⑨) + `FinalityTracker` (`p2p/finality_live.rs`) + cast au tick de mining ; pont `validator_stakes_by_pubkey` (enjeu re-clé depuis la chaîne) ; les votes gossippés peuplent `LatestVotes`/`FinalityState` du ledger vivant — cœur `sm/` inchangé, IO testée à part, C1 préservé — 379 tests. Restent LIVE-2 (proposition finalité-consciente) et LIVE-3 (slashing vivant STAKE→BURN)** |

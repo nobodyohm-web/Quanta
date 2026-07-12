@@ -23,15 +23,20 @@ instance fait tourner un nœud complet.
 - **Burn** : 1% détruit à chaque transfert (burn-and-mint, déflationniste).
 - **Valeur** : QUANTA n'est coté nulle part. Miner coûte de l'électricité réelle,
   mais **un coût de production n'est pas un prix** — ne JAMAIS afficher de valeur fiat inventée.
-- **Consensus** : Proof-of-Stake + VRF (BLAKE3). Stake min 1 QUANTA, timeout leader
-  30 s, graine d'élection d'un beacon enterré (non-grindable).
-- **Crypto** : signatures **hybrides Ed25519 + ML-DSA-65** (FIPS 204) sur chaque tx
-  (clé ML-DSA dérivée de la graine Ed25519) ; vault Argon2id + AES-256-GCM ; BLAKE3 ; `zeroize`.
-- **Identité** : une paire de clés + un court **`@pseudo`** (`UsernameRegistry`,
-  module `p2p/username.rs`) + code de connexion + clé de récupération. Aucun KYC.
-- **Gossip** : `GossipEnvelope` signé, nonce monotone, fenêtre ±90 s, dédup LRU 100K,
-  rate-limit adaptatif, ban. **9 variants** : Hello, RequestChain, ChainSegment,
-  NewBlock, BroadcastTx, Ping, Pong, ReportPeer, PublishUsername.
+- **Consensus** : Proof-of-Stake (élection déterministe vérifiable, beacon enterré non-grindable ;
+  les identifiants internes `vrf` sont legacy). Stake min 1 QUANTA, timeout leader 30 s.
+  **Gadget de finalité Casper-FFG (GADGET-1→5B, `sm/`)** par-dessus : checkpoints par époque
+  (E=32), votes ML-DSA + certificat ⅔, justify/finalize, slashing détecté (double-vote+surround),
+  fork-choice LMD-GHOST. Prouvé en simulation DST ; **LIVE-1** câble le gossip des votes en vivant
+  (`p2p/finality_live.rs`) ; restent LIVE-2 (proposition finalité-consciente) + LIVE-3 (slashing vivant).
+- **Crypto** : autorité de tx = **ML-DSA-65 pur** (FIPS 204) — la clé **primaire** liée à l'adresse
+  du compte (`from`/`to` = `BLAKE3(ADDR_DOMAIN ‖ clé ML-DSA)`, PQ-MIG-3B) ; **Ed25519 = transport**
+  (enveloppes gossip + PeerId) + co-facteur tx vestigial. Vault Argon2id + AES-256-GCM ; BLAKE3 ; `zeroize`.
+- **Identité** : adresse ML-DSA (valeur) + paire Ed25519 (transport, graine de dérivation ML-DSA)
+  + un court **`@pseudo`** (`UsernameRegistry`, `p2p/username.rs`) + code + clé de récup. Aucun KYC.
+- **Gossip** : `GossipEnvelope` signé Ed25519, nonce monotone, fenêtre ±90 s, dédup LRU 100K,
+  rate-limit adaptatif, ban. **10 variants** : Hello, RequestChain, ChainSegment, NewBlock,
+  BroadcastTx, Ping, Pong, ReportPeer, PublishUsername, **FinalityVote** (LIVE-1).
 - **Frontend** : Wallet (défaut), Contacts, Tableau de bord, Réseau (globe 3D), Explorateur,
   Profil, Réglages. Barre latérale. **i18n 6 langues** (EN par défaut · FR · ES · RU · ZH · JA).
   Thème clair « Arc » (papier crayon + grain + champ quantique sur les moments/états vides).
@@ -41,7 +46,8 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
 `page_store`, `domains` (.torus sites), `search`/QuantaRank, `social` (likes/follows/tips),
 `moderation` (jury), `forums`, `trust_graph`, `marketplace`, `merkle_dag`, `commerce`, `dev_api`
 — + leurs variants gossip, commandes, stores et tests. L'identité `@pseudo` et la crypto-core
-(ledger, consensus, mining, sécurité) ont été préservées. `cargo test` : **174 passés, 0 échec**.
+(ledger, consensus, mining, sécurité) ont été préservées. `cargo test` : **379 passés, 0 échec**
+(174 était le compte au 2026-06-20 ; a crû avec ONCHAIN-STAKE, COVER, PQ-MIG, le gadget de finalité, LIVE-1).
 
 > Note héritage : les identifiants wire `.torus` / `TORUS_PROTOCOL_VERSION` / events `torus://…`
 > sont **conservés tels quels** pour la compatibilité réseau — ne pas les renommer sans bump de protocole.

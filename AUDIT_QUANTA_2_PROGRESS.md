@@ -3560,6 +3560,12 @@ assumé ; ADR-007(b) « comptes tout ML-DSA » **différé**).
 > gadget : **PQ-MIG-5** (genèse PQ) et la réconciliation **clé-de-vote ↔ clé-d'enjeu** pour le câblage
 > vivant (slashing + votes réels en production — vote gossip non encore branché ici, `LatestVotes` vide,
 > le tie-break/plancher/enjeu décident en attendant). Commit = **manuel, Alexandre**.
+>
+> **[MAJ 2026-07-12]** La réconciliation clé-de-vote ↔ clé-d'enjeu est **résolue par PQ-MIG-3B** :
+> identité de compte unique ML-DSA, la clé de vote **est** la clé d'enjeu (même adresse). Le câblage
+> vivant du gossip des votes est fait — **LIVE-1** (`p2p/finality_live.rs`, `FinalityTracker`,
+> `Ledger::validator_stakes_by_pubkey`), `LatestVotes` n'est plus vide en vivant. Reste **LIVE-2**
+> (proposition finalité-consciente) et **LIVE-3** (slashing vivant STAKE→BURN).
 
 ---
 
@@ -3649,3 +3655,62 @@ assumé ; ADR-007(b) « comptes tout ML-DSA » **différé**).
 > **clé-de-vote ↔ clé-d'enjeu** pour câbler le gadget en vivant (votes par gossip, slashing sur ledger
 > réel) ; et les décisions **§12** (allocation réelle, montants) + la frontière gravé/ajustable d'ADR-006.
 > Commit = **manuel, Alexandre**.
+>
+> **[MAJ 2026-07-12]** Réconciliation clé-de-vote ↔ clé-d'enjeu **résolue** — PQ-MIG-3B fait de la
+> clé de vote et de la clé d'enjeu la **même** adresse de compte ML-DSA, rien à réconcilier. Frontière
+> gravé/ajustable et §12 **ratifiés par ADR-009** (E=32, quorum ⅔, unbonding 10 080, slash brûlé/plein).
+> Le câblage vivant du gossip des votes est fait (**LIVE-1**, 379 tests) ; reste **LIVE-2**
+> (proposition finalité-consciente) et **LIVE-3** (slashing vivant STAKE→BURN).
+
+---
+
+## LIVE-1 — câblage vivant du gadget de finalité, gossip des votes
+*(2026-07-12 · [[DESIGN-LIVE-WIRING]] §2.1-2.2, §3 · première pièce du câblage IO, construit sur GADGET-1→5B + PQ-MIG-1→5)*
+
+> Le gadget de finalité (`sm/finality*`, `sm/fork_choice`) était **prouvé en simulation** mais
+> **hors-circuit** en vivant : aucun message gossip ne portait de vote, `LatestVotes` restait vide sur
+> un nœud réel. **LIVE-1** branche le premier fil : les votes de finalité circulent par gossip et
+> peuplent l'état vivant, **sans toucher** au chemin de valeur (pas encore de proposition
+> finalité-consciente ni de slashing vivant — LIVE-2/3).
+
+### Livrables
+- **`GossipMessage::FinalityVote { vote_json }`** (lane **Critical**, au même rang que `NewBlock`) —
+  le vote signé ML-DSA voyage en JSON dans l'enveloppe gossip existante (Ed25519 transport + nonce +
+  timestamp, pipeline ⑨ inchangé).
+- **Bras dispatcher** (étape ⑨) : `handle_finality_vote` — désérialise le `Vote`, l'**ingest** dans le
+  tracker vivant ; aucune règle de verdict nouvelle, la logique reste dans `sm/`.
+- **`p2p/finality_live.rs` — `FinalityTracker`** : combine `LatestVotes` (GADGET-5A), `FinalityState`
+  (GADGET-3), l'arbre de blocs et un **pool de votes par lien** — l'état IO qui **appelle** le cœur
+  sans-IO, ne le redéfinit pas.
+- **`Ledger::validator_stakes_by_pubkey()`** — le pont pubkey → adresse : re-clé l'enjeu on-chain par
+  la clé ML-DSA **révélée** dans chaque tx `Stake` (fonction pure de la chaîne, identique sur tout
+  nœud — même discipline qu'ONCHAIN-STAKE-1).
+- **Cast au tick de mining** — `cast_finality_vote_if_validator` dans `mining_loop.rs` : un validateur
+  vote au fil des ticks, signé ML-DSA, diffusé en `FinalityVote`.
+- **Dérives additives** — `serde`/`Ord` sur `Vote`/`Checkpoint` : sérialisation et tri pour le
+  transport et l'arbre, **aucune logique** ajoutée aux types du cœur.
+
+### Portes (acceptation)
+- `cargo test --lib` : **379 / 0**.
+- `clippy --all-targets -D warnings` propre.
+- **C1** (déterminisme, 128 runs) byte-identique — inchangé.
+- Build frontend OK.
+
+### Auto-revue — périmètre sans-IO
+- **cœur `sm/` intact** — aucune règle de verdict nouvelle ; tout verdict de finalité reste une
+  **fonction pure** du cœur existant (GADGET-1→5B) ; `FinalityTracker` **appelle**, ne redéfinit pas.
+- **pont pubkey↔adresse pur** — `validator_stakes_by_pubkey` est une fonction pure de la chaîne
+  (source = tx `Stake` scellées), pas un état séparé à faire diverger.
+- **IO testée à part** — cinq dents dédiées : re-clé du pont pubkey↔adresse, round-trip wire du
+  `FinalityVote`, rejet d'un vote forgé/non-validateur, finalisation déclenchée depuis le gossip (⅔
+  atteint via votes reçus), non-validateur ne cast rien.
+
+> **Bilan LIVE-1** : le gadget de finalité **observe** désormais le réseau réel — les votes ML-DSA
+> circulent par gossip, peuplent `LatestVotes`/`FinalityState` sur chaque nœud vivant, le pont
+> pubkey↔enjeu est une fonction pure de la chaîne. **Additif et sans risque de divergence** : tant que
+> **LIVE-2** n'est pas là, les votes ne font qu'observer — un pair qui ignore `FinalityVote` bâtit
+> la **même** chaîne (le proposeur suit toujours `chain.last()`, pas `ghost_head`), donc pas de bump de
+> protocole nécessaire pour ce pas. Restent, réservés en `/goal` chirurgical (§4, arbitrage
+> consensus) : **LIVE-2** (le proposeur bâtit sur `ghost_head` ancré finalité au lieu de
+> `chain.last()`) et **LIVE-3** (slashing vivant STAKE→BURN sur le ledger réel) — chacun touche le
+> chemin de valeur/conservation. Commit = **manuel, Alexandre**.

@@ -98,8 +98,11 @@ privilégiée, pas de course à l'armement matériel : un laptop laissé en lign
 
 - **Les blocs** sont scellés par le leader du slot environ toutes les 2 minutes ; chacun
   porte une racine de Merkle BLAKE3 des IDs de ses transactions.
-- **Les transferts** sont signés Ed25519 ; le destinataire reçoit 99%, 1% est brûlé, et
-  l'expéditeur est débité du montant total — le tout en `u64` µQTA, donc aucune dérive.
+- **Les transferts** sont autorisés par une signature **ML-DSA-65 (FIPS 204)** obligatoire,
+  liée à la clé qui dérive l'adresse ML-DSA de l'expéditeur ; Ed25519 reste la couche de
+  transport gossip (signature d'enveloppe) plus une co-signature de transaction vestigiale.
+  Le destinataire reçoit 99%, 1% est brûlé, et l'expéditeur est débité du montant total —
+  le tout en `u64` µQTA, donc aucune dérive.
 - **Le cache de solde** est O(1) (`HashMap` incrémental), mis à jour à l'application et
   reverté en cas de reorg.
 - **Anti-replay** : nonce strictement monotone par compte + ensemble `seen_tx_hashes`.
@@ -161,21 +164,23 @@ futur est publiquement prévisible (une surface de DoS ciblé). Un vrai VRF à c
 
 | Couche | Mécanisme |
 |---|---|
-| Identité / signatures | **Hybride Ed25519 + ML-DSA-65** (NIST FIPS 204), actif sur la couche transaction |
+| Identité / signatures | **ML-DSA-65** (NIST FIPS 204) autorité de transaction ; Ed25519 transport gossip |
 | Dérivation de clé | Argon2id (64 Mio, 3 itérations, parallélisme 4) |
 | Chiffrement au repos | AES-256-GCM (nonce unique de 12 octets par opération) |
 | Hachage / content-addressing | BLAKE3 |
 | Sûreté mémoire | `zeroize` + `ZeroizeOnDrop` sur chaque secret |
 
-**Post-quantique — actif (hybride).** Chaque **transaction** est signée par une signature
-hybride **Ed25519 + ML-DSA-65** (NIST FIPS 204) via la crate autonome `fips204` (Rust pur,
-temps constant, zéro `unsafe`). La clé ML-DSA est **dérivée de la graine Ed25519** (XOF
-BLAKE3), donc aucun secret supplémentaire n'est persisté et aucune migration de coffre n'est
-nécessaire. La vérification est **strictement ET** quand une couche PQ est présente — forger
-exige de casser *les deux* schémas — avec un repli Ed25519 pour les signatures
-pré-activation. Les enveloppes gossip restent en Ed25519 (transport éphémère, fenêtre de
-fraîcheur ±90 s, déjà à l'intérieur de QUIC/TLS) ; un jour-drapeau *require-PQ* (`REQUIRE_PQ`)
-à l'échelle du réseau est un futur bump de protocole.
+**Post-quantique — actif (autorité ML-DSA pure).** L'identité de compte est une adresse
+ML-DSA — `BLAKE3(ADDR_DOMAIN ‖ clé publique ML-DSA)` — et l'autorité de chaque
+**transaction** est une signature **ML-DSA-65** (NIST FIPS 204) obligatoire, provenant de la
+clé qui dérive l'adresse de l'expéditeur, via la crate autonome `fips204` (Rust pur, temps
+constant, zéro `unsafe`). La clé ML-DSA est **dérivée de la graine Ed25519** (XOF BLAKE3),
+donc aucun secret supplémentaire n'est persisté et aucune migration de coffre n'est
+nécessaire. Il n'y a **plus de repli Ed25519** pour l'autorité de transaction — la
+vérification est du ML-DSA pur, pas un ET hybride entre deux schémas. Les enveloppes gossip
+restent en Ed25519 (transport éphémère, fenêtre de fraîcheur ±90 s, déjà à l'intérieur de
+QUIC/TLS), et une co-signature Ed25519 vestigiale continue d'accompagner les transactions
+par continuité de couche transport.
 
 ---
 
@@ -205,12 +210,14 @@ signer à ta place, et personne ne peut geler, annuler ou confisquer ce que tu d
   n'est pas filtrée anti-sybil. L'heuristique d'éclipse ne détecte que les attaquants
   *paresseux* (pairs partageant un préfixe de clé) ; la vraie résistance à l'éclipse exige
   diversité IP/AS et pairs d'ancrage persistants — au roadmap.
-- **Le consensus converge mais n'est pas encore économiquement final.** L'élection du leader
-  est publiquement prévisible (pas de VRF à clé secrète) et il n'y a **pas de slashing** de
-  l'équivocation : la résolution de fork fait *converger* le réseau, mais rien ne *pénalise*
-  économiquement un leader qui signe deux blocs à la même hauteur. Considère les confirmations
-  profondes comme plus fortes, jamais comme finales, tant que finalité BFT + slashing ne sont
-  pas livrés.
+- **Le gadget de finalité est vérifié en simulation, pas encore entièrement en vivant.** Un
+  gadget de finalité façon Casper-FFG (votes de validateurs, justify/finalize à ⅔ du stake,
+  et une règle de slashing de l'équivocation) est implémenté et prouvé en simulation
+  déterministe (GADGET-1→5B). Le gossip des votes de finalité est désormais câblé en vivant
+  (LIVE-1) ; la proposition de bloc finalité-consciente et l'exécution du slashing en vivant
+  restent à câbler. L'élection du leader reste aussi publiquement prévisible (pas encore de
+  VRF à clé secrète). Tant que le gadget n'est pas entièrement en vivant, considère les
+  confirmations profondes comme *fortes*, pas comme *finales*.
 - **Aucune valeur monétaire réelle.** QUANTA est expérimental et non coté. Ne stocke pas une
   valeur que tu ne peux pas perdre.
 

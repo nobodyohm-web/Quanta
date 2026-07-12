@@ -97,8 +97,11 @@ left online contributes.
 
 - **Blocks** are sealed by the slot leader roughly every 2 minutes; each carries a BLAKE3
   Merkle root of its transaction IDs.
-- **Transfers** are Ed25519-signed; the recipient receives 99%, 1% is burned, and the
-  sender is debited the full amount — all in `u64` µQTA, so balances never drift.
+- **Transfers** are authorized by a mandatory **ML-DSA-65 (FIPS 204)** signature from the
+  key that derives the sender's address; Ed25519 remains the gossip transport layer
+  (envelope signing) plus a vestigial transaction co-signature. The recipient receives 99%,
+  1% is burned, and the sender is debited the full amount — all in `u64` µQTA, so balances
+  never drift.
 - **Balance cache** is O(1) (incremental `HashMap`), updated on apply and reverted on reorg.
 - **Anti-replay**: a strictly monotonic nonce per account plus a `seen_tx_hashes` set.
 - **Fork resolution is deterministic**: validate the challenger before mutating, pop the
@@ -159,20 +162,22 @@ VDF (for full grinding resistance) are roadmap, not shipped.
 
 | Layer | Mechanism |
 |---|---|
-| Identity / signatures | **Hybrid Ed25519 + ML-DSA-65** (NIST FIPS 204), active on the transaction layer |
+| Identity / signatures | **ML-DSA-65** (NIST FIPS 204) transaction authority; Ed25519 gossip transport |
 | Key derivation | Argon2id (64 MiB, 3 iterations, parallelism 4) |
 | Encryption at rest | AES-256-GCM (unique 12-byte nonce per operation) |
 | Hashing / content-addressing | BLAKE3 |
 | Memory safety | `zeroize` + `ZeroizeOnDrop` on every secret |
 
-**Post-quantum — active (hybrid).** Every **transaction** is signed with a hybrid
-**Ed25519 + ML-DSA-65** signature (NIST FIPS 204) via the standalone `fips204` crate
-(pure Rust, constant-time, no `unsafe`). The ML-DSA key is **derived from the Ed25519 seed**
-(BLAKE3 XOF), so no extra secret is persisted and no vault migration is needed. Verification
-is **strict AND** when a PQ layer is present — forging requires breaking *both* schemes —
-with an Ed25519 fallback for pre-activation signatures. Gossip envelopes remain Ed25519
-(ephemeral transport, ±90 s freshness window, already inside QUIC/TLS); a network-wide
-*require-PQ* flag day (`REQUIRE_PQ`) is a future protocol bump.
+**Post-quantum — active (pure ML-DSA authority).** Account identity is an ML-DSA address —
+`BLAKE3(ADDR_DOMAIN ‖ ML-DSA public key)` — and every **transaction**'s authority is a
+mandatory **ML-DSA-65** signature (NIST FIPS 204) from the key that derives the sender's
+address, via the standalone `fips204` crate (pure Rust, constant-time, no `unsafe`). The
+ML-DSA key is **derived from the Ed25519 seed** (BLAKE3 XOF), so no extra secret is
+persisted and no vault migration is needed. There is **no Ed25519 fallback** for
+transaction authority — verification is pure ML-DSA, not a hybrid AND of two schemes.
+Gossip envelopes remain Ed25519 (ephemeral transport, ±90 s freshness window, already
+inside QUIC/TLS), and a vestigial Ed25519 co-signature still rides on transactions for
+transport-layer continuity.
 
 ---
 
@@ -199,11 +204,12 @@ nobody can freeze, reverse, or confiscate what you hold.
   puzzle yet, and the gossip layer itself is not Sybil-gated. The eclipse heuristic only flags
   *lazy* attackers (peers sharing a pubkey prefix); real eclipse resistance needs IP/AS
   diversity and persistent anchor peers, which are roadmap.
-- **Consensus converges but is not yet economically final.** Leader election is publicly
-  predictable (no secret-key VRF) and there is **no slashing** for equivocation yet: fork
-  resolution makes the network *converge*, but nothing economically *penalizes* a leader who
-  signs two blocks at the same height. Treat deeper confirmations as stronger, never as final,
-  until BFT finality + slashing ship.
+- **Finality gadget is simulation-verified, not yet fully live.** A Casper-FFG-style
+  finality gadget (validator votes, ⅔-stake justify/finalize, and an equivocation slashing
+  rule) is implemented and proven in deterministic simulation. Finality-vote gossip is now
+  wired live; finality-aware block proposal and live slashing execution are still being
+  wired. Leader election also remains publicly predictable (no secret-key VRF yet). Until
+  the gadget is fully live, treat deeper confirmations as *strong*, not *final*.
 - **No real monetary value.** QUANTA is experimental and unpriced. Do not store value you
   cannot lose.
 

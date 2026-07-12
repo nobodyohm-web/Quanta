@@ -39,8 +39,9 @@ PLAFOND prouvable :  S_max = R₀ / (1 − r)   # somme géométrique finie
 
 ## B. Valeur — déflation pilotée par l'usage (plus fort que BTC)
 Transformer le burn 1 % existant en **burn de base, net-destructeur** (style
-EIP-1559), sur **chaque action** (transfert, loyer de domaine, tip, marketplace,
-publication) — **détruit, pas re-créé**.
+EIP-1559), sur **chaque transfert** — **détruit, pas re-créé**. (Le loyer de
+domaine, les tips, le marketplace et la publication ont été retirés du scope
+crypto-only le 2026-06-20 ; seul le transfert existe aujourd'hui.)
 
 ```
 ΔOffre = subvention(t) − burn(usage)
@@ -61,9 +62,11 @@ faux mineurs et rafle l'émission. À corriger en priorité.
 1. **Preuve-de-Contribution témoignée par les pairs** (modèle Helium) : une
    contribution (bande passante / hébergement / calcul) n'est comptée que si
    **≥ k pairs indépendants la co-signent** (ils l'ont réellement consommée),
-   avec contrôle de plausibilité + pondération par le **graphe de confiance**
-   (déjà présent : `trust_graph.rs`, `shapley.rs`). Un Sybil seul ne peut pas
-   s'auto-témoigner. **Logiciel pur, pas de matériel.**
+   avec contrôle de plausibilité + pondération par la distribution
+   (`shapley.rs`, présent). Un graphe de confiance (`trust_graph.rs`) existait
+   avant le refactor crypto-only du 2026-06-20 et a été retiré avec le module
+   social ; s'il est repris en Phase 2, il devra être **reconstruit**. Un Sybil
+   seul ne peut pas s'auto-témoigner. **Logiciel pur, pas de matériel.**
 2. **Élection durcie par VDF** (Verifiable Delay Function, Boneh et al. 2018,
    en prod chez Chia) : on enveloppe la graine VRF existante dans un délai
    séquentiel non-parallélisable → tirage du leader **prouvablement
@@ -83,9 +86,10 @@ faux mineurs et rafle l'émission. À corriger en priorité.
   honnêtement.
 - **À éviter absolument** (red flags) : inflation cachée, dev-mint, mécaniques de
   pump, APY > 100 %, concentration interne. Et **pas de demurrage sur la
-  monnaie** (ça punirait la détention que tu veux encourager) — on garde la
-  décroissance uniquement sur les **ressources** (taxe Harberger des domaines,
-  déjà en place).
+  monnaie** (ça punirait la détention que tu veux encourager) — la taxe
+  Harberger sur les domaines a été retirée avec le module domaines/site le
+  2026-06-20 ; en crypto-only il n'existe **aucun** mécanisme de décroissance
+  sur des ressources.
 
 ---
 

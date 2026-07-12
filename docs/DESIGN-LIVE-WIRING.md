@@ -1,9 +1,9 @@
 ---
 type: design
-status: proposé (à valider — Alexandre)
+status: LIVE-1 implémenté (gossip des votes câblé) — LIVE-2/LIVE-3 en attente
 decision-class: intégration IO (aucune règle de consensus nouvelle)
 socle: GADGET-3/4/5 (gadget complet) · PQ-MIG-5 (migration PQ complète) · ADR-009
-updated: 2026-06-25
+updated: 2026-07-12
 ---
 
 # Câblage du gadget de finalité en vivant — connecter le cœur prouvé au réseau réel
@@ -11,16 +11,20 @@ updated: 2026-06-25
 ← [[00 — Pilotage QUANTA]] · cadre : [[DESIGN-FINALITY-GADGET]] (le gadget) · paramètres : [[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12]]
 Socle : gadget complet (GADGET-3 finalité · GADGET-4 slashing · GADGET-5A/B fork-choice + résolution de partition) · migration PQ complète ([[ADR-007 — Portée du post-quantique (comptes ML-DSA)]] (b), PQ-MIG-3B → PQ-MIG-5)
 
-> [!abstract] Statut — conception d'intégration, pas du code, **aucune règle de consensus nouvelle**
-> Le gadget **tourne, prouvé en simulation déterministe** (harnais DST). Il n'est **pas câblé en
-> vivant** : les votes ne circulent pas par le gossip, `LatestVotes` est **vide** (peuplé `::new()`
-> au heal, GADGET-5B), le slashing opère sur un **instantané** (`apply_slash` sur un
-> `&mut HashMap`). Le fil rouge **« réconciliation clé-de-vote ↔ clé-d'enjeu » est *déjà résolu*** par
-> **PQ-MIG-3B** : enjeu, vote et `from`/`to` partagent **une seule** identité — l'**adresse ML-DSA**
-> `BLAKE3(ADDR_DOMAIN ‖ clé)`. Ce qui reste n'est donc **pas** une réconciliation d'identités, c'est
-> de l'**intégration IO** : brancher le cœur pur sur la couche réseau/ledger réelle. C'est le chantier
-> le plus sérieux qui reste, et il **franchit la frontière sans-IO** — à faire sans la casser.
-> **À valider par Alexandre.**
+> [!abstract] Statut — LIVE-1 livré, LIVE-2/LIVE-3 restent à faire ; **aucune règle de consensus nouvelle**
+> Le gadget **tourne, prouvé en simulation déterministe** (harnais DST). Le câblage en vivant a
+> **commencé** : **LIVE-1 est implémenté** — les votes circulent par le gossip
+> (`GossipMessage::FinalityVote`, bras de dispatch, `FinalityTracker` dans
+> `src-tauri/src/p2p/finality_live.rs`, émission depuis `mining_loop.rs`, pont
+> `Ledger::validator_stakes_by_pubkey`). `LatestVotes` se peuple désormais **depuis le réseau réel**.
+> Restent **LIVE-2** (fork-choice/finalité pas encore branché sur la boucle de proposition — elle
+> scelle toujours sur `chain.last()`) et **LIVE-3** (le slashing opère encore sur un **instantané**,
+> `apply_slash` sur un `&mut HashMap`, pas sur le ledger vivant). Le fil rouge
+> **« réconciliation clé-de-vote ↔ clé-d'enjeu » est *déjà résolu*** par **PQ-MIG-3B** : enjeu, vote
+> et `from`/`to` partagent **une seule** identité — l'**adresse ML-DSA** `BLAKE3(ADDR_DOMAIN ‖ clé)`.
+> Ce qui reste n'est donc **pas** une réconciliation d'identités, c'est de l'**intégration IO** :
+> brancher le cœur pur sur la couche réseau/ledger réelle, en franchissant la frontière sans-IO sans
+> la casser.
 
 ## 0. Ce qui est déjà là (le cœur prouvé — rien à réinventer)
 
@@ -30,7 +34,7 @@ Tout le consensus est **décidé et prouvé**. Le câblage **consomme** ces piè
 |---|---|---|---|
 | Vote de finalité | `struct Vote` + `Vote::verify(stakes, epoch_len) -> bool` | `sm/finality_vote.rs` | signé **ML-DSA**, vérifié — **fait** |
 | Certificat ⅔ | `meets_supermajority` (`backing×3 ≥ total×2`) | `sm/finality_vote.rs` | quorum **gravé** (ADR-009) — fait |
-| Votes les plus récents | `struct LatestVotes` | `sm/fork_choice.rs` | moteur prêt, **entrées vides** |
+| Votes les plus récents | `struct LatestVotes` | `sm/fork_choice.rs` | moteur prêt, **peuplé depuis le réseau réel (LIVE-1)** |
 | Fork-choice GHOST | `ghost_head(tree, latest, stakes, justifié, finalisé)` · `anchors(&FinalityState)` | `sm/fork_choice.rs` | **GADGET-5A**, pur — fait |
 | État de finalité | `struct FinalityState` · `apply_certificate` · `justified()` · `finalized()` | `sm/finality_rule.rs` | **GADGET-3** — fait |
 | Détection de faute | `enum Fault` · `detect_fault(a, b) -> Option<Fault>` · `struct FaultProof` | `sm/finality_slashing.rs` | **GADGET-4** — fait |
@@ -53,40 +57,43 @@ Tout le consensus est **décidé et prouvé**. Le câblage **consomme** ces piè
   l'IO est testée **séparément**. La discipline qui a déjà tenu (votes/blocs ordonnés → structures
   `BTree` → verdict ; temps **injecté** au bord, jamais relu pour valider) reste la règle.
 
-## 2. Ce qu'il reste à câbler (4 connexions)
+## 2. Ce qui reste à câbler (2 connexions restantes sur 3 — LIVE-1 fait)
 
-1. **Propager les votes.** Un validateur signe son `Vote` (ML-DSA, fait) et le **gossipe**. Concret :
-   un **nouveau variant** `GossipMessage::FinalityVote { vote_json }` (à côté de `NewBlock`/`BroadcastTx`,
-   `gossip.rs`), un **bras de dispatch** dans `dispatcher.rs` (étape ⑨ du pipeline, après la vérif
-   d'enveloppe Ed25519) qui désérialise → **dé-duplique** (LRU `seen_messages` existant) → valide
-   (`Vote::verify`) → remet au cœur. **Cœur inchangé ; IO testée à part.**
-2. **Alimenter le fork-choice + la finalité.** Les votes reçus peuplent `LatestVotes` (5A) et, une
-   fois un certificat ⅔ constitué, `FinalityState` (3) **du ledger vivant**. Le poids GHOST
-   « s'active » dès que les votes coulent — `ghost_head` est **inchangé**, il attend de **vraies**
-   entrées (aujourd'hui `LatestVotes::new()` vide au heal).
-3. **Slashing sur ledger réel.** Une `FaultProof` (GADGET-4) gossipée (même schéma : variant +
-   dispatch + dédup), une fois `detect_fault` re-confirmé, déclenche sur le ledger **vivant** un
-   mouvement **STAKE → BURN** réel — une **vraie tx/preuve** scellée, pas une mutation de `HashMap`.
-   Conservation via le **bilan réel** (`Σ(dépensable+staké+déverr.)+brûlé == miné`, le STAKE sink se
-   vide vers BURN), pas l'instantané. **Fenêtre de preuve ≤ unbonding** (contrainte gravée, ADR-009 /
-   `SLASH_EVIDENCE_WINDOW_BLOCKS`).
-4. **Boucle de proposition.** Le proposeur (`mining_loop.rs` → `pos_seal_if_leader` →
-   `seal_if_pending`, qui aujourd'hui scelle sur `chain.last()` — le fork-choice **intérimaire**)
-   utilise `ghost_head` (5A) comme **tête**, ancrée finalité, pour bâtir le bloc suivant. La tête
-   vivante devient **finalité-consciente** ; le moteur 5B (`reorg_to_fork`) gère déjà le heal.
+1. ~~**Propager les votes.**~~ **Fait (LIVE-1).** Un validateur signe son `Vote` (ML-DSA) et le
+   **gossipe** : `GossipMessage::FinalityVote { vote_json }` (`gossip.rs`), un **bras de dispatch**
+   dans `dispatcher.rs` (étape ⑨ du pipeline, après la vérif d'enveloppe Ed25519) qui désérialise →
+   **dé-duplique** (LRU `seen_messages` existant) → valide (`Vote::verify`) → remet au
+   `FinalityTracker` (`p2p/finality_live.rs`). Émission depuis `mining_loop.rs`. **Cœur inchangé ;
+   IO testée à part.**
+2. **Alimenter le fork-choice + la finalité.** Les votes reçus peuplent `LatestVotes` (5A, fait,
+   LIVE-1) et, une fois un certificat ⅔ constitué, `FinalityState` (3) **du ledger vivant**. Reste :
+   faire **consommer** ce fork-choice par la boucle de proposition (LIVE-2, ci-dessous).
+3. **Slashing sur ledger réel (LIVE-3, en attente).** Une `FaultProof` (GADGET-4) gossipée (même
+   schéma : variant + dispatch + dédup), une fois `detect_fault` re-confirmé, doit déclencher sur le
+   ledger **vivant** un mouvement **STAKE → BURN** réel — une **vraie tx/preuve** scellée, pas une
+   mutation de `HashMap`. Conservation via le **bilan réel**
+   (`Σ(dépensable+staké+déverr.)+brûlé == miné`, le STAKE sink se vide vers BURN), pas l'instantané.
+   **Fenêtre de preuve ≤ unbonding** (contrainte gravée, ADR-009 / `SLASH_EVIDENCE_WINDOW_BLOCKS`).
+4. **Boucle de proposition (LIVE-2, en attente).** Le proposeur (`mining_loop.rs` →
+   `pos_seal_if_leader` → `seal_if_pending`, qui aujourd'hui scelle encore sur `chain.last()` — le
+   fork-choice **intérimaire**) doit utiliser `ghost_head` (5A) comme **tête**, ancrée finalité, pour
+   bâtir le bloc suivant. La tête vivante deviendra **finalité-consciente** ; le moteur 5B
+   (`reorg_to_fork`) gère déjà le heal.
 
 ## 3. Découpage en pièces (chirurgical, après ce design)
 
-- **LIVE-1 — gossip des votes.** Variant `FinalityVote` + propagation + réception + dédup +
-  `Vote::verify`, `LatestVotes` **peuplé depuis le réseau**. Cœur inchangé ; IO testée à part.
-- **LIVE-2 — proposition finalité-consciente.** Brancher `FinalityState`/`ghost_head` du ledger
-  vivant dans la boucle de proposition (remplace le `chain.last()` intérimaire ; le heal 5B est déjà
-  là).
-- **LIVE-3 — slashing vivant.** `FaultProof` gossipée → tx **STAKE → BURN** sur ledger réel,
-  conservation **réelle**, fenêtre ≤ unbonding.
+- **LIVE-1 — gossip des votes. ✅ Fait.** Variant `FinalityVote` + propagation + réception + dédup +
+  `Vote::verify`, `LatestVotes` **peuplé depuis le réseau** via `FinalityTracker`
+  (`src-tauri/src/p2p/finality_live.rs`), émission dans `mining_loop.rs`, pont
+  `Ledger::validator_stakes_by_pubkey`. Cœur inchangé ; IO testée à part.
+- **LIVE-2 — proposition finalité-consciente.** *(à faire)* Brancher `FinalityState`/`ghost_head` du
+  ledger vivant dans la boucle de proposition (remplace le `chain.last()` intérimaire ; le heal 5B
+  est déjà là).
+- **LIVE-3 — slashing vivant.** *(à faire)* `FaultProof` gossipée → tx **STAKE → BURN** sur ledger
+  réel, conservation **réelle**, fenêtre ≤ unbonding.
 
-*(Ordre indicatif. Chaque pièce **prouvée** ; IO et cœur **testés séparément** ; **C1 du cœur
-préservé** à chaque étape. Un `/goal` chirurgical par pièce, comme les GADGET/PQ-MIG.)*
+*(Chaque pièce **prouvée** ; IO et cœur **testés séparément** ; **C1 du cœur préservé** à chaque
+étape. Un `/goal` chirurgical par pièce, comme les GADGET/PQ-MIG.)*
 
 ## 4. La frontière sans-IO — comment ne pas la casser
 
@@ -114,4 +121,5 @@ préservé** à chaque étape. Un `/goal` chirurgical par pièce, comme les GADG
 
 > Après ce chantier, le gadget ne sera plus seulement prouvé en simulation : il **tournera**. C'est le
 > pas qui fait passer Quanta de « cœur de consensus correct » à « réseau qui finalise pour de vrai ».
-> **Première pièce concrète : LIVE-1** (gossip des votes).
+> **Première pièce concrète, LIVE-1 (gossip des votes) : faite.** Prochaine étape : **LIVE-2**
+> (proposition finalité-consciente), puis LIVE-3 (slashing vivant).

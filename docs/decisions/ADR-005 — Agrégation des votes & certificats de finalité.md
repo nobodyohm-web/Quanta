@@ -4,9 +4,9 @@ id: ADR-005
 status: accepted
 decision-class: 🛑 hard-stop
 decided: 2026-06-23
-ratification: à confirmer formellement (Alexandre)
+ratification: paramètres fixés par ADR-009 (2026-06-25)
 supersedes-proposal: hybride BLS + ancrage PQ (proposition initiale du 2026-06-22, rejetée)
-updated: 2026-06-23
+updated: 2026-07-12
 ---
 
 # ADR-005 — Agrégation des votes & certificats de finalité (post-quantique pur, par époque)
@@ -19,7 +19,7 @@ Lié à : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité B
 > le quorum. **Pas de BLS, pas d'ancrage, un seul système crypto**, le tout derrière une
 > **abstraction de certificat** qui garde l'agrégation future (BLS/SNARK) comme remplacement
 > local. **Supersède** la proposition hybride initiale (BLS + ancrage PQ), désormais **rejetée**.
-> *Ratification formelle d'Alexandre en attente ; les sous-paramètres ci-dessous restent 🛑.*
+> *Sous-paramètres ci-dessous **fixés par ADR-009** (2026-06-25).*
 > Décision de conception, **pas une tâche d'implémentation** : le gadget se construira en specs
 > ultérieurs, en ML-DSA dès l'étape 1.
 
@@ -110,14 +110,17 @@ reste du gadget. Tant que le comité est modeste, **c'est inutile**.
 
 ## Statut & ce dont j'ai besoin de toi (🛑)
 
-ADR **accepté** (post-quantique pur, par époque) ; **ratification formelle d'Alexandre en
-attente**. Sous-paramètres encore à fixer (décisions d'Alexandre, **non tranchés ici**) :
+ADR **accepté** (post-quantique pur, par époque) ; sous-paramètres **fixés par ADR-009**
+(2026-06-25) :
 
-- **Taille du comité** et **seuil de quorum** (tolérance BFT, ⅓).
-- **Longueur d'époque** (en blocs ou en temps) : règle la fréquence des certificats et leur
-  amortissement.
-- **Schéma PQ** : ML-DSA, cohérent avec la signature de tx (niveau **65** probable).
-- **Format du certificat d'époque** et **stratégie d'élagage** des certificats anciens.
+- **Comité / quorum** : **fixés par ADR-009** — quorum **⅔ gravé** (`QUORUM_NUM = 2` /
+  `QUORUM_DEN = 3`, `src-tauri/src/sm/finality_vote.rs:56-57`, appliqué par
+  `meets_supermajority` `:236`) ; **pas de comité échantillonné**.
+- **Longueur d'époque** : **fixée par ADR-009** — `EPOCH_LENGTH_BLOCKS = 32`
+  (`src-tauri/src/sm/finality.rs:35`).
+- **Schéma PQ** : ML-DSA, cohérent avec la signature de tx (niveau **65**).
+- **Format du certificat d'époque** et **stratégie d'élagage** des certificats anciens :
+  inchangé, non couvert par ADR-009.
 
 ## Questions ouvertes
 

@@ -1,13 +1,14 @@
 ---
 type: adr
 id: ADR-007
-status: proposed
+status: accepted
 decision-class: vision fondatrice (engagement du fondateur — recommandation forte (b))
 proposed: 2026-06-24
-ratification: en attente (Alexandre — l'engagement au coût de (b) est le déclencheur)
+ratification: engagement pris — option (b) réalisée (PQ-MIG-3B, 2026-06-25)
+realized: 2026-06-25 (PQ-MIG-3B)
 origine: CRYPTO-ID-1 (audit identité Ed25519 vs ML-DSA)
-bloque: GADGET-3 (a besoin de l'identité autoritaire tranchée)
-updated: 2026-06-24
+débloquait: GADGET-3 — livré (sm/finality_rule.rs)
+updated: 2026-07-12
 ---
 
 # ADR-007 — Portée du post-quantique : comptes en ML-DSA (Quanta entièrement post-quantique)
@@ -15,7 +16,7 @@ updated: 2026-06-24
 ← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]]
 Lié à : [[ADR-005 — Agrégation des votes & certificats de finalité]] · [[ADR-006 — Gouvernance & évolutivité]] (signatures PQ = noyau **gravé**) · **CRYPTO-ID-1** (audit, `AUDIT_QUANTA_2_PROGRESS.md`) · **bloque GADGET-3**
 
-> [!warning] DÉCISION DE **VISION FONDATRICE** (proposée 2026-06-24 — recommandation **forte (b)**, à ratifier)
+> [!warning] DÉCISION DE **VISION FONDATRICE** (proposée 2026-06-24 — recommandation **forte (b)**) — ✅ **réalisée (PQ-MIG-3B, 2026-06-25)**
 > L'audit **CRYPTO-ID-1** a prouvé, `fichier:ligne` à l'appui, que « entièrement post-quantique »
 > **n'est pas tenu** : comptes, autorisation de tx, enjeu et transport sont **enracinés Ed25519** ;
 > la couche ML-DSA est **auto-déclarée par tx et non liée** au compte, donc elle **ne protège pas**
@@ -119,12 +120,14 @@ l'engagement**.
 
 ## Statut & ce dont j'ai besoin de toi (🛑)
 
-ADR **proposé** — recommandation **forte (b)**. À ratifier par Alexandre :
+✅ **ADR accepté** — recommandation **forte (b)** **réalisée** : option (b) implémentée par
+**PQ-MIG-3B** (2026-06-25) — comptes **entièrement ML-DSA**, sans astérisque.
 
-- **L'engagement du fondateur à (b)** (le déclencheur).
-- Ensuite : un **document de conception** de la migration (stratégie de re-racinage, schéma
-  d'adresses, migration des soldes, version de protocole), **puis** des specs chirurgicaux.
+- **L'engagement du fondateur à (b)** : pris, **exécuté** (PQ-MIG-3B).
+- Le **document de conception** puis les specs chirurgicaux ont été suivis d'exécution ; le code de
+  migration est **livré**.
 
-> Cet ADR **bloque GADGET-3** (qui a besoin de l'identité autoritaire tranchée). C'est la décision la
-> plus fondatrice qui reste, et elle vaut d'être prise à tête reposée. **Aucun code de migration**
-> n'est écrit tant qu'elle n'est pas ratifiée.
+> Cet ADR **débloquait GADGET-3** (qui avait besoin de l'identité autoritaire tranchée) — **livré**
+> (`sm/finality_rule.rs`). Résolution (2026-07-12) : option (b) **réalisée** (PQ-MIG-3B, comptes
+> entièrement ML-DSA), code de migration livré ; **aucun** astérisque résiduel sur la promesse
+> post-quantique des comptes.

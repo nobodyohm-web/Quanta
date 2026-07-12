@@ -1,9 +1,10 @@
 ---
 type: adr
 id: ADR-003
-status: open
+status: accepted
 decision-class: 🛑 hard-stop
-updated: 2026-06-21
+decided: 2026-06-25
+updated: 2026-07-12
 ---
 
 # ADR-003 — Slashing (accountable safety)
@@ -17,6 +18,15 @@ updated: 2026-06-21
 > déterministe). Donc l'**option 1** (slashing d'équivocation) est la direction ;
 > il **reste à toi** : **brûlé** (rareté) vs **redistribué au délateur** (incitation),
 > le **montant** (% du stake), et la **fenêtre** de soumission de preuve.
+
+> [!success] RÉSOLU (2026-06-25) — Option 1 retenue et **implémentée** (GADGET-4)
+> Politique fixée par **ADR-009** : **brûlé** (`SLASH_BURN = true`), montant **plein**
+> (`SLASH_NUM/DEN = 1/1`), **fenêtre = période d'unbonding**
+> (`SLASH_EVIDENCE_WINDOW_BLOCKS = UNBONDING_PERIOD_BLOCKS`, const-assert gravée).
+> Détection de faute, preuve et pénalité **implémentées** dans
+> `src-tauri/src/sm/finality_slashing.rs` (`detect_fault`, `FaultProof`, `apply_slash`) —
+> double vote **et** surround vote. Reste le **câblage vivant** sur le ledger réel
+> (LIVE-3, STAKE→BURN).
 
 ## Contexte (code réel)
 - **Aucun slashing aujourd'hui.** [[CLAUDE]] le dit honnêtement : « slashing de
@@ -61,7 +71,14 @@ documenter le compromis sûreté).
   redistribuer récompense le délateur).
 
 ## Statut & ce dont j'ai besoin de toi (🛑)
-Slashing d'équivocation **oui/non** pour la Phase 1 ? Si oui : **brûlé** (rareté)
-ou **redistribué au délateur** (incitation), quel **montant** (% du stake), et
-quelle **fenêtre** de soumission de preuve ? Si non : on grave le compromis
-« sûreté par finalité, équivocation non punie » dans cette ADR.
+
+✅ **Résolu (2026-06-25).** Option 1 (slashing d'équivocation) retenue **et implémentée**
+(GADGET-4, `sm/finality_slashing.rs`). Politique fixée par **ADR-009** :
+**brûlé** (`SLASH_BURN = true`), montant **plein** (`SLASH_NUM/DEN = 1/1`), **fenêtre =
+unbonding** (`SLASH_EVIDENCE_WINDOW_BLOCKS = UNBONDING_PERIOD_BLOCKS`, const-assert). Il ne
+reste que le **câblage vivant** (LIVE-3 : appliquer `apply_slash` — STAKE→BURN — sur le ledger
+réel, pas seulement dans la machine à états `sm/`).
+
+*(Questions d'origine, désormais tranchées : Slashing d'équivocation **oui/non** pour la
+Phase 1 ? → oui. Brûlé ou redistribué ? → brûlé. Montant ? → plein. Fenêtre de soumission de
+preuve ? → fenêtre d'unbonding.)*

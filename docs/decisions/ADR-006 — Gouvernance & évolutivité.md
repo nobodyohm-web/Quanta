@@ -1,11 +1,13 @@
 ---
 type: adr
 id: ADR-006
-status: proposed
+status: ratified
 decision-class: vision (non-technique — ratification de frontière par Alexandre)
 proposed: 2026-06-24
-ratification: en attente (Alexandre — frontière exacte gravé / ajustable)
-updated: 2026-06-24
+ratification: ADR-009 (2026-06-25)
+ratified-by: ADR-009
+ratified: 2026-06-25
+updated: 2026-07-12
 ---
 
 # ADR-006 — Gouvernance & évolutivité (noyau immuable par construction, évolution par fork)
@@ -13,7 +15,7 @@ updated: 2026-06-24
 ← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]]
 Lié à : politique d'émission · [[ADR-005 — Agrégation des votes & certificats de finalité]] (abstraction de certificat) · **couche au-dessus du consensus**
 
-> [!info] DÉCISION DE **VISION** (proposée 2026-06-24, à ratifier par Alexandre)
+> [!info] DÉCISION DE **VISION** (proposée 2026-06-24) — ✅ **ratifiée par ADR-009 (2026-06-25)**
 > Quanta n'a **pas** de gouvernance on-chain. Le **noyau monétaire** (plafond 100M + loi
 > d'émission, signatures post-quantiques, conservation, sûreté du consensus) est **immuable par
 > construction** — non pas verrouillé, mais **sans porte** : aucun chemin de code ne le change.
@@ -85,6 +87,9 @@ plus sûr qu'une serrure : une serrure se crochète, une porte absente non.
   recompiler** — c'est-à-dire **forker** (décision §3).
 - **Aucun setter trouvé** : toutes les autres occurrences de `MAX_SUPPLY_MICRO` sont des
   **lectures**, des comparaisons `<=`, ou l'**enforcement** au consensus.
+- *Note (2026-07-12) : les ancrages de ligne ci-dessus (`reputation.rs:71/79/85`, `ledger.rs:1315/1330`)
+  ont dérivé après GADGET-1→5B et PQ-MIG-3B (renumérotation de fichier) — les `const`/fonctions
+  citées existent toujours, valeurs inchangées ; ancrages non rafraîchis.*
 
 **Le plafond est appliqué au consensus, sur les deux chemins.**
 
@@ -109,7 +114,8 @@ plus sûr qu'une serrure : une serrure se crochète, une porte absente non.
 sur **quelles sont les règles**. C'est exactement la frontière de l'ADR : le vote de finalité est
 un mécanisme de **consensus** (légitime, ADR-005), pas de **gouvernance** (rejeté ici). *Rien ne
 finalise encore* (la règle justify/finalize est GADGET-3) — donc **aucune** machinerie de vote
-n'est même active aujourd'hui.
+n'est même active aujourd'hui. *(État au 2026-06-24 ; GADGET-3→5B livrés depuis, gossip des votes
+câblé en vivant par LIVE-1 — la règle finalise désormais dans `sm/`.)*
 
 **Nuance honnête (pas de survente).** Aujourd'hui, le noyau **et** la périphérie sont tous deux de
 simples `const` : tous deux ne changent **que par fork (recompilation)** — il n'existe **pas
@@ -120,10 +126,11 @@ La frontière gravé / ajustable ci-dessous est donc aujourd'hui une frontière 
 d'intention** (ce que Quanta s'engage à ne jamais toucher vs ce qu'il se réserve de **calibrer par
 fork**), **pas** un clivage de mécanisme déjà câblé.
 
-## Frontière proposée — gravé vs ajustable (🛑 **à ratifier par Alexandre**)
+## Frontière — gravé vs ajustable (✅ ratifiée par ADR-009, 2026-06-25)
 
 > *Point de départ pour la ratification — l'esquisse §1/§2 de l'ADR rendue précise et adossée au
-> code. Constitution §4 : je **cadre**, Alexandre **tranche** la frontière exacte.*
+> code. Constitution §4 : je **cadre**, Alexandre **tranche** la frontière exacte. Frontière
+> ratifiée par ADR-009 (2026-06-25).*
 
 | Invariant / constante | Tier | Mécanisme aujourd'hui | Localisation |
 |---|---|---|---|
@@ -171,10 +178,10 @@ fork**), **pas** un clivage de mécanisme déjà câblé.
 
 ## Statut & ce dont j'ai besoin de toi (🛑)
 
-ADR **proposé** — c'est une décision de **vision**, non technique. À ratifier par Alexandre :
+✅ **ADR ratifié** (par ADR-009, 2026-06-25) — décision de **vision**, non technique.
 
-- La **frontière exacte** gravé vs ajustable (la table ci-dessus est un **point de départ**
-  vérifié, pas une décision figée).
+- La **frontière exacte** gravé vs ajustable est **ratifiée** (la table ci-dessus, précisée par
+  ADR-009).
 - La **liste précise** des invariants « gravés » — confirmer qu'aucun n'est oublié (ex. : le
   format de tx, le burn 1 %, l'unité µQTA méritent-ils le statut gravé ?).
 

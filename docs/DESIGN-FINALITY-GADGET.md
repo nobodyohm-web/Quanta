@@ -1,10 +1,10 @@
 ---
 type: design
-status: proposé (à valider — Alexandre)
-decision-class: 🛑 hard-stop (sous-paramètres §12)
-socle: ADR-001 → ADR-005
+status: implémenté en simulation DST (GADGET-1→5B, 2026-06-25) — câblage vivant en cours (LIVE-1 fait)
+decision-class: 🛑 hard-stop (sous-paramètres §12) — tranchés par ADR-009
+socle: ADR-001 → ADR-005, ADR-009
 ancrage: Casper FFG (Ethereum)
-updated: 2026-06-23
+updated: 2026-07-12
 ---
 
 # Gadget de finalité Quanta — style Casper FFG, post-quantique, par époque
@@ -12,15 +12,25 @@ updated: 2026-06-23
 ← [[00 — Pilotage QUANTA]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]] (Option 1 — Phase 1)
 Socle ADR : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité BFT]] · [[ADR-003 — Slashing (accountable safety)]] · [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]] · [[ADR-005 — Agrégation des votes & certificats de finalité]]
 
-> [!abstract] Statut — conception, pas du code
-> L'orfèvrerie : le protocole raisonné de bout en bout **avant** toute ligne de code. Il s'ancre
+> [!abstract] Statut — implémenté et prouvé en simulation DST (2026-06-25)
+> L'orfèvrerie : le protocole raisonné de bout en bout, puis **construit**. Il s'ancre
 > sur **Casper FFG** (le gadget de finalité d'Ethereum, à sûreté responsable démontrée), adapté
 > à Quanta : votes **ML-DSA** ([[ADR-005 — Agrégation des votes & certificats de finalité]]),
 > finalisation **par époque**, et **vérifié en continu par le harnais DST** existant. Les
-> arguments de sûreté/vivacité (§7-8) sont des **esquisses rigoureuses, pas des preuves
-> formelles** : la formalisation et l'audit externe restent devant (§13). C'est l'architecture
-> de départ — solide, cohérente, éprouvée — **pas un théorème clos**. **À valider par
-> Alexandre** ; les paramètres du §12 restent **🛑 les tiens**.
+> arguments de sûreté/vivacité (§7-8) restent des **esquisses rigoureuses, pas des preuves
+> formelles** : la formalisation et l'audit externe restent devant (§13). Mais l'architecture
+> décrite ici est **réalisée** — chaque étape du §14 a son fichier :
+>
+> | Étape | Fichier | Contenu |
+> |---|---|---|
+> | GADGET-1 | `src-tauri/src/sm/finality.rs` | époque/point de contrôle, `EPOCH_LENGTH_BLOCKS = 32` |
+> | GADGET-2 | `src-tauri/src/sm/finality_vote.rs` | `Vote` signé ML-DSA + `MlDsaCertificate` (quorum ⅔) |
+> | GADGET-3 | `src-tauri/src/sm/finality_rule.rs` | justification/finalisation, `FinalityState` |
+> | GADGET-4 | `src-tauri/src/sm/finality_slashing.rs` | `detect_fault` / `FaultProof` / `apply_slash` |
+> | GADGET-5A/B | `src-tauri/src/sm/fork_choice.rs` + `Ledger::reorg_to_fork` | LMD-GHOST `ghost_head` + résolution de partition |
+>
+> Les 4 méta-décisions §12 sont **tranchées** (ADR-009). Le câblage réseau vivant (gossip des
+> votes, LIVE-1) est **fait** ; voir [[DESIGN-LIVE-WIRING]] pour la suite (LIVE-2, LIVE-3).
 
 ## 1. Ce sur quoi on construit
 
@@ -158,16 +168,15 @@ guérissent :
 - **au-dessus** de la finalité, les branches concurrentes se départagent par la règle de
   fork-choice, en suivant le **point de contrôle justifié** le plus récent.
 
-> [!info] Cible d'acceptation déjà gravée dans le harnais
-> C'est **exactement** ce que la simulation attend : le test **2b**
-> `t0_8_multiblock_partition_currently_diverges_gadget_deferred` (`src-tauri/src/sm/sim.rs:2932`)
-> asserte **aujourd'hui** la divergence de sûreté (le trou ADR-001, marqué *gadget-deferred*, sans
-> escalade car attendu). Quand le gadget arrive, on **inverse** l'assertion en `tips[a] == tips[b]`.
-> Le garde **§4 reste** : une rupture de **conservation/émission** au heal (double-mint à
-> l'échelle de la partition) **panique** — c'est un bug NEUF, pas un *gadget-deferred*. L'exigence
-> qui accompagne ce moment : la **conservation globale au heal**, c'est-à-dire **défaire
-> proprement l'émission de toute branche perdante non finalisée**, pour ne pas rouvrir la classe
-> double-mint à l'échelle de la partition.
+> [!success] Cible d'acceptation — réalisée (GADGET-5B)
+> Le basculement attendu **a eu lieu** : le test **2b**, autrefois
+> `t0_8_multiblock_partition_currently_diverges_gadget_deferred`, est maintenant
+> `t0_8_multiblock_partition_reconciles_at_heal` (`src-tauri/src/sm/sim.rs:3467`) et asserte
+> `tips[a] == tips[b]` — la **réconciliation**, plus la divergence. Le garde **§4** reste actif :
+> une rupture de **conservation/émission** au heal (double-mint à l'échelle de la partition)
+> continue de **paniquer** — c'est toujours un bug NEUF si elle survient. L'exigence qui
+> accompagnait ce moment — la **conservation globale au heal**, c'est-à-dire **défaire
+> proprement l'émission de toute branche perdante non finalisée** — est tenue.
 
 ## 10. Comité et rotation (ADR-002, ADR-004)
 
@@ -199,21 +208,26 @@ Et le test **2b** bascule de « partition multi-blocs **diverge** (gadget-deferr
 Un gadget dont la sûreté responsable est **esquissée** *et* **falsifiée en continu** par
 simulation déterministe : c'est l'objet rare que les gens du domaine respectent.
 
-## 12. Décisions à fixer (🛑 les tiennes)
+## 12. Décisions — tranchées par ADR-009
 
-> [!question] Ce dont j'ai besoin de toi — non tranché ici
-> La **règle d'arrêt §4** ([[QUANTA_AGENT_CONSTITUTION]]) nomme explicitement « quel modèle de
-> finalité, faut-il du slashing et comment » : je **cadre**, je ne **tranche pas**. Ouvert :
+> [!question] Ce dont j'avais besoin de toi — tranché
+> La **règle d'arrêt §4** ([[QUANTA_AGENT_CONSTITUTION]]) nommait explicitement « quel modèle de
+> finalité, faut-il du slashing et comment ». **[[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12]]**
+> a tranché :
 >
-> - **`E`, la longueur d'époque** (en blocs ou en temps) : règle la **latence de finalité** et la
->   fréquence des certificats.
-> - **Seuil de quorum** : **⅔ de l'enjeu** est le standard BFT — **à confirmer**.
-> - **Variante exacte de fork-choice** consciente de la finalité : de la plus simple (adaptée à la
->   chaîne linéaire) vers une **LMD-GHOST** si besoin.
-> - **Montants et fenêtre de slashing** ([[ADR-003 — Slashing (accountable safety)]]) pour les
->   **deux conditions** du §7.
-> - **Pénalité d'inactivité** éventuelle (l'« inactivity leak » de Casper) pour récupérer la
->   vivacité si **plus d'un tiers** de l'enjeu disparaît durablement — **à décider plus tard**.
+> - **`E`, la longueur d'époque** : **32 blocs** (`EPOCH_LENGTH_BLOCKS = 32`, `finality.rs`) —
+>   gravé.
+> - **Seuil de quorum** : **⅔ de l'enjeu**, gravé en `QUORUM_NUM`/`QUORUM_DEN` et vérifié par
+>   `meets_supermajority` (`finality_vote.rs`).
+> - **Variante de fork-choice** consciente de la finalité : **LMD-GHOST** (`ghost_head`,
+>   `fork_choice.rs`, GADGET-5A).
+> - **Montants et fenêtre de slashing** ([[ADR-003 — Slashing (accountable safety)]]) : montant
+>   plein pour les deux conditions du §7 (double vote / vote enveloppant), fenêtre de preuve =
+>   la fenêtre d'unbonding (`SLASH_EVIDENCE_WINDOW_BLOCKS`).
+>
+> Seul point encore **légitimement ouvert** : la **pénalité d'inactivité** éventuelle
+> (l'« inactivity leak » de Casper) pour récupérer la vivacité si plus d'un tiers de l'enjeu
+> disparaît durablement — reportée, non requise pour le gadget tel que livré.
 
 Ces choix recoupent les sous-paramètres encore ouverts d'ADR-002/003/004/005 (taille de comité,
 niveau ML-DSA, format/élagage du certificat) : voir [[docs/decisions/README|Registre des décisions]].
@@ -248,11 +262,12 @@ Chacune est un **spec serré**, exécuté et relu, comme tout ce qu'on a fait ju
 qu'un gros morceau se construit **sans devenir un gros risque**.
 
 > [!note] Statut & suite
-> Conception **proposée, à valider par Alexandre**. Une fois validée et les paramètres du §12
-> fixés, l'implémentation suit le découpage du §14 — **étape 1 d'abord** (squelette d'époque +
-> invariant de sûreté de finalité), chaque pièce **falsifiée par le harnais DST** avant la
-> suivante. Aucune ligne de consensus n'est écrite tant que les **🛑** ne sont pas tranchés
-> (règle d'arrêt §4).
+> Conception **validée et implémentée** (GADGET-1→5B, 2026-06-25) en simulation déterministe,
+> suivant exactement le découpage du §14, chaque pièce **falsifiée par le harnais DST** avant la
+> suivante. Les **🛑** du §12 sont tranchés par ADR-009. Prochaine étape : le **câblage vivant**
+> (le gadget tourne en simulation, pas encore intégralement sur le réseau réel) — LIVE-1 (gossip
+> des votes) est **fait** ; restent LIVE-2 (proposition finalité-consciente) et LIVE-3 (slashing
+> vivant). Voir [[DESIGN-LIVE-WIRING]].
 
 > L'orfèvrerie, c'est cette conception. Sa beauté n'est pas dans sa taille mais dans le fait que
 > **chaque pièce se démontre et se mesure**. Le reste, c'est de la transcription patiente.

@@ -25,17 +25,19 @@ Quanta est un **logiciel alpha de recherche**. Il est honnête de le dire claire
 
 | ✅ Réel et testé | 🧪 Expérimental | ❌ Pas encore |
 |---|---|---|
-| Identité Ed25519 + vault chiffré (Argon2id + AES-256-GCM) | Oracle d'énergie (estimation watts) | Audit de sécurité tiers |
+| Identité = adresse ML-DSA + vault chiffré (Argon2id + AES-256-GCM) | Oracle d'énergie (estimation watts) | Audit de sécurité tiers |
 | Ledger µQTA déterministe (burn-and-mint, fork reorg, **plafond 100M**) | Anti-sybil (PoC : réputation + poids de stake) | Notarisation / signature OS officielle |
 | Consensus Proof-of-Stake + VRF (BLAKE3) | NAT traversal multi-pairs à grande échelle | Réseau public ouvert à grande échelle |
 | Transport Iroh QUIC + gossip signé (9 messages) | | Valeur / prix de marché (QUANTA n'est pas coté) |
-| **Signatures post-quantiques actives** (Ed25519 + ML-DSA-65, FIPS 204) | | |
-| 174 tests automatisés, 0 `unsafe` | | |
+| **Autorité de transaction ML-DSA-65 pure** (FIPS 204), transport Ed25519 | | |
+| **Gadget de finalité** (votes, ⅔-stake, slashing) vérifié en simulation, gossip câblé en vivant | | |
+| 379 tests automatisés, 0 `unsafe` | | |
 
 - **P2P vérifié** entre deux machines physiques (mai 2026), pas (encore) à l'échelle.
 - **Cryptographie expérimentale** : ne stockez aucune valeur réelle dessus.
-- Les **signatures post-quantiques sont actives** : chaque transaction est signée en
-  **hybride Ed25519 + ML-DSA-65 (NIST FIPS 204)** — voir [Sécurité](#-sécurité).
+- L'**autorité de transaction est du ML-DSA-65 pur** (NIST FIPS 204) : chaque transaction est
+  signée par la clé liée à l'adresse ML-DSA de l'expéditeur ; Ed25519 reste le transport gossip
+  — voir [Sécurité](#-sécurité).
 - Un [audit interne 360°](audit/Torus-Audit-360.html) recense l'état réel, les écarts et la
   feuille de route. Ce README ne survend rien : ce qui est marqué expérimental l'est.
 
@@ -49,8 +51,9 @@ Quanta est un **logiciel alpha de recherche**. Il est honnête de le dire claire
 2. **Garder** — Votre identité est une paire de clés ; on vous joint par un court **`@pseudo`**.
    La clé privée ne quitte jamais l'appareil (vault Argon2id + AES-256-GCM) ; une clé de
    récupération restaure le compte. Aucun KYC, aucun tiers.
-3. **Échanger** — Transférez des QUANTA entre wallets, signés **Ed25519 + ML-DSA-65** (post-quantique),
-   avec un **burn de 1 %** à chaque transfert. Stakez pour sécuriser le réseau (PoS + VRF).
+3. **Échanger** — Transférez des QUANTA entre wallets, autorisés par une signature **ML-DSA-65**
+   (post-quantique) liée à l'adresse ML-DSA de l'expéditeur, avec un **burn de 1 %** à chaque
+   transfert. Stakez pour sécuriser le réseau (PoS + VRF).
 
 ---
 
@@ -95,7 +98,8 @@ dédup (LRU 100 K) → fraîcheur timestamp (±90 s) → rate-limit adaptatif �
 | Styles | CSS vanilla (tokens), accent `#00DC82` | — |
 | Transport P2P | iroh / iroh-gossip / iroh-blobs | 0.98 / 0.98 / 0.100 |
 | Consensus | Proof-of-Stake + VRF (BLAKE3) | — |
-| Signatures | Ed25519 (ed25519-dalek) | 2.2 |
+| Signatures | Ed25519 transport (ed25519-dalek) | 2.2 |
+| Signatures | ML-DSA-65 autorité de transaction (fips204) | — |
 | Chiffrement | AES-256-GCM | 0.10 |
 | KDF | Argon2id (64 Mio, 3 itér., parallélisme 4) | 0.5 |
 | Hashing | BLAKE3 | 1.8 |
@@ -107,9 +111,12 @@ dédup (LRU 100 K) → fraîcheur timestamp (±90 s) → rate-limit adaptatif �
 
 ## 🔐 Sécurité
 
-- **Identité** : clé Ed25519 générée localement. Le secret est dérivé par **Argon2id**
-  (64 Mio) et scellé en **AES-256-GCM** dans un vault sur disque. Les secrets sont
-  **`zeroize`és** après usage (résistance cold-boot / memory dump).
+- **Identité** : une adresse **ML-DSA** — `BLAKE3(ADDR_DOMAIN ‖ clé publique ML-DSA)` — c'est
+  le `from`/`to` on-chain. La paire Ed25519 générée localement reste dans le vault comme
+  identité de transport (PeerId) et comme **graine** dont la clé ML-DSA est dérivée
+  (BLAKE3 XOF). Le secret est dérivé par **Argon2id** (64 Mio) et scellé en **AES-256-GCM**
+  dans un vault sur disque. Les secrets sont **`zeroize`és** après usage (résistance
+  cold-boot / memory dump).
 - **Récupération** : à la création, l'utilisateur **doit** voir et confirmer sa clé de
   récupération (re-saisie du dernier bloc) avant d'entrer — pas de compte non sauvegardé.
 - **Transport** : chaque message gossip est une `GossipEnvelope` signée Ed25519, horodatée
@@ -118,14 +125,15 @@ dédup (LRU 100 K) → fraîcheur timestamp (±90 s) → rate-limit adaptatif �
   (10 Mo max/enveloppe, 50 blocs max/segment), heuristique anti-éclipse.
 - **Erreurs opaques** : un échec de déchiffrement renvoie « Invalid », jamais le type d'erreur
   réel. Aucune clé privée n'apparaît dans les logs, erreurs ou réponses JSON.
-- **Post-quantique — actif** : chaque **transaction** est signée en hybride
-  **Ed25519 + ML-DSA-65** (NIST FIPS 204) via le crate `fips204` (pur Rust, constant-time,
-  sans `unsafe`). La clé ML-DSA est **dérivée de la graine Ed25519** (XOF BLAKE3) → aucun
-  secret supplémentaire persisté, aucune migration de vault. La vérification est en **AND
-  strict** quand la couche PQ est présente (forger exige de casser *les deux* schémas), avec
-  repli Ed25519 pour les signatures antérieures. Les **enveloppes gossip** restent en
-  Ed25519 (transport éphémère, fenêtre ±90 s, déjà sous QUIC/TLS) ; le passage « PQ
-  obligatoire » réseau (`REQUIRE_PQ`) est un futur changement de version de protocole.
+- **Post-quantique — actif (autorité ML-DSA pure)** : l'autorité de chaque **transaction**
+  est une signature **ML-DSA-65** (NIST FIPS 204) obligatoire, de la clé liée à l'adresse de
+  l'expéditeur, via le crate `fips204` (pur Rust, constant-time, sans `unsafe`). La clé
+  ML-DSA est **dérivée de la graine Ed25519** (XOF BLAKE3) → aucun secret supplémentaire
+  persisté, aucune migration de vault. Il n'y a **plus de repli Ed25519** pour l'autorité de
+  transaction — la vérification est du ML-DSA pur, pas un AND hybride entre deux schémas.
+  Les **enveloppes gossip** restent en Ed25519 (transport éphémère, fenêtre ±90 s, déjà sous
+  QUIC/TLS) ; le passage « PQ obligatoire » réseau (`REQUIRE_PQ`) est un futur changement de
+  version de protocole.
 
 ---
 
@@ -163,7 +171,7 @@ dépendances système).
 npm install
 npm run tauri dev
 
-# Tests backend (174 tests)
+# Tests backend (379 tests)
 cargo test --manifest-path src-tauri/Cargo.toml
 
 # Lint (zéro warning toléré)
@@ -197,7 +205,7 @@ src-tauri/src/
 └── security/
     ├── mod.rs             ← CryptoEngine (Ed25519)
     ├── pq_vault.rs        ← Vault d'identité (Argon2id + AES-256-GCM)
-    └── hybrid_crypto.rs   ← Signatures hybrides Ed25519 + ML-DSA-65 (FIPS 204, actif)
+    └── hybrid_crypto.rs   ← Autorité ML-DSA-65 (FIPS 204) + transport Ed25519 (actif)
 
 src/                       ← Frontend Svelte 5 (Wallet, Network, Profile, Settings, …)
 ```
@@ -214,6 +222,10 @@ La feuille de route détaillée (priorisée par impact × effort) vit dans l'**a
 - **Réseau** : convergence et résilience aux partitions testées en chaos (2+ nœuds).
 - **Produit** : i18n (FR/EN), parcours d'onboarding, ergonomie du wallet.
 - **Production** : pipeline de release signé + notarisation macOS.
+- **Finalité** : gadget de finalité (votes, justify/finalize à ⅔ du stake, règle de slashing
+  de l'équivocation) implémenté et vérifié en simulation déterministe ; gossip des votes
+  câblé en vivant (LIVE-1) ; proposition de bloc finalité-consciente et slashing en vivant
+  encore en cours de câblage.
 - **Vision** : finalité BFT sous-seconde (design [DAG-BFT](docs/DESIGN-CONSENSUS-DAG-BFT.md) —
   un DAG de *consensus*, sans rapport avec le DAG de contenu social retiré),
   aléa d'élection durci par VDF, bascule réseau « PQ obligatoire » (`REQUIRE_PQ`).

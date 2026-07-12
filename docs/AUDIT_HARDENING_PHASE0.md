@@ -7,6 +7,11 @@ mode: ultra-effort, fan-out 8 surfaces + vérification adverse par trouvaille
 liens: [[QUANTA_HARDENING_AUDIT]] · [[QUANTA_AGENT_CONSTITUTION]] (§3, §4) · [[AUDIT_QUANTA_2_PROGRESS]] · [[QUANTA_SIGN_DET_VERIFY]] · [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité BFT]] · [[ADR-003 — Slashing (accountable safety)]] · [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]]
 ---
 
+> **Addendum 2026-07-12** : items #1-#4 corrigés (FORK-CAP, SLICE-CLASS,
+> PRESIG-ORDER, TX-AUTH-NONCE) ; gadget de finalité + slashing (détection)
+> livrés en simulation (GADGET-1→5B) ; gossip des votes câblé en vivant
+> (LIVE-1) ; voir AUDIT_QUANTA_2_PROGRESS.md.
+
 # HARDEN-AUDIT-1 — Rapport d'audit de durcissement, Phase 0
 
 > **Lecture seule.** Aucun code (prod ou test) n'a été modifié pour produire ce rapport.
