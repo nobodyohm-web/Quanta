@@ -125,6 +125,18 @@ impl FinalityTracker {
         &self.latest
     }
 
+    /// LIVE-2 — the chain height of the **last finalized** checkpoint (the finality
+    /// floor to push into the ledger, [`Ledger::set_finalized_floor`]). Genesis
+    /// (height 0) on a fresh node; rises as certificates finalize checkpoints.
+    pub fn finalized_floor_height(&self) -> u64 {
+        self.state
+            .finalized()
+            .iter()
+            .last()
+            .map(|c| c.height)
+            .unwrap_or(0)
+    }
+
     /// **Learn the chain's block tree** from the live ledger (pure over the
     /// chain). Registers each block as a child of its predecessor so GHOST has a
     /// tree to walk. Idempotent — re-adding a known edge is a no-op — so it can
@@ -453,6 +465,34 @@ mod tests {
             tracker.state().finalized().get(1),
             Some(&c1),
             "the live gadget finalized c1 purely from gossiped votes",
+        );
+    }
+
+    #[test]
+    fn live2_finalization_raises_the_tracker_floor() {
+        // LIVE-2 — when gossiped votes finalize a checkpoint, the tracker's finality
+        // floor rises to that checkpoint's height (what the dispatcher/mining-loop
+        // then push into the ledger via `set_finalized_floor`). Fresh tracker floor
+        // = 0 (genesis); after finalizing c1 it becomes c1's height.
+        let a = identity(1);
+        let b = identity(2);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO), (&b, 5 * MICRO)]);
+        let mut tracker = FinalityTracker::with_epoch_len(ledger.genesis_hash(), E);
+        assert_eq!(tracker.finalized_floor_height(), 0, "fresh: only genesis finalized");
+
+        let g = cp(0, ledger.genesis_hash().as_str());
+        let c1 = cp(1, "c1-hash");
+        let c2 = cp(2, "c2-hash");
+        // g→c1 (justify c1) then c1→c2 (finalize c1) — both ⅔.
+        tracker.ingest_vote(signed_vote(&a, &g, &c1), &ledger);
+        tracker.ingest_vote(signed_vote(&b, &g, &c1), &ledger);
+        tracker.ingest_vote(signed_vote(&a, &c1, &c2), &ledger);
+        let out = tracker.ingest_vote(signed_vote(&b, &c1, &c2), &ledger);
+        assert!(out.finalized, "c1 finalized from the votes");
+        assert_eq!(
+            tracker.finalized_floor_height(),
+            c1.height,
+            "the tracker floor rose to the finalized checkpoint's height",
         );
     }
 

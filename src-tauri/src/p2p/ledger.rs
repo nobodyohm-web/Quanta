@@ -149,6 +149,17 @@ pub struct Ledger {
     /// matures (folds back into `balance_cache`) once the chain reaches its
     /// `unlock_height`. Also chain-derived, so it survives restart/sync identically.
     unbonding: HashMap<String, Vec<UnbondEntry>>,
+    /// LIVE-2 — the chain index of the **last finalized** block (the finality
+    /// gadget's floor). Blocks at index `≤ finalized_floor_index` are **irreversible**:
+    /// no fork may replace them (GADGET-3 finalization + GADGET-4 accountable
+    /// safety). `0` = only genesis finalized (a fresh node). Pushed **down the
+    /// chain** by the live gadget as certificates finalize checkpoints
+    /// ([`Self::set_finalized_floor`]), and consulted by the fork-resolution paths
+    /// ([`Self::integrate_remote_block`]) as an **absolute veto** — the free
+    /// lexicographic tie-break still applies *above* the floor (Gasper: fork-choice
+    /// is free above finality, frozen at/below it). A **pure** safety guard:
+    /// rejecting a reorg never mutates a balance, so conservation is untouched.
+    finalized_floor_index: u64,
 }
 
 impl Ledger {
@@ -207,6 +218,7 @@ impl Ledger {
             recent_deque: VecDeque::new(),
             staked: HashMap::new(),
             unbonding: HashMap::new(),
+            finalized_floor_index: 0, // LIVE-2: only genesis finalized on a fresh chain
         };
         // PQ-MIG-5 §1+§3: derive balance_cache + staked/unbonding from the genesis
         // block — the SINGLE source of truth, exactly as a restore would — so the
@@ -744,6 +756,28 @@ impl Ledger {
             .first()
             .map(|b| b.hash.clone())
             .unwrap_or_default()
+    }
+
+    /// LIVE-2 — the chain index of the last finalized block (the finality floor).
+    /// Blocks at index `≤` this are irreversible. `0` (genesis) on a fresh node.
+    pub fn finalized_floor_index(&self) -> u64 {
+        self.finalized_floor_index
+    }
+
+    /// LIVE-2 — push the finality floor **down the chain** as the live gadget
+    /// finalizes checkpoints. **Monotonic**: it never rises above the current tip
+    /// and never moves backward (finality is irreversible — a lower value would
+    /// re-open finalized history to reorg). The caller passes the height of the
+    /// last finalized checkpoint (`FinalityState::finalized().iter().last()`);
+    /// clamped to the current tip so a vote referencing a not-yet-integrated block
+    /// can't freeze a height we don't hold. Returns the effective floor.
+    pub fn set_finalized_floor(&mut self, finalized_index: u64) -> u64 {
+        let tip_index = self.chain_height().saturating_sub(1);
+        let target = finalized_index.min(tip_index);
+        if target > self.finalized_floor_index {
+            self.finalized_floor_index = target;
+        }
+        self.finalized_floor_index
     }
 
     // ── B2: Nonce management ────────────────────────────────────────────
@@ -2018,6 +2052,24 @@ impl Ledger {
 
         // Fork detected: same height, different block
         if block.index == tip.index && block.hash != tip.hash {
+            // LIVE-2 — FINALITY FLOOR (absolute veto). If the tip we'd replace is at
+            // or below the last finalized block, it is IRREVERSIBLE (GADGET-3
+            // finalization + GADGET-4 accountable safety: two conflicting finalized
+            // branches require ⅓ slashable). Refuse the reorg regardless of hash —
+            // the free lexicographic tie-break only applies ABOVE the floor (Gasper:
+            // fork-choice is free above finality, frozen at/below it). Pure safety
+            // guard: we return without mutating any balance, so conservation and the
+            // cache are untouched. `reorg_to_fork` (GADGET-5B) enforces the same floor
+            // on the multi-block path; this closes it on the live single-block path.
+            if tip.index <= self.finalized_floor_index {
+                log::warn!(
+                    "◈ [Ledger] FORK at height {} REFUSED — tip is finalized (floor={}), \
+                     finalized history is irreversible",
+                    block.index,
+                    self.finalized_floor_index
+                );
+                return Ok(false); // keep the finalized block
+            }
             // Deterministic tie-break: keep the block with the lexicographically higher
             // hash. Both nodes will converge to the same choice.
             if block.hash > tip.hash {
@@ -2573,6 +2625,7 @@ impl Ledger {
             pending: self.pending.clone(),
             tx_counter: self.tx_counter,
             account_nonces: self.account_nonces.clone(),
+            finalized_floor_index: self.finalized_floor_index,
         }
     }
 
@@ -2598,6 +2651,7 @@ impl Ledger {
             recent_deque: VecDeque::new(),
             staked: HashMap::new(),
             unbonding: HashMap::new(),
+            finalized_floor_index: snap.finalized_floor_index, // LIVE-2: irreversible across restart
         };
         // PERF-1 + ONCHAIN-STAKE-1: rebuild the balance cache AND the on-chain
         // stake state from the restored chain. Both are block-index-anchored, so
@@ -3363,6 +3417,83 @@ mod tests {
             "a fork above the finalized floor reorganizes normally"
         );
         assert_eq!(ledger.chain.last().unwrap().hash, winner.hash, "the fork is now the tip");
+    }
+
+    // ─── LIVE-2: finality floor on the LIVE single-block-fork path ──────────
+
+    #[test]
+    fn live2_integrate_refuses_to_reorg_a_finalized_tip() {
+        // The finality-safety property on the live path: once the tip is finalized
+        // (floor at its index), a higher-hash competitor at the SAME height — which
+        // would normally WIN the lexicographic tie-break — is REFUSED. Finalized
+        // history is irreversible. This closes on `integrate_remote_block` the same
+        // hole `reorg_to_fork` already guards on the multi-block path.
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let rival = "e".repeat(64);
+        let reward = ledger.build_unsigned_tx("NETWORK", &rival, 2 * MICRO, TxType::Mining);
+        // A competitor engineered to BEAT the tip's hash (would win without finality).
+        let winner =
+            forge_winning_fork(tip.index, &genesis_hash, &rival, vec![reward], &tip.hash);
+        assert!(winner.hash > tip.hash, "setup: the competitor wins the raw tie-break");
+
+        // Finalize the tip (floor = its index). The higher-hash fork must be refused.
+        let floor = ledger.set_finalized_floor(tip.index);
+        assert_eq!(floor, tip.index, "floor advanced to the finalized tip");
+        assert_eq!(
+            ledger.integrate_remote_block(winner.clone()),
+            Ok(false),
+            "a fork replacing a FINALIZED tip is refused regardless of hash",
+        );
+        assert_eq!(ledger.chain.last().unwrap().hash, tip.hash, "finalized tip preserved");
+        assert_eq!(ledger.chain.len(), 2, "chain unchanged by the refused reorg");
+    }
+
+    #[test]
+    fn live2_integrate_still_reorgs_above_the_floor() {
+        // Positive control (anti-masking): finality freezes ONLY what it finalized.
+        // With the floor left at genesis (0), the SAME higher-hash competitor at
+        // height 1 wins the tie-break and reorganizes normally — fork-choice stays
+        // free above the floor (Gasper).
+        let (mut ledger, tip, genesis_hash) = forkcap_two_block_chain();
+        let rival = "e".repeat(64);
+        let reward = ledger.build_unsigned_tx("NETWORK", &rival, 2 * MICRO, TxType::Mining);
+        let winner =
+            forge_winning_fork(tip.index, &genesis_hash, &rival, vec![reward], &tip.hash);
+        assert_eq!(ledger.finalized_floor_index(), 0, "only genesis finalized");
+        assert_eq!(
+            ledger.integrate_remote_block(winner.clone()),
+            Ok(true),
+            "above the floor the free lexicographic tie-break still applies",
+        );
+        assert_eq!(ledger.chain.last().unwrap().hash, winner.hash, "the heavier fork won");
+    }
+
+    #[test]
+    fn live2_finalized_floor_is_monotonic_and_tip_clamped() {
+        // The setter never lowers the floor (finality is irreversible) and never
+        // freezes a height the node doesn't hold (clamped to the tip).
+        let (mut ledger, tip, _g) = forkcap_two_block_chain(); // tip at index 1
+        assert_eq!(ledger.set_finalized_floor(1), 1, "advances to a held height");
+        assert_eq!(ledger.set_finalized_floor(0), 1, "never moves backward");
+        assert_eq!(
+            ledger.set_finalized_floor(999),
+            tip.index,
+            "clamped to the tip — can't freeze a not-yet-integrated block",
+        );
+    }
+
+    #[test]
+    fn live2_floor_survives_snapshot_restore() {
+        // The floor is persisted (it is NOT chain-derivable — it depends on votes),
+        // so a restart keeps finalized history irreversible before votes re-flow.
+        let (mut ledger, tip, _g) = forkcap_two_block_chain();
+        ledger.set_finalized_floor(tip.index);
+        let restored = Ledger::restore(ledger.snapshot());
+        assert_eq!(
+            restored.finalized_floor_index(),
+            tip.index,
+            "the finality floor round-trips through snapshot/restore",
+        );
     }
 
     // ─── SLICE-CLASS (HARDEN-HYGIENE-1): char-safe log truncation ───────────

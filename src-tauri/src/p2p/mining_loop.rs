@@ -207,10 +207,16 @@ async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
     let Some(vote) = vote else { return };
 
     // Ingest locally first (self-attestation counts toward the certificate).
-    {
+    let (finalized, floor_height) = {
         let ledger = state.node.ledger.read().await;
         let mut fin = state.node.finality.write().await;
-        fin.ingest_vote(vote.clone(), &ledger);
+        let out = fin.ingest_vote(vote.clone(), &ledger);
+        (out.finalized, fin.finalized_floor_height())
+    };
+    // LIVE-2 — if our own attestation completed a certificate that finalized a
+    // checkpoint, push the floor into the ledger (fresh write lock, no nesting).
+    if finalized {
+        state.node.ledger.write().await.set_finalized_floor(floor_height);
     }
 
     let Ok(vote_json) = serde_json::to_string(&vote) else {

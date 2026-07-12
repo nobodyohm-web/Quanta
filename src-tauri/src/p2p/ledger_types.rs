@@ -72,4 +72,10 @@ pub struct LedgerSnapshot {
     /// B2: Persisted nonce state per account
     #[serde(default)]
     pub account_nonces: HashMap<String, u64>,
+    /// LIVE-2: the finality floor (last finalized block index). Persisted so a
+    /// restart keeps finalized history irreversible before votes re-flow (the
+    /// floor is not chain-derivable — it depends on the finality votes). Old
+    /// snapshots restore with `0` (only genesis finalized), a safe default.
+    #[serde(default)]
+    pub finalized_floor_index: u64,
 }
