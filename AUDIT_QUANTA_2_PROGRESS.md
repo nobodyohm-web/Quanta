@@ -3893,13 +3893,22 @@ de régression encodant la panne :
   d'intégration : `integrate_remote_block`/`reorg_to_fork` **vetoent** tout reorg ≤ `finalized_floor_index`
   (LIVE-2). Une suggestion de fork-choice sous le plancher est donc rejetée à l'application — l'histoire
   finalisée reste irréversible. Test existant : `live2_integrate_refuses_to_reorg_a_finalized_tip`.
-- **837 — « unstake-and-run » : limitation de conception connue (roadmap).** Un offenseur qui `Unstake`
-  **avant** que son slash ne soit scellé déplace ses coins vers l'unbonding (le slash cible le *bonded*,
-  donc `staked=0` → rien à slasher ; dans le même bloc c'est déjà refusé, mais à cheval sur deux blocs il
-  échappe). Mitigation présente : les coins restent **verrouillés `UNBONDING_PERIOD_BLOCKS` (~2 sem.)**,
-  bien au-delà de la fenêtre de détection. Correctif complet (le slash atteint les coins en unbonding,
-  ou gel de l'`Unstake` d'un offenseur dès qu'une preuve existe) = **addition de conception**, au roadmap
-  avec le vrai VRF/VDF et le slashing d'inactivité — cohérent avec le nommage honnête du gadget.
+- **837 — « unstake-and-run » : limitation de conception connue (roadmap, LIVE-3B).** Un offenseur qui
+  `Unstake` **avant** que son slash ne soit scellé déplace ses coins vers l'unbonding (le slash cible le
+  *bonded*, donc `staked=0` → rien à slasher ; dans le même bloc c'est déjà refusé, mais à cheval sur deux
+  blocs il échappe). **Important : c'est un trou d'*imputabilité*, PAS de conservation** — le design actuel
+  reste sûr (un `Unstake` scellé rend le slash pending invalide → évincé par `evict_stale_pending_slashes`,
+  débit sink révoqué, comptabilité exacte sur chaque nœud ; l'offenseur échappe à la *punition*, l'argent
+  reste conservé). Mitigation : coins **verrouillés `UNBONDING_PERIOD_BLOCKS` (~2 sem.)** ≫ fenêtre de
+  détection.
+  **Pourquoi ce n'est pas un patch rapide (analyse de diligence)** : le correctif propre (le slash atteint
+  `staked + unbonding`, sémantique Casper) a un **sous-problème de réversibilité** dur — au reorg, un slash
+  poppé doit restaurer **exactement** les entrées d'unbonding détruites (`amount` + `unlock_height` +
+  `tx_hash`), que la tx `Slash` ne porte pas aujourd'hui. Le fermer proprement = encoder les entrées
+  détruites dans la preuve/tx **ou** rendre le slash-sur-unbonding déterministe par rejeu — une **addition
+  de conception** (LIVE-3B) à faire dans une passe dédiée, pas en addendum précipité sur du code
+  conservation-critique. L'alternative (geler l'`Unstake` d'un offenseur dès qu'une preuve existe) a ses
+  propres courses inter-nœuds. Au roadmap avec le vrai VRF/VDF + le slashing d'inactivité.
 
 **Portes après la grappe** : **399 tests + 1 intégration / 0 échec** ; C1 128-runs byte-identique ;
 sweep multi-seed conservation + émission + **slashing** verts ; clippy `--all-targets` propre.
