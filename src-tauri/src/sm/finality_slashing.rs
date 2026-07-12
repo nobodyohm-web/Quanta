@@ -136,7 +136,11 @@ fn interval_surrounds(outer: &Vote, inner: &Vote) -> bool {
 /// evidence: anyone can re-check it against the stake snapshot with
 /// [`verify_proof`] (valid ML-DSA signatures + same validator + a fault
 /// condition). No accusation is trusted on its face.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The `serde` derives (LIVE-3) let a proof cross the gossip wire
+/// (`GossipMessage::FinalityFault`) and be embedded in a `Slash` tx's
+/// `fault_proof` field — data-carrier only; `verify_proof` stays a pure function.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FaultProof {
     /// First incriminating vote.
     pub vote_a: Vote,

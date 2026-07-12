@@ -158,6 +158,15 @@ pub enum GossipMessage {
     FinalityVote {
         vote_json: String,
     },
+    /// LIVE-3 — a **fault proof** (GADGET-4): two contradictory ML-DSA votes from
+    /// the same validator (double-vote or surround). `proof_json` = a
+    /// [`crate::sm::finality_slashing::FaultProof`] serialized. Each receiver
+    /// re-verifies it against the on-chain stake and, if valid, queues a slash
+    /// (`Ledger::queue_slash`) that destroys the offender's bonded stake
+    /// (STAKE → BURN) in the next sealed block — accountable safety with teeth.
+    FinalityFault {
+        proof_json: String,
+    },
 }
 
 /// NET-5: Default the embedded `Hello.version` field for legacy envelopes

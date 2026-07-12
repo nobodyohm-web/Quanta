@@ -79,7 +79,7 @@ pub struct FinalityTracker {
 /// What ingesting one vote advanced — for observability/tests. `accepted` false
 /// ⇒ the vote failed verification (forged, stale, or from a non-validator) and
 /// changed nothing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestOutcome {
     /// The vote verified and was observed into the fork-choice.
     pub accepted: bool,
@@ -87,6 +87,11 @@ pub struct IngestOutcome {
     pub justified: bool,
     /// …and **finalized** its source (two consecutive linked epochs).
     pub finalized: bool,
+    /// LIVE-3 — a **fault** the incoming vote revealed: it equivocates against the
+    /// validator's previously-observed vote (double-vote or surround, GADGET-4).
+    /// The caller gossips the proof (`GossipMessage::FinalityFault`) so every node
+    /// can slash the offender. `None` on an honest vote.
+    pub detected_fault: Option<crate::sm::finality_slashing::FaultProof>,
 }
 
 impl FinalityTracker {
@@ -166,6 +171,17 @@ impl FinalityTracker {
         if !vote.verify(&stakes, self.epoch_len) {
             return IngestOutcome::default();
         }
+
+        // LIVE-3 — equivocation detection (GADGET-4). Before this vote replaces the
+        // validator's stored latest vote, check whether the two form a slashable
+        // fault (double-vote / surround). Both are individually verified (the stored
+        // one when it was observed, this one just above), so the resulting proof
+        // verifies — the caller gossips it (`FinalityFault`) to slash the offender.
+        let detected_fault = self.latest.get(&vote.validator).and_then(|prior| {
+            crate::sm::finality_slashing::detect_fault(prior, &vote)
+                .map(|_| crate::sm::finality_slashing::FaultProof::new(prior.clone(), vote.clone()))
+        });
+
         // Fork-choice (GADGET-5A): the latest vote per validator drives GHOST.
         self.latest.observe(vote.clone());
 
@@ -178,7 +194,11 @@ impl FinalityTracker {
             entry.push(vote.clone());
         }
 
-        let mut outcome = IngestOutcome { accepted: true, ..Default::default() };
+        let mut outcome = IngestOutcome {
+            accepted: true,
+            detected_fault,
+            ..Default::default()
+        };
 
         // Try to form and apply a ⅔ certificate for the link (GADGET-2 → 3).
         let votes = entry.clone();
@@ -375,6 +395,164 @@ mod tests {
         };
         v.signature = crypto.sign_pq(&v.signable_bytes()).expect("sign vote");
         v
+    }
+
+    // ─── LIVE-3 helpers + teeth ─────────────────────────────────────────────
+
+    use crate::sm::finality_slashing::FaultProof;
+
+    /// A **double-vote** fault proof by `crypto` at epoch length `epoch_len`: two
+    /// DIFFERENT votes for the SAME target epoch (`genesis → c1` and
+    /// `genesis → c1'`), both correctly ML-DSA-signed — a slashable equivocation
+    /// (`detect_fault` ⇒ `DoubleVote`). The checkpoints sit on real `epoch_len`
+    /// boundaries so the votes are well-formed under the verifier that will re-check
+    /// them: the **ledger** slash path uses production `EPOCH_LENGTH_BLOCKS`, while a
+    /// small-`E` tracker test passes its own `E`.
+    fn double_vote_proof_at(crypto: &CryptoEngine, genesis: &str, epoch_len: u64) -> FaultProof {
+        let g = Checkpoint { epoch: 0, height: 0, hash: genesis.to_string() };
+        let c1 = Checkpoint { epoch: 1, height: epoch_len, hash: "c1-hash".into() };
+        let c1_prime = Checkpoint { epoch: 1, height: epoch_len, hash: "c1-prime-hash".into() };
+        FaultProof::new(
+            signed_vote(crypto, &g, &c1),
+            signed_vote(crypto, &g, &c1_prime),
+        )
+    }
+
+    /// Ledger-path proof: well-formed under production `EPOCH_LENGTH_BLOCKS` (what
+    /// `verify_block_slashes` / `build_slash_tx` re-check against).
+    fn double_vote_proof(crypto: &CryptoEngine, genesis: &str) -> FaultProof {
+        double_vote_proof_at(crypto, genesis, EPOCH_LENGTH_BLOCKS)
+    }
+
+    /// Manual conservation check on a bare ledger: `Σ spendable + locked_stake +
+    /// burned == minted` (the harness invariant, computed directly here).
+    fn conserves(l: &Ledger) -> bool {
+        let spendable: u64 = l.all_balances().values().sum();
+        spendable + l.locked_stake_total() + l.total_burned() == l.total_minted()
+    }
+
+    #[test]
+    fn live3_slash_burns_bonded_stake_and_conserves() {
+        // The heart of LIVE-3: slashing an equivocator destroys exactly its bonded
+        // stake (STAKE → BURN) and the balance sheet still balances. A validator A
+        // bonds 5 QTA, equivocates, and is slashed to zero — the 5 QTA move from the
+        // locked-stake pool to burned, conservation preserved throughout.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        assert!(conserves(&ledger), "conserves before the slash");
+        assert_eq!(ledger.staked_of(&addr), 5 * MICRO, "A is bonded 5 QTA");
+        let burned_before = ledger.total_burned();
+
+        // Equivocation proof → queue → seal into a block.
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        let tx = ledger.queue_slash(&proof).expect("a bonded offender is slashable");
+        assert_eq!(tx.amount, 5 * MICRO, "the slash destroys the full bonded stake (ADR-009)");
+        let block = ledger.seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into())
+            .expect("seal the slash block");
+        assert!(
+            block.transactions.iter().any(|t| t.tx_type == crate::p2p::ledger::TxType::Slash),
+            "the slash was included in the sealed block (not excluded)",
+        );
+
+        // Sealer side: the slash applied — bonded stake destroyed, coins burned,
+        // conservation preserved.
+        assert_eq!(ledger.staked_of(&addr), 0, "A's bonded stake is destroyed");
+        assert_eq!(ledger.total_burned(), burned_before + 5 * MICRO, "5 QTA burned");
+        assert!(conserves(&ledger), "conserves AFTER the slash (STAKE → BURN is neutral)");
+        assert_eq!(ledger.validator_stakes().get(&addr), None, "A is no longer a validator");
+
+        // Receiver side (the real convergence property): a FRESH node with the same
+        // chain up to the stakes accepts the slash block (verify_block_slashes runs
+        // at the correct pre-block state inside integrate) and reaches the SAME state.
+        let mut receiver = staked_ledger(&[(&a, 5 * MICRO)]);
+        assert_eq!(receiver.integrate_remote_block(block), Ok(true), "receiver accepts the slash block");
+        assert_eq!(receiver.staked_of(&addr), 0, "receiver applies the slash identically");
+        assert!(conserves(&receiver), "receiver conserves after applying the slash");
+    }
+
+    #[test]
+    fn live3_forged_slash_is_rejected_by_block_validation() {
+        // A malicious proposer cannot punish an innocent validator. Two attacks:
+        // (a) a slash with NO real fault (two identical/legal votes → detect_fault
+        // None), and (b) a slash of the WRONG amount. Both are rejected by
+        // verify_block_slashes, so a block carrying them is refused.
+        let a = identity(1);
+        let b = identity(2);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO), (&b, 5 * MICRO)]);
+        let addr_a = a.pq_address_hex().unwrap();
+
+        // (a) No real fault: a "proof" of two IDENTICAL votes is not equivocation.
+        // Checkpoints on real EPOCH_LENGTH_BLOCKS boundaries (the ledger verifier).
+        let g = Checkpoint { epoch: 0, height: 0, hash: ledger.genesis_hash() };
+        let c1 = Checkpoint { epoch: 1, height: EPOCH_LENGTH_BLOCKS, hash: "c1-hash".into() };
+        let same = signed_vote(&a, &g, &c1);
+        let bogus = FaultProof::new(same.clone(), same);
+        let mut fake_tx = ledger.build_slash_tx(&double_vote_proof(&a, ledger.genesis_hash().as_str())).unwrap();
+        fake_tx.fault_proof = Some(serde_json::to_string(&bogus).unwrap());
+        let blk = Ledger::forge_block_at(
+            ledger.chain_height(),
+            &ledger.chain.last().unwrap().hash,
+            "ts",
+            &addr_a,
+            vec![fake_tx],
+        );
+        assert!(ledger.verify_block_slashes(&blk).is_err(), "a slash with no real fault is rejected");
+
+        // (b) Wrong amount: a real fault, but the slash destroys more than bonded.
+        let real = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        let mut over_tx = ledger.build_slash_tx(&real).unwrap();
+        over_tx.amount = 999 * MICRO; // ≠ A's 5 QTA bonded
+        let blk2 = Ledger::forge_block_at(
+            ledger.chain_height(),
+            &ledger.chain.last().unwrap().hash,
+            "ts",
+            &addr_a,
+            vec![over_tx],
+        );
+        assert!(ledger.verify_block_slashes(&blk2).is_err(), "a wrong-amount slash is rejected");
+    }
+
+    #[test]
+    fn live3_equivocation_is_detected_on_vote_ingest() {
+        // The producer side: when the tracker ingests a vote that equivocates
+        // against a validator's stored vote, it surfaces a verifiable FaultProof
+        // (which the dispatcher gossips as FinalityFault → slash).
+        let a = identity(1);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let mut tracker = FinalityTracker::with_epoch_len(ledger.genesis_hash(), E);
+        let g = cp(0, ledger.genesis_hash().as_str());
+
+        // First honest vote — no fault.
+        let out1 = tracker.ingest_vote(signed_vote(&a, &g, &cp(1, "c1-hash")), &ledger);
+        assert!(out1.detected_fault.is_none(), "one honest vote is not a fault");
+
+        // A conflicting vote for the SAME target epoch — a double-vote.
+        let out2 = tracker.ingest_vote(signed_vote(&a, &g, &cp(1, "c1-prime")), &ledger);
+        let proof = out2.detected_fault.expect("equivocation detected");
+        assert!(
+            crate::sm::finality_slashing::verify_proof(
+                &proof,
+                &ledger.validator_stakes_by_pubkey(),
+                E,
+            ),
+            "the surfaced proof verifies against on-chain stake",
+        );
+    }
+
+    #[test]
+    fn live3_slash_of_unbonded_offender_is_noop() {
+        // Nothing to slash: a proof against a key with no bonded stake queues
+        // nothing (and would be rejected in-block anyway — verify_proof requires an
+        // active validator). No panic, no spurious burn.
+        let a = identity(1); // staked
+        let stranger = identity(9); // NOT staked
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let burned_before = ledger.total_burned();
+        let proof = double_vote_proof(&stranger, ledger.genesis_hash().as_str());
+        assert!(ledger.queue_slash(&proof).is_none(), "an unbonded offender is not slashable");
+        assert_eq!(ledger.total_burned(), burned_before, "nothing burned");
+        assert!(conserves(&ledger), "conservation untouched");
     }
 
     #[test]

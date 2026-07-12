@@ -53,7 +53,10 @@ pub fn priority_for(payload: &GossipMessage) -> Priority {
         | GossipMessage::NewBlock { .. }
         // LIVE-1: a finality vote is consensus material — it drives fork-choice
         // and finalization, so it rides the same lane as blocks.
-        | GossipMessage::FinalityVote { .. } => Priority::Critical,
+        | GossipMessage::FinalityVote { .. }
+        // LIVE-3: a fault proof triggers slashing (accountable safety) — consensus
+        // material, same critical lane.
+        | GossipMessage::FinalityFault { .. } => Priority::Critical,
 
         GossipMessage::BroadcastTx { .. } => Priority::High,
 

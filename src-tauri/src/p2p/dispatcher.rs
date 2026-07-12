@@ -560,6 +560,61 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         GossipMessage::FinalityVote { vote_json } => {
             handle_finality_vote(state, &env.sender, &vote_json).await;
         }
+        GossipMessage::FinalityFault { proof_json } => {
+            handle_finality_fault(state, &env.sender, &proof_json).await;
+        }
+    }
+}
+
+/// LIVE-3 — a gossiped fault proof. Deserialize → re-verify against the on-chain
+/// stake (GADGET-4 `verify_proof`) → queue a slash of the offender's bonded stake
+/// (STAKE → BURN), which the next sealed block includes. A malicious accuser
+/// cannot punish an innocent validator: the queued slash carries the proof and
+/// every node re-verifies it in block validation (`verify_block_slashes`). The
+/// envelope's Ed25519 signature (transport) was already checked upstream; the
+/// proof's own two ML-DSA vote signatures are the slashing authority.
+async fn handle_finality_fault(state: &Arc<AppState>, sender: &str, proof_json: &str) {
+    let proof: crate::sm::finality_slashing::FaultProof = match serde_json::from_str(proof_json) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "◈ [Dispatch] FinalityFault JSON invalide from {}: {}",
+                short(sender, 12),
+                e
+            );
+            return;
+        }
+    };
+    // Verify + queue under a single write lock (queue_slash re-verifies via
+    // build_slash_tx → only slashes a bonded offender; the proof is re-checked
+    // in-block on every node). The offender's stake is read from the live ledger.
+    let queued = {
+        let mut ledger = state.node.ledger.write().await;
+        // Re-verify the proof against on-chain stake before queueing, so a bogus
+        // proof never even enters the mempool (defense-in-depth; block validation
+        // re-checks regardless).
+        let stakes = ledger.validator_stakes_by_pubkey();
+        if !crate::sm::finality_slashing::verify_proof(
+            &proof,
+            &stakes,
+            crate::sm::finality::EPOCH_LENGTH_BLOCKS,
+        ) {
+            log::debug!(
+                "◈ [Dispatch] FinalityFault from {} rejected (proof does not verify)",
+                short(sender, 12)
+            );
+            None
+        } else {
+            ledger.queue_slash(&proof)
+        }
+    };
+    if let Some(tx) = queued {
+        log::info!(
+            "◈ [Slashing] ✓ queued slash of {} µQTA against {} (fault via {})",
+            tx.amount,
+            short(&tx.from, 12),
+            short(sender, 12)
+        );
     }
 }
 
@@ -599,6 +654,18 @@ async fn handle_finality_vote(state: &Arc<AppState>, sender: &str, vote_json: &s
             short(sender, 12)
         );
         return;
+    }
+    // LIVE-3 — the vote revealed an equivocation: queue the slash locally AND
+    // gossip the proof so every node slashes the offender (accountable safety).
+    if let Some(proof) = outcome.detected_fault {
+        state.node.ledger.write().await.queue_slash(&proof);
+        if let Ok(proof_json) = serde_json::to_string(&proof) {
+            log::warn!(
+                "◈ [Slashing] equivocation detected on a gossiped vote → slashing {}",
+                short(proof.offender(), 12)
+            );
+            broadcast(state, GossipMessage::FinalityFault { proof_json }).await;
+        }
     }
     if outcome.finalized {
         // LIVE-2 — a certificate finalized a checkpoint: push the finality floor
@@ -847,6 +914,18 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
             return;
         }
     };
+
+    // LIVE-3: a Slash is BLOCK-ONLY — its authority is an embedded fault proof
+    // verified in-block, and `verify_tx` exempts it from the signature gate. It
+    // must NEVER be admitted from a gossiped BroadcastTx (that would let a peer
+    // inject an unverified slash into the mempool). Slashing flows through
+    // `FinalityFault` → `queue_slash` instead. Drop it here outright.
+    if matches!(tx.tx_type, crate::p2p::ledger::TxType::Slash) {
+        log::warn!(
+            "◈ [Dispatch] BroadcastTx carrying a Slash — rejected (slashes are block-only, via FinalityFault)"
+        );
+        return;
+    }
 
     // C5: mint the verification token — THE single signature gate (AUDIT-TX-1:
     // enforces signatures even on burn-target txs, previously bypassed by

@@ -306,6 +306,7 @@ impl Ledger {
             nonce: 0,
             pq_signature: None,
             pq_public_key: None,
+            fault_proof: None,
         }
     }
 
@@ -469,6 +470,23 @@ impl Ledger {
             }
             return;
         }
+        // LIVE-3: a Slash destroys bonded stake. The coins sit in the STAKE sink
+        // (not the offender's spendable), so debit the SINK — this drops
+        // `locked_stake_total` by `amount`, and `total_burned` counts the Slash
+        // (below), so the pair is conservation-neutral (locked_stake ↓, burned ↑).
+        // The offender's per-account bonded weight (`staked`) is debited at block
+        // time by `apply_block_stake_effects`, keeping sink == Σstaked+Σunbonding.
+        if matches!(tx.tx_type, TxType::Slash) {
+            *self
+                .balance_cache
+                .entry(Self::STAKE_SINK.to_string())
+                .or_insert(0) -= tx.amount as i128;
+            self.recent_deque.push_back(tx.clone());
+            if self.recent_deque.len() > Self::MAX_RECENT {
+                self.recent_deque.pop_front();
+            }
+            return;
+        }
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
         if !synthetic(&tx.to) {
             *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
@@ -492,6 +510,14 @@ impl Ledger {
         // had no spendable/sink effect at this layer; its block-time bonded-weight
         // effect is reverted by `revert_block_stake_effects` on a fork-reorg pop.
         if matches!(tx.tx_type, TxType::Unstake) {
+            return;
+        }
+        // LIVE-3: reverse a Slash — credit the STAKE sink back (mirror of apply).
+        if matches!(tx.tx_type, TxType::Slash) {
+            *self
+                .balance_cache
+                .entry(Self::STAKE_SINK.to_string())
+                .or_insert(0) += tx.amount as i128;
             return;
         }
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
@@ -608,6 +634,17 @@ impl Ledger {
                         tx_hash: tx.hash.clone(),
                     });
                 }
+                // LIVE-3: a Slash **destroys** the offender's bonded weight — debit
+                // `staked` with NO unbonding entry and NO spendable credit (the coins
+                // are burned, not returned). The matching STAKE-sink debit happened
+                // in `cache_apply_tx`, so sink == Σstaked+Σunbonding stays consistent.
+                TxType::Slash => {
+                    let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
+                    *bonded = bonded.saturating_sub(tx.amount);
+                    if *bonded == 0 {
+                        self.staked.remove(&tx.from);
+                    }
+                }
                 _ => {}
             }
         }
@@ -669,6 +706,12 @@ impl Ledger {
                         }
                     }
                 }
+                // LIVE-3: reverse a Slash — restore the offender's bonded weight
+                // (mirror of the apply-side debit; the sink credit is done by
+                // `cache_revert_tx` in the reorg's cache-revert loop).
+                TxType::Slash => {
+                    *self.staked.entry(tx.from.clone()).or_insert(0) += tx.amount;
+                }
                 _ => {}
             }
         }
@@ -697,6 +740,135 @@ impl Ledger {
             .get(pk)
             .map(|v| v.iter().map(|e| e.amount).sum())
             .unwrap_or(0)
+    }
+
+    // ─── LIVE-3: accountable-safety slashing on the live ledger ──────────────
+
+    /// LIVE-3 — the slash amount for an offender bonding `staked` µQTA, per the
+    /// ratified policy (ADR-009: `SLASH_NUM / SLASH_DEN` = full). Pure integer math.
+    pub fn slash_amount_for(staked: u64) -> u64 {
+        use crate::sm::finality_slashing::{SLASH_DEN, SLASH_NUM};
+        // full slash (1/1) by default; the fraction is graven-generic (u128 to
+        // avoid overflow on the multiply, though staked ≤ 100M QUANTA ≪ u64).
+        ((staked as u128 * SLASH_NUM as u128) / SLASH_DEN.max(1) as u128) as u64
+    }
+
+    /// LIVE-3 — build the network-authorized **Slash** tx that destroys the
+    /// offender's bonded stake, carrying `proof` (GADGET-4) as its authority. The
+    /// offender is taken from the proof; the amount is the ratified fraction of
+    /// their **current** bonded stake. `None` if the proof names no bonded
+    /// validator (nothing to slash) or its offender key is malformed. The tx is
+    /// **unsigned** (no offender signature — a slash is authorized by the proof,
+    /// which every node re-verifies via [`Self::verify_block_slashes`]).
+    pub fn build_slash_tx(&self, proof: &crate::sm::finality_slashing::FaultProof) -> Option<Transaction> {
+        let offender_pk = proof.offender();
+        let pk_bytes = hex::decode(offender_pk).ok()?;
+        let offender_addr = CryptoEngine::ml_dsa_address_hex(&pk_bytes);
+        let staked = self.staked_of(&offender_addr);
+        let amount = Self::slash_amount_for(staked);
+        if amount == 0 {
+            return None; // nothing bonded to slash
+        }
+        let proof_json = serde_json::to_string(proof).ok()?;
+        let ts = Self::GENESIS_TIMESTAMP; // deterministic; the hash binds the content
+        // The id/hash bind the proof + offender + amount deterministically.
+        let id = format!("slash_{}", short(&offender_addr, 16));
+        let payload = format!("slash:{offender_addr}:{amount}:{}", short(&proof_json, 32));
+        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        Some(Transaction {
+            id,
+            from: offender_addr,
+            to: "BURN".into(),
+            amount,
+            tx_type: TxType::Slash,
+            timestamp: ts.to_string(),
+            signature: String::new(),
+            hash,
+            nonce: 0,
+            pq_signature: None,
+            pq_public_key: None,
+            fault_proof: Some(proof_json),
+        })
+    }
+
+    /// LIVE-3 — whether ONE `Slash` tx is legitimate against this ledger's on-chain
+    /// stake (pure over `&self` + the tx + a precomputed pubkey-keyed stake map). A
+    /// slash is authorized NOT by a signature but by its embedded [`FaultProof`], so
+    /// the checks are: (1) the proof verifies against the on-chain stake (a real
+    /// double-vote/surround, valid ML-DSA sigs, offender is an **active** validator);
+    /// (2) `from` is exactly the offender key's address `BLAKE3(ADDR_DOMAIN ‖ pk)`;
+    /// (3) the amount is the ratified fraction of the offender's **current** bonded
+    /// stake; (4) the destination is `BURN`. A non-Slash tx is trivially "valid" here.
+    fn slash_tx_valid(&self, tx: &Transaction, stakes_by_pk: &HashMap<String, u64>) -> bool {
+        use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
+        use crate::sm::finality_slashing::{verify_proof, FaultProof};
+        if tx.tx_type != TxType::Slash {
+            return true;
+        }
+        let Some(proof_json) = tx.fault_proof.as_deref() else {
+            return false;
+        };
+        let Ok(proof) = serde_json::from_str::<FaultProof>(proof_json) else {
+            return false;
+        };
+        if !verify_proof(&proof, stakes_by_pk, EPOCH_LENGTH_BLOCKS) {
+            return false; // no real fault / forged / non-validator
+        }
+        let Ok(pk_bytes) = hex::decode(proof.offender()) else {
+            return false;
+        };
+        let offender_addr = CryptoEngine::ml_dsa_address_hex(&pk_bytes);
+        let expected = Self::slash_amount_for(self.staked_of(&offender_addr));
+        tx.from == offender_addr && tx.to == "BURN" && expected > 0 && tx.amount == expected
+    }
+
+    /// LIVE-3 — indices of the **invalid** `Slash` txs in `txs` (the single source
+    /// of truth, COVER-2 style): [`Self::verify_block_slashes`] rejects a received
+    /// block if any exist, and [`Self::seal_block_at`] **excludes** exactly these so
+    /// a self-sealed block is slash-valid by construction — the two can never disagree.
+    fn invalid_slash_indices(&self, txs: &[Transaction]) -> Vec<usize> {
+        // Any Slash present ⇒ compute the pubkey-keyed stake once (it's the costly bit).
+        if !txs.iter().any(|t| t.tx_type == TxType::Slash) {
+            return Vec::new();
+        }
+        let stakes_by_pk = self.validator_stakes_by_pubkey();
+        txs.iter()
+            .enumerate()
+            .filter(|(_, tx)| !self.slash_tx_valid(tx, &stakes_by_pk))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// LIVE-3 — **verify every `Slash` tx in a received block** against this
+    /// ledger's on-chain stake. A malicious proposer cannot punish an innocent
+    /// validator: the embedded proof must show a real fault and the amount must
+    /// equal the ratified fraction of the offender's bonded stake. Rejects the
+    /// whole block on the first invalid slash. Shares [`Self::invalid_slash_indices`]
+    /// with the seal path (one rule, both directions).
+    pub fn verify_block_slashes(&self, block: &Block) -> Result<(), String> {
+        if let Some(&i) = self.invalid_slash_indices(&block.transactions).first() {
+            return Err(format!(
+                "bloc rejeté : slash invalide en position {} (preuve/offender/montant) — LIVE-3",
+                i
+            ));
+        }
+        Ok(())
+    }
+
+    /// LIVE-3 — **queue a slash** from a verified fault proof: build the network-
+    /// authorized `Slash` tx (amount = the ratified fraction of the offender's
+    /// current bonded stake), apply its STAKE-sink debit to the cache (admission,
+    /// like any tx), and push it to the mempool so the next seal includes it. Idempotent
+    /// via `seen_tx_hashes`. Returns the queued tx, or `None` if there is nothing to
+    /// slash (offender not bonded) or the slash is already pending/applied.
+    pub fn queue_slash(&mut self, proof: &crate::sm::finality_slashing::FaultProof) -> Option<Transaction> {
+        let tx = self.build_slash_tx(proof)?;
+        if !self.seen_tx_hashes.insert(tx.hash.clone()) {
+            return None; // already queued or applied (dedup)
+        }
+        self.cache_apply_tx(&tx); // STAKE sink debit at admission (mirrors other txs)
+        self.pending.push(tx.clone());
+        Some(tx)
     }
 
     /// ONCHAIN-STAKE-1 §4: the on-chain stake snapshot that feeds the validator
@@ -1203,19 +1375,23 @@ impl Ledger {
         self.apply_verified_remote_tx(vtx)
     }
 
-    /// Total QUANTA permanently burned (in µQTA).
+    /// Total QUANTA permanently burned (in µQTA). LIVE-3: a `Slash` is also a
+    /// permanent destruction (STAKE sink → burned), so it counts here — the
+    /// counterpart of the `STAKE`-sink debit `cache_apply_tx` performs, keeping
+    /// `Σ spendable + locked_stake + burned == minted` exact across a slash.
     pub fn total_burned(&self) -> u64 {
+        let is_burn = |t: &&Transaction| matches!(t.tx_type, TxType::Burn | TxType::Slash);
         let chain_burn: u64 = self
             .chain
             .iter()
             .flat_map(|b| b.transactions.iter())
-            .filter(|t| t.tx_type == TxType::Burn)
+            .filter(is_burn)
             .map(|t| t.amount)
             .sum();
         let pending_burn: u64 = self
             .pending
             .iter()
-            .filter(|t| t.tx_type == TxType::Burn)
+            .filter(is_burn)
             .map(|t| t.amount)
             .sum();
         chain_burn + pending_burn
@@ -1274,6 +1450,14 @@ impl Ledger {
         // Synthetic system addresses are exempt — they originate inside the
         // node and are never accepted from gossip.
         if tx.from == "NETWORK" || tx.from == "ESCROW" {
+            return Ok(true);
+        }
+        // LIVE-3: a Slash is NOT signed by the offender — its authority is the
+        // embedded fault proof, re-verified against the on-chain stake by
+        // `verify_block_slashes` (a stateful check `verify_tx` can't do). It is
+        // block-only (never accepted from a `BroadcastTx`, see `handle_broadcast_tx`),
+        // so exempting it from the signature gate here opens no gossip-injection hole.
+        if tx.tx_type == TxType::Slash {
             return Ok(true);
         }
         // Any other from value must carry a valid signature, regardless of
@@ -1425,11 +1609,17 @@ impl Ledger {
         };
         let uncovered = Self::uncovered_tx_indices(&onchain_before, &candidate);
         let unbound = Self::binding_violations(&bindings_before, &candidate);
-        let txs = if uncovered.is_empty() && unbound.is_empty() {
+        // LIVE-3 (COVER-2 symmetry): also exclude any `Slash` whose embedded proof
+        // no longer verifies or whose amount no longer matches the offender's current
+        // bonded stake (e.g. the stake changed since the slash was queued). Same rule
+        // `verify_block_slashes` rejects a received block with — so a self-sealed block
+        // is slash-valid by construction and peers never reject the honest leader's block.
+        let bad_slashes = self.invalid_slash_indices(&candidate);
+        let txs = if uncovered.is_empty() && unbound.is_empty() && bad_slashes.is_empty() {
             candidate
         } else {
             let drop_idx: HashSet<usize> =
-                uncovered.into_iter().chain(unbound).collect();
+                uncovered.into_iter().chain(unbound).chain(bad_slashes).collect();
             let mut kept = Vec::with_capacity(candidate.len());
             for (i, tx) in candidate.into_iter().enumerate() {
                 if drop_idx.contains(&i) {
@@ -1519,6 +1709,7 @@ impl Ledger {
             nonce: 0,
             pq_signature: None,
             pq_public_key: None,
+            fault_proof: None,
         };
         let mut out = Vec::with_capacity(rest.len() + 1);
         out.push(reward);
@@ -1686,6 +1877,12 @@ impl Ledger {
                         tx.amount,
                         block.index.saturating_add(UNBONDING_PERIOD_BLOCKS),
                     ));
+                    continue;
+                }
+                // LIVE-3: a Slash destroys locked stake (STAKE sink → burned); it has
+                // NO spendable effect, so it must not debit the offender's spendable
+                // here (mirrors `cache_apply_tx`, which touches only the sink). Skip.
+                if matches!(tx.tx_type, TxType::Slash) {
                     continue;
                 }
                 if !synthetic(&tx.to) {
@@ -1922,6 +2119,14 @@ impl Ledger {
             if matches!(tx.tx_type, TxType::Unstake) {
                 continue; // no spendable debit to cover
             }
+            // LIVE-3: a Slash spends LOCKED stake (STAKE sink), not the offender's
+            // spendable balance — its legitimacy is checked by the embedded fault
+            // proof + bonded-stake amount in `validate_block_against_prev`, not by
+            // spendable coverage. Exempt it here (like Unstake) so it neither
+            // requires spendable cover nor perturbs the running balance.
+            if matches!(tx.tx_type, TxType::Slash) {
+                continue;
+            }
             if !synthetic(&tx.from) {
                 let have = running.get(&tx.from).copied().unwrap_or(0);
                 if have < tx.amount as i128 {
@@ -2007,6 +2212,11 @@ impl Ledger {
         // Block extends our chain (happy path)
         if block.index == tip.index + 1 && block.prev_hash == tip.hash {
             self.validate_remote_block(&block)?;
+            // LIVE-3: re-verify every embedded slash proof against OUR on-chain
+            // stake (pre-block state = `&self`) before accepting the block. A
+            // proposer cannot punish an innocent validator — the proof must show a
+            // real fault and the amount must equal the offender's bonded stake.
+            self.verify_block_slashes(&block)?;
 
             // Dedup transactions we haven't seen
             for tx in &block.transactions {
@@ -2104,6 +2314,12 @@ impl Ledger {
                 let onchain_before = self.onchain_spendable_before(&prev_for_remote);
                 let bindings_before = self.pq_bindings_before(&prev_for_remote);
                 Self::validate_block_against_prev(&block, &prev_for_remote, &onchain_before, &bindings_before)?;
+                // LIVE-3: a fork winner's slashes are re-verified too (same guard as
+                // the linear path). Slashes essentially never appear in a competing
+                // height-1 fork — the honest leader includes them on the canonical
+                // chain — and LIVE-2's floor freezes finalized history; this is the
+                // belt-and-suspenders check so no integration path admits a forged slash.
+                self.verify_block_slashes(&block)?;
 
                 // FORK-CAP-1: the incoming block REPLACES the tip, so it must
                 // clear the SAME emission validation as the linear path — the
@@ -2522,6 +2738,7 @@ impl Ledger {
             nonce: 0, // Network-issued txs don't use account nonces
             pq_signature: None,
             pq_public_key: None,
+            fault_proof: None,
         }
     }
 
@@ -2607,6 +2824,7 @@ impl Ledger {
             nonce,
             pq_signature: Some(hex::encode(&quantum)),
             pq_public_key: Some(pq_pk),
+            fault_proof: None,
         })
     }
 }
@@ -3578,6 +3796,7 @@ mod tests {
             nonce,
             pq_signature: Some(hex::encode(&quantum)),
             pq_public_key: Some(pq_pk),
+            fault_proof: None,
         }
     }
 
@@ -3809,6 +4028,7 @@ mod tests {
             nonce: 0,
             pq_signature: None,
             pq_public_key: None,
+            fault_proof: None,
         };
         assert!(
             Ledger::verify_tx(&forged).is_err(),
