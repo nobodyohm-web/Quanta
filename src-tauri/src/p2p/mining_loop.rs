@@ -197,26 +197,33 @@ async fn broadcast_mining_tx(
 /// is ML-DSA-signed. No-ops when there is nothing honest to attest.
 async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
     let vote = {
+        // LOCK ORDER (crypto → ledger → finality → gossip). `crypto` is taken FIRST
+        // so this path can never deadlock against `transfer` (which holds crypto then
+        // takes ledger). A previous ordering (ledger → finality → crypto) formed a
+        // cross-cycle with `transfer` and could hang the node at an epoch boundary.
+        let crypto = state.crypto.lock().await;
         let ledger = state.node.ledger.read().await;
         let mut fin = state.node.finality.write().await;
         // Keep the block tree current before reading state/anchors.
         fin.observe_chain(&ledger);
-        let crypto = state.crypto.lock().await;
         p2p::finality_live::build_vote_to_cast(&ledger, &fin, &crypto)
     };
     let Some(vote) = vote else { return };
 
     // Ingest locally first (self-attestation counts toward the certificate).
-    let (finalized, floor_height) = {
+    let (finalized, floor) = {
         let ledger = state.node.ledger.read().await;
         let mut fin = state.node.finality.write().await;
         let out = fin.ingest_vote(vote.clone(), &ledger);
-        (out.finalized, fin.finalized_floor_height())
+        (out.finalized, fin.finalized_floor())
     };
     // LIVE-2 — if our own attestation completed a certificate that finalized a
     // checkpoint, push the floor into the ledger (fresh write lock, no nesting).
+    // HIGH-4: the setter only freezes if OUR block at that height matches the
+    // finalized hash.
     if finalized {
-        state.node.ledger.write().await.set_finalized_floor(floor_height);
+        let (h, hash) = floor;
+        state.node.ledger.write().await.set_finalized_floor(h, &hash);
     }
 
     let Ok(vote_json) = serde_json::to_string(&vote) else {

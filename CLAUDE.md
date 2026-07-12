@@ -168,10 +168,11 @@ Slot N (= chain height)
 > **Nommage honnête** : l'*élection du proposeur* est *déterministe et publiquement vérifiable*,
 > **pas** un VRF cryptographique (aucune clé secrète → leader publiquement prévisible). Le beacon
 > enterré bloque l'auto-grinding immédiat ; un vrai VRF (imprévisibilité) + un VDF (anti-grinding)
-> sont au roadmap. Le **slashing de l'équivocation** n'est **plus** absent : détecté et prouvable
-> dans le cœur (`sm/finality_slashing.rs`, GADGET-4 : double vote + surround, preuves ML-DSA,
-> brûlage) ; son câblage vivant (gossip de la preuve + mouvement STAKE→BURN sur le ledger réel)
-> reste LIVE-3. Les identifiants internes `vrf` sont des noms legacy gardés pour la compat.
+> sont au roadmap. Le **slashing de l'équivocation** est **vivant** (LIVE-3) : détecté et prouvable
+> dans le cœur (`sm/finality_slashing.rs`, GADGET-4 : double vote + surround, preuves ML-DSA) **et
+> appliqué sur le ledger réel** — une tx `Slash` (autorisée par la preuve embarquée, re-vérifiée par
+> chaque nœud) détruit l'enjeu de l'offenseur STAKE→BURN, conservation neutre. Les identifiants
+> internes `vrf` sont des noms legacy gardés pour la compat.
 
 **Fichier** : `pos_consensus.rs` (16 tests). Le **gadget de finalité** (Casper-FFG) qui vient
 au-dessus de cette élection vit dans `sm/` — voir la section suivante.
@@ -205,14 +206,25 @@ sans-IO, C1), **prouvé en simulation DST**, et depuis **LIVE-1** ses votes circ
 - **Déterminisme** : tout verdict est une fonction pure (BTreeMap/BTreeSet ordonnés) — deux
   nœuds aux mêmes votes + même chaîne finalisent **identiquement** (la propriété que C1 garde).
 
-> **Câblage vivant (`DESIGN-LIVE-WIRING.md`)** : **LIVE-1 fait** — `GossipMessage::FinalityVote`,
-> bras dispatcher (étape ⑨), `FinalityTracker` (`p2p/finality_live.rs`), cast au tick de mining ;
-> les votes peuplent `LatestVotes`/`FinalityState` du ledger vivant. **Restent** : LIVE-2
-> (proposition finalité-consciente — le proposeur bâtit sur `ghost_head` plutôt que `chain.last()`)
-> et LIVE-3 (slashing vivant STAKE→BURN sur le ledger réel). Ces deux pièces touchent le chemin de
-> valeur / la conservation → chacune est un `/goal` chirurgical réservé (arbitrage consensus §4).
+> **Câblage vivant (`DESIGN-LIVE-WIRING.md`) — LIVE-1→3 FAITS.**
+> - **LIVE-1 (votes)** — `GossipMessage::FinalityVote` + bras dispatcher (étape ⑨) + `FinalityTracker`
+>   (`p2p/finality_live.rs`) + cast au tick de mining ; pont `validator_stakes_by_pubkey` (enjeu re-clé
+>   depuis la chaîne) ; les votes gossippés peuplent `LatestVotes`/`FinalityState` du ledger vivant.
+> - **LIVE-2 (plancher de finalité)** — `Ledger::finalized_floor_index` (monotone, tip-clampé, persisté
+>   au snapshot) alimenté par les certificats ⅔ ; `integrate_remote_block` **refuse** tout fork qui
+>   remplacerait un bloc ≤ plancher (l'histoire finalisée est **irréversible** sur le réseau vivant ;
+>   le départage lexicographique libre ne joue qu'**au-dessus** du plancher — Gasper). Garde de sûreté
+>   pure : refuser un reorg ne mute aucun solde.
+> - **LIVE-3 (slashing vivant)** — équivocation détectée à l'ingest (`detect_fault`) → `FinalityFault`
+>   gossipé → tx `Slash` (autorité = preuve embarquée, re-vérifiée par `verify_block_slashes` sur chaque
+>   nœud) qui détruit l'enjeu de l'offenseur **STAKE→BURN**, **conservation neutre** (l'enjeu et le
+>   brûlé sont deux compartiments de `Σ(dépensable+staké+déverr.)+brûlé==miné`). Un proposeur malveillant
+>   ne peut pas punir un innocent (preuve réelle + adresse offenseur + montant = fraction ratifiée).
+>
+> Le cœur `sm/` reste inchangé (aucune règle nouvelle) ; C1 + conservation + sweep multi-seed verts.
 
-**Fichiers** : `sm/finality*.rs` + `fork_choice.rs` (47 tests) · `p2p/finality_live.rs` (5 tests LIVE-1)
+**Fichiers** : `sm/finality*.rs` + `fork_choice.rs` (47 tests) · `p2p/finality_live.rs` (14 tests LIVE-1→3) ·
+plancher + slash dans `p2p/ledger.rs` (LIVE-2/3 teeth)
 
 ---
 
@@ -421,4 +433,6 @@ npx tauri build
 | 2026-06-25 | **⚖️ Gadget de finalité complet GADGET-1→5B (`sm/`) — checkpoints par époque (E=32) · votes ML-DSA + certificat ⅔ gravé · règle justify/finalize (Casper-FFG) · slashing détecté & prouvable (double-vote + surround) · fork-choice LMD-GHOST pondéré stake, ancré finalité + réconciliation de partition (`reorg_to_fork`) ; prouvé en simulation DST, C1 vert** |
 | 2026-06-25 | **🔐 PQ-MIG-5 — genèse post-quantique : état initial reconstruit sur adresses ML-DSA + validateurs initiaux, hash de genèse canonique content-bound (frozen), conservation exacte dès le bloc 0 ; `TORUS_PROTOCOL_VERSION` bumpé 2→3 (rupture de protocole) — 335→374 tests** |
 | 2026-06-25 | **📜 ADR-005/006/007/009 — agrégation PQ des votes (ADR-005) ; frontière gravé/ajustable ratifiée (ADR-006 par ADR-009) ; comptes ML-DSA réalisés (ADR-007 b) ; §12 figé (E=32, quorum ⅔, unbonding 10 080, slash brûlé/plein/fenêtre=unbonding) ; conception du câblage vivant (`DESIGN-LIVE-WIRING`)** |
-| 2026-07-12 | **🔌 LIVE-1 — câblage vivant du gadget : `GossipMessage::FinalityVote` + bras dispatcher (étape ⑨) + `FinalityTracker` (`p2p/finality_live.rs`) + cast au tick de mining ; pont `validator_stakes_by_pubkey` (enjeu re-clé depuis la chaîne) ; les votes gossippés peuplent `LatestVotes`/`FinalityState` du ledger vivant — cœur `sm/` inchangé, IO testée à part, C1 préservé — 379 tests. Restent LIVE-2 (proposition finalité-consciente) et LIVE-3 (slashing vivant STAKE→BURN)** |
+| 2026-07-12 | **🔌 LIVE-1 — câblage vivant du gadget : `GossipMessage::FinalityVote` + bras dispatcher (étape ⑨) + `FinalityTracker` (`p2p/finality_live.rs`) + cast au tick de mining ; pont `validator_stakes_by_pubkey` (enjeu re-clé depuis la chaîne) ; les votes gossippés peuplent `LatestVotes`/`FinalityState` du ledger vivant — cœur `sm/` inchangé, IO testée à part, C1 préservé — 379 tests** |
+| 2026-07-12 | **🔒 LIVE-2 — plancher de finalité vivant : `Ledger::finalized_floor_index` (monotone, tip-clampé, persisté) alimenté par les certificats ⅔ ; `integrate_remote_block` refuse tout fork ≤ plancher (histoire finalisée irréversible sur le réseau ; départage libre au-dessus, Gasper). Garde de sûreté pure — aucun solde muté — 384 tests** |
+| 2026-07-12 | **⚔️ LIVE-3 — slashing vivant : équivocation détectée à l'ingest → `FinalityFault` gossipé → tx `Slash` (autorité = preuve embarquée, re-vérifiée par `verify_block_slashes`) détruisant l'enjeu de l'offenseur **STAKE→BURN**, **conservation neutre par construction** ; un proposeur ne peut punir un innocent. `TxType::Slash` + accounting + verify + producteur→gossip→apply — C1 + conservation + sweep verts — 388 tests. **Le câblage vivant du gadget est complet (LIVE-1→3).**** |

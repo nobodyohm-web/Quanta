@@ -3714,3 +3714,73 @@ assumé ; ADR-007(b) « comptes tout ML-DSA » **différé**).
 > consensus) : **LIVE-2** (le proposeur bâtit sur `ghost_head` ancré finalité au lieu de
 > `chain.last()`) et **LIVE-3** (slashing vivant STAKE→BURN sur le ledger réel) — chacun touche le
 > chemin de valeur/conservation. Commit = **manuel, Alexandre**.
+>
+> **[MAJ 2026-07-12]** **LIVE-2 et LIVE-3 sont désormais faits** (voir les entrées ci-dessous) — le
+> câblage vivant du gadget de finalité est **complet**.
+
+---
+
+## LIVE-2 — câblage vivant du gadget de finalité, plancher de finalité vivant
+*(2026-07-12 · [[DESIGN-LIVE-WIRING]] §2.2, §3 · construit sur LIVE-1 · commit 09adde7)*
+
+### Livrables
+- **`Ledger::finalized_floor_index`** — monotone, tip-clampé, persisté au snapshot avec
+  `#[serde(default)]` (rétro-compatible avec les snapshots existants).
+- **`set_finalized_floor`** — alimenté par les certificats ⅔ (dispatcher `handle_finality_vote` +
+  cast dans `mining_loop.rs`) : dès qu'un checkpoint finalise, le plancher **monte**.
+- **Veto absolu dans `integrate_remote_block`** — refuse tout fork concurrent à hauteur ≤ plancher ;
+  le départage libre (lexicographique) ne s'applique **qu'au-dessus** du plancher (Gasper :
+  fork-choice libre au-dessus de la finalité, gelé à/sous). Garde de **sûreté pure** : rejeter un
+  reorg ne mute aucun solde → conservation inchangée.
+- **`FinalityTracker::finalized_floor_height`** — expose la hauteur finalisée côté tracker vivant.
+
+### Portes (acceptation)
+- `cargo test --lib` : **384 / 0**.
+- 5 dents : veto d'un tip finalisé, reorg toujours possible au-dessus du plancher, setter
+  monotone + tip-clampé, round-trip snapshot du plancher, plancher du tracker qui monte sur
+  finalisation reçue par gossip.
+
+### Bilan
+L'histoire finalisée est **irréversible** sur le réseau vivant — c'est la moitié **sûreté** de
+LIVE-2 (l'objectif de la conception initiale). Le reorg-timing **actif** piloté par `ghost_head`
+(bâtir directement sur la tête GHOST plutôt que sur `chain.last()`) reste un **raffinement
+optionnel** — il n'ajoute pas de garantie de sûreté supplémentaire, seulement une meilleure
+convergence de timing. Commit = **manuel, Alexandre**.
+
+---
+
+## LIVE-3 — câblage vivant du gadget de finalité, slashing vivant
+*(2026-07-12 · [[DESIGN-LIVE-WIRING]] §2.3, §3 · construit sur LIVE-1/LIVE-2 · commit ccc6039)*
+
+> Accountable safety avec dents : un validateur qui équivoque est détecté, prouvé et **puni pour de
+> vrai** sur le ledger réel — pas seulement en simulation.
+
+### Livrables
+- **`TxType::Slash`** + champ `fault_proof` embarqué sur `Transaction`.
+- **Accounting STAKE→BURN conservation-neutre** : `cache_apply`/`revert`, `total_burned` compte le
+  Slash, effets d'enjeu apply/revert, exemptions coverage/binding pour ce type de tx synthétique.
+- **`verify_block_slashes` / `slash_tx_valid` / `invalid_slash_indices`** — re-vérification de la
+  preuve (`verify_proof`), correspondance de l'adresse de l'offenseur, montant == fraction ratifiée
+  de l'enjeu bonded courant, destination == BURN ; **partagé** entre le chemin de scellement et de
+  réception (symétrie COVER-2, bloc valide par construction).
+- **`build_slash_tx` / `queue_slash` / `slash_amount_for`** — construction, mise en file locale,
+  calcul du montant selon la politique ADR-009 (slash plein, brûlé, fenêtre = unbonding).
+- **`verify_tx` exempte le Slash** (tx block-only, `handle_broadcast_tx` la rejette si elle arrive
+  hors bloc — pas de gossip direct de tx Slash).
+- **Détection d'équivocation à l'ingest** (`detect_fault` sur le vote entrant) → surfaçage d'une
+  `FaultProof` → `GossipMessage::FinalityFault` + `queue_slashes` local ; les récepteurs
+  re-vérifient et mettent en file.
+
+### Portes (acceptation)
+- `cargo test --lib` : **388 / 0**.
+- 4 dents : brûlage + conservation avec convergence côté récepteur, slash forgé/montant erroné
+  rejeté, équivocation détectée à l'ingest, offenseur non-staké → no-op.
+- C1 + conservation + sweep multi-seed + émission **verts** ; `clippy --all-targets` propre ; build
+  frontend OK.
+
+### Bilan
+Le câblage vivant du gadget de finalité est **COMPLET** (LIVE-1 → LIVE-3) : les votes, la
+finalité et le slashing tournent sur le réseau réel, plus seulement en simulation déterministe. Un
+validateur qui équivoque perd son enjeu pour de vrai, et un proposeur malveillant ne peut pas punir
+un validateur innocent (`verify_block_slashes` re-vérifié sur chaque nœud). Commit = **manuel,
+Alexandre**.

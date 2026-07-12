@@ -640,13 +640,13 @@ async fn handle_finality_vote(state: &Arc<AppState>, sender: &str, vote_json: &s
     // Snapshot the chain (read lock) so the gadget verifies + weighs against a
     // consistent on-chain stake state. `ingest_vote` re-derives the pubkey-keyed
     // stake map from the ledger internally.
-    let (outcome, floor_height) = {
+    let (outcome, floor) = {
         let ledger = state.node.ledger.read().await;
         let mut fin = state.node.finality.write().await;
         // Keep the block tree current so GHOST can weigh votes on real blocks.
         fin.observe_chain(&ledger);
         let outcome = fin.ingest_vote(vote, &ledger);
-        (outcome, fin.finalized_floor_height())
+        (outcome, fin.finalized_floor())
     };
     if !outcome.accepted {
         log::debug!(
@@ -670,14 +670,15 @@ async fn handle_finality_vote(state: &Arc<AppState>, sender: &str, vote_json: &s
     if outcome.finalized {
         // LIVE-2 — a certificate finalized a checkpoint: push the finality floor
         // into the ledger so its fork resolution treats that block (and everything
-        // below) as irreversible. Monotonic + tip-clamped inside the setter. Taken
-        // as a fresh write lock AFTER the read/finality locks are dropped above
-        // (no nested ledger lock).
-        let floor = state.node.ledger.write().await.set_finalized_floor(floor_height);
+        // below) as irreversible. HIGH-4: the setter only freezes if OUR block at
+        // that height matches the finalized hash. Fresh write lock AFTER the
+        // read/finality locks are dropped (no nested ledger lock).
+        let (h, hash) = floor;
+        let new_floor = state.node.ledger.write().await.set_finalized_floor(h, &hash);
         log::info!(
             "◈ [Finality] ✓ certificate finalized a checkpoint (from votes via {}) — floor now {}",
             short(sender, 12),
-            floor
+            new_floor
         );
     } else if outcome.justified {
         log::info!("◈ [Finality] ✓ certificate justified a checkpoint (from votes via {})", short(sender, 12));

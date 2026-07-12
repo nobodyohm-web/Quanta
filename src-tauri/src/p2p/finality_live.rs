@@ -134,12 +134,20 @@ impl FinalityTracker {
     /// floor to push into the ledger, [`Ledger::set_finalized_floor`]). Genesis
     /// (height 0) on a fresh node; rises as certificates finalize checkpoints.
     pub fn finalized_floor_height(&self) -> u64 {
+        self.finalized_floor().0
+    }
+
+    /// LIVE-2 (HIGH-4) — the last finalized checkpoint's `(height, hash)`. The hash
+    /// is what [`Ledger::set_finalized_floor`] checks against the block it actually
+    /// holds at that height, so it never freezes the wrong block. Genesis on a fresh
+    /// node.
+    pub fn finalized_floor(&self) -> (u64, String) {
         self.state
             .finalized()
             .iter()
             .last()
-            .map(|c| c.height)
-            .unwrap_or(0)
+            .map(|c| (c.height, c.hash.clone()))
+            .unwrap_or((0, String::new()))
     }
 
     /// **Learn the chain's block tree** from the live ledger (pure over the
@@ -538,6 +546,99 @@ mod tests {
             ),
             "the surfaced proof verifies against on-chain stake",
         );
+    }
+
+    #[test]
+    fn live3_duplicate_slash_of_same_offender_is_rejected() {
+        // CRITICAL (adversarial): a leader self-equivocates once, then puts the SAME
+        // slash tx TWICE in a block. Each passes the stateless amount==staked check
+        // against the same pre-block stake, but applying both would debit the STAKE
+        // sink twice while `staked` saturates at 0 → permanent conservation break.
+        // The sequential invalid_slash_indices must reject the second slash, and a
+        // block carrying the duplicate must be refused.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        let slash = ledger.build_slash_tx(&double_vote_proof(&a, ledger.genesis_hash().as_str())).unwrap();
+        let dup_block = Ledger::forge_block_at(
+            ledger.chain_height(),
+            &ledger.chain.last().unwrap().hash,
+            "ts",
+            &addr,
+            vec![slash.clone(), slash], // the SAME slash twice
+        );
+        assert!(
+            ledger.verify_block_slashes(&dup_block).is_err(),
+            "a block slashing the same offender twice must be rejected",
+        );
+        // And integrating it changes nothing (conservation preserved).
+        assert!(ledger.integrate_remote_block(dup_block).is_err(), "the duplicate-slash block is refused");
+        assert_eq!(ledger.staked_of(&addr), 5 * MICRO, "A's stake untouched by the refused block");
+        assert!(conserves(&ledger), "conservation intact");
+    }
+
+    #[test]
+    fn live3_slash_with_concurrent_unstake_of_offender_is_rejected() {
+        // CRITICAL (adversarial): a Slash and an Unstake for the SAME offender in one
+        // block. The Unstake would move the offender's coins into an unbonding entry
+        // that later MATURES and returns the slashed coins — a deferred conservation
+        // break (double-count at maturation). invalid_slash_indices must reject the
+        // slash when its offender also moves stake in the block.
+        let a = identity(1);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        let slash = ledger.build_slash_tx(&double_vote_proof(&a, ledger.genesis_hash().as_str())).unwrap();
+        // A minimal Unstake from the same offender (structural — the check keys on
+        // tx_type + from, not the signature).
+        let unstake = crate::p2p::ledger::Transaction {
+            id: "u".into(),
+            from: addr.clone(),
+            to: "STAKE".into(),
+            amount: 5 * MICRO,
+            tx_type: crate::p2p::ledger::TxType::Unstake,
+            timestamp: "ts".into(),
+            signature: String::new(),
+            hash: "uh".into(),
+            nonce: 0,
+            pq_signature: None,
+            pq_public_key: None,
+            fault_proof: None,
+        };
+        let block = Ledger::forge_block_at(
+            ledger.chain_height(),
+            &ledger.chain.last().unwrap().hash,
+            "ts",
+            &addr,
+            vec![slash, unstake],
+        );
+        assert!(
+            ledger.verify_block_slashes(&block).is_err(),
+            "a slash coexisting with the offender's Unstake in one block must be rejected",
+        );
+    }
+
+    #[test]
+    fn live3_slash_survives_snapshot_restore_identically() {
+        // CRITICAL (C1/determinism): after a slash is sealed, a node that restarts
+        // (restore from snapshot) must reconstruct the SAME state as one that applied
+        // it live — the slash debits the STAKE sink, never the offender's spendable.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        ledger.queue_slash(&double_vote_proof(&a, ledger.genesis_hash().as_str())).unwrap();
+        ledger.seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into()).unwrap();
+
+        let live_staked = ledger.staked_of(&addr);
+        let live_spendable = ledger.balance_of(&addr);
+        let live_locked = ledger.locked_stake_total();
+        let live_burned = ledger.total_burned();
+
+        let restored = Ledger::restore(ledger.snapshot());
+        assert_eq!(restored.staked_of(&addr), live_staked, "restored staked matches live");
+        assert_eq!(restored.balance_of(&addr), live_spendable, "restored spendable matches live (NOT debited by the slash)");
+        assert_eq!(restored.locked_stake_total(), live_locked, "restored locked-stake matches live");
+        assert_eq!(restored.total_burned(), live_burned, "restored burned matches live");
+        assert!(conserves(&restored), "restored node conserves");
     }
 
     #[test]

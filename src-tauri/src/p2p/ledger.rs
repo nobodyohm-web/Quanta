@@ -545,29 +545,40 @@ impl Ledger {
         // excluded here — it has no spendable effect; its bonded-weight reclassify +
         // the unbonding/maturation are replayed per chain block below, anchored to
         // `block.index`, exactly as live block application does.
-        let is_stake = |t: &TxType| matches!(t, TxType::Unstake);
-        for block in &self.chain {
-            for tx in &block.transactions {
-                if !is_stake(&tx.tx_type) {
+        // Apply ONE tx's balance-cache effect, EXACTLY as live `cache_apply_tx`:
+        //  - Unstake: no spendable effect (reclassified at block time below);
+        //  - Slash (LIVE-3): debit the STAKE **sink** (the locked coins are burned),
+        //    NEVER the offender's spendable — the CRITICAL restore-vs-live parity bug;
+        //  - otherwise: generic `from → to` (a Stake's `pk → STAKE` flows here).
+        // Kept as an explicit helper so the chain and pending loops can never drift.
+        fn replay_cache_effect(
+            cache: &mut HashMap<String, i128>,
+            tx: &Transaction,
+            synthetic: &impl Fn(&str) -> bool,
+        ) {
+            match tx.tx_type {
+                TxType::Unstake => {}
+                TxType::Slash => {
+                    *cache.entry(Ledger::STAKE_SINK.to_string()).or_insert(0) -= tx.amount as i128;
+                }
+                _ => {
                     if !synthetic(&tx.to) {
-                        *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
+                        *cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
                     }
                     if !synthetic(&tx.from) {
-                        *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
+                        *cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
                     }
                 }
+            }
+        }
+        for block in &self.chain {
+            for tx in &block.transactions {
+                replay_cache_effect(&mut self.balance_cache, tx, &synthetic);
                 self.recent_deque.push_back(tx.clone());
             }
         }
         for tx in &self.pending {
-            if !is_stake(&tx.tx_type) {
-                if !synthetic(&tx.to) {
-                    *self.balance_cache.entry(tx.to.clone()).or_insert(0) += tx.amount as i128;
-                }
-                if !synthetic(&tx.from) {
-                    *self.balance_cache.entry(tx.from.clone()).or_insert(0) -= tx.amount as i128;
-                }
-            }
+            replay_cache_effect(&mut self.balance_cache, tx, &synthetic);
             self.recent_deque.push_back(tx.clone());
         }
         // Replay the on-chain stake state block by block (one clone at a time, not
@@ -746,11 +757,15 @@ impl Ledger {
 
     /// LIVE-3 — the slash amount for an offender bonding `staked` µQTA, per the
     /// ratified policy (ADR-009: `SLASH_NUM / SLASH_DEN` = full). Pure integer math.
+    /// **Clamped to `staked`** so a future retune of the fraction to `> 1` can never
+    /// make the amount exceed the bonded stake (which would desync the STAKE-sink
+    /// debit from the `staked` debit and break conservation) — mirrors
+    /// `finality_slashing::slash_amount`'s `.min(stake)`.
     pub fn slash_amount_for(staked: u64) -> u64 {
         use crate::sm::finality_slashing::{SLASH_DEN, SLASH_NUM};
         // full slash (1/1) by default; the fraction is graven-generic (u128 to
         // avoid overflow on the multiply, though staked ≤ 100M QUANTA ≪ u64).
-        ((staked as u128 * SLASH_NUM as u128) / SLASH_DEN.max(1) as u128) as u64
+        (((staked as u128 * SLASH_NUM as u128) / SLASH_DEN.max(1) as u128) as u64).min(staked)
     }
 
     /// LIVE-3 — build the network-authorized **Slash** tx that destroys the
@@ -771,9 +786,10 @@ impl Ledger {
         }
         let proof_json = serde_json::to_string(proof).ok()?;
         let ts = Self::GENESIS_TIMESTAMP; // deterministic; the hash binds the content
-        // The id/hash bind the proof + offender + amount deterministically.
+        // The id/hash bind the offender + amount + the FULL proof deterministically
+        // (not a truncation — so two distinct proofs never collide on the tx hash).
         let id = format!("slash_{}", short(&offender_addr, 16));
-        let payload = format!("slash:{offender_addr}:{amount}:{}", short(&proof_json, 32));
+        let payload = format!("slash:{offender_addr}:{amount}:{proof_json}");
         let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
         Some(Transaction {
             id,
@@ -826,17 +842,48 @@ impl Ledger {
     /// of truth, COVER-2 style): [`Self::verify_block_slashes`] rejects a received
     /// block if any exist, and [`Self::seal_block_at`] **excludes** exactly these so
     /// a self-sealed block is slash-valid by construction — the two can never disagree.
+    ///
+    /// The pass is **sequential** (like COVER-1's coverage), which is what keeps
+    /// slashing conservation-exact under an adversarial block:
+    /// - **at most ONE slash per offender per block** — a second slash of the same
+    ///   offender is rejected. (Both would pass the stateless `amount == staked`
+    ///   check against the same pre-block stake, then the sink would be debited
+    ///   twice while `staked` saturates at 0 → a permanent conservation break. This
+    ///   is the CRITICAL adversarial case: a leader self-equivocates once, then
+    ///   duplicates the slash tx K times.)
+    /// - **a slashed offender may not also Stake/Unstake in the same block** — an
+    ///   `Unstake` in the same block would move the offender's coins into an
+    ///   unbonding entry that later matures and **returns the slashed coins**
+    ///   (double-count at maturation). Reject the slash so the two never coexist.
     fn invalid_slash_indices(&self, txs: &[Transaction]) -> Vec<usize> {
         // Any Slash present ⇒ compute the pubkey-keyed stake once (it's the costly bit).
         if !txs.iter().any(|t| t.tx_type == TxType::Slash) {
             return Vec::new();
         }
         let stakes_by_pk = self.validator_stakes_by_pubkey();
-        txs.iter()
-            .enumerate()
-            .filter(|(_, tx)| !self.slash_tx_valid(tx, &stakes_by_pk))
-            .map(|(i, _)| i)
-            .collect()
+        // Addresses that move stake (Stake/Unstake) in THIS block — a slash of any
+        // of them is refused (the unbonding-escape / double-move hazard above).
+        let stake_movers: HashSet<&str> = txs
+            .iter()
+            .filter(|t| matches!(t.tx_type, TxType::Stake | TxType::Unstake))
+            .map(|t| t.from.as_str())
+            .collect();
+        let mut already_slashed: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        for (i, tx) in txs.iter().enumerate() {
+            if tx.tx_type != TxType::Slash {
+                continue;
+            }
+            let valid = self.slash_tx_valid(tx, &stakes_by_pk)
+                && !already_slashed.contains(&tx.from) // one slash per offender per block
+                && !stake_movers.contains(tx.from.as_str()); // no concurrent stake move
+            if valid {
+                already_slashed.insert(tx.from.clone());
+            } else {
+                out.push(i);
+            }
+        }
+        out
     }
 
     /// LIVE-3 — **verify every `Slash` tx in a received block** against this
@@ -937,17 +984,44 @@ impl Ledger {
     }
 
     /// LIVE-2 — push the finality floor **down the chain** as the live gadget
-    /// finalizes checkpoints. **Monotonic**: it never rises above the current tip
-    /// and never moves backward (finality is irreversible — a lower value would
-    /// re-open finalized history to reorg). The caller passes the height of the
-    /// last finalized checkpoint (`FinalityState::finalized().iter().last()`);
-    /// clamped to the current tip so a vote referencing a not-yet-integrated block
-    /// can't freeze a height we don't hold. Returns the effective floor.
-    pub fn set_finalized_floor(&mut self, finalized_index: u64) -> u64 {
-        let tip_index = self.chain_height().saturating_sub(1);
-        let target = finalized_index.min(tip_index);
-        if target > self.finalized_floor_index {
-            self.finalized_floor_index = target;
+    /// finalizes checkpoints. **Monotonic**: it never moves backward (finality is
+    /// irreversible — a lower value would re-open finalized history to reorg).
+    ///
+    /// **Hash-checked (the HIGH-4 fix).** The caller passes the finalized
+    /// checkpoint's `(height, hash)`. The floor advances **only if the block we
+    /// actually hold at that height IS the finalized one** (`block_at(height).hash
+    /// == finalized_hash`). Freezing by index alone was unsafe: a node sitting on a
+    /// different block `Y@H` (a lexicographic-tie-break loser, or a minority branch
+    /// during the convergence window) while the gadget finalized `X@H` would freeze
+    /// `Y` and reject the finalized `X` **forever**. When the local block ≠ the
+    /// finalized hash, the node is on a finality-overruled fork: we do **not**
+    /// freeze (so it can still integrate `X` once it syncs the finalized branch) and
+    /// warn. Returns the effective floor.
+    pub fn set_finalized_floor(&mut self, finalized_index: u64, finalized_hash: &str) -> u64 {
+        // Only a height we actually hold, and only if it advances the floor.
+        if finalized_index <= self.finalized_floor_index {
+            return self.finalized_floor_index;
+        }
+        match self.block_at(finalized_index) {
+            Some(b) if b.hash == finalized_hash => {
+                // The block we hold at this height IS the finalized one → freeze it.
+                self.finalized_floor_index = finalized_index;
+            }
+            Some(_) => {
+                // We hold a DIFFERENT block at this height — finality overruled our
+                // branch. Don't freeze the wrong block; we must adopt the finalized
+                // branch via sync/fork-resolution before the floor can advance here.
+                log::warn!(
+                    "◈ [Finality] certificate finalized height {} but our block there differs — \
+                     NOT freezing (need to sync the finalized branch)",
+                    finalized_index
+                );
+            }
+            None => {
+                // We don't hold this height yet (vote references a not-yet-synced
+                // block). Leave the floor; it advances once we integrate that height
+                // and re-observe the certificate.
+            }
         }
         self.finalized_floor_index
     }
@@ -2503,10 +2577,20 @@ impl Ledger {
     /// `tx.id`, and NO map iteration (determinism, §3). Two txs with different
     /// content always differ here; the same tx is identical on every node.
     fn tx_content_bytes(tx: &Transaction) -> String {
-        format!(
+        let base = format!(
             "from={}|to={}|amount={}|nonce={}|type={:?}|ts={}",
             tx.from, tx.to, tx.amount, tx.nonce, tx.tx_type, tx.timestamp
-        )
+        );
+        // LIVE-3: bind the FULL embedded fault proof into the Merkle leaf for a
+        // Slash, so the block hash commits to it — a relay cannot swap the proof for
+        // another (even a valid one) without changing the block hash. Appended ONLY
+        // when present, so every non-slash tx's content stays byte-identical (no
+        // existing block/genesis hash shifts). Deterministic (the proof JSON is
+        // built from deterministic votes).
+        match &tx.fault_proof {
+            Some(proof) => format!("{base}|slash_proof={proof}"),
+            None => base,
+        }
     }
 
     /// BLAKE3 Merkle root committing each tx's **content + signature**
@@ -3654,8 +3738,9 @@ mod tests {
             forge_winning_fork(tip.index, &genesis_hash, &rival, vec![reward], &tip.hash);
         assert!(winner.hash > tip.hash, "setup: the competitor wins the raw tie-break");
 
-        // Finalize the tip (floor = its index). The higher-hash fork must be refused.
-        let floor = ledger.set_finalized_floor(tip.index);
+        // Finalize the tip (floor = its index + our matching hash). The higher-hash
+        // fork must be refused.
+        let floor = ledger.set_finalized_floor(tip.index, &tip.hash);
         assert_eq!(floor, tip.index, "floor advanced to the finalized tip");
         assert_eq!(
             ledger.integrate_remote_block(winner.clone()),
@@ -3687,16 +3772,25 @@ mod tests {
     }
 
     #[test]
-    fn live2_finalized_floor_is_monotonic_and_tip_clamped() {
-        // The setter never lowers the floor (finality is irreversible) and never
-        // freezes a height the node doesn't hold (clamped to the tip).
+    fn live2_finalized_floor_is_monotonic_hash_checked_and_bounded() {
+        // The setter never lowers the floor (finality is irreversible), never freezes
+        // a height the node doesn't hold, and (HIGH-4) only freezes when OUR block at
+        // that height matches the finalized hash.
         let (mut ledger, tip, _g) = forkcap_two_block_chain(); // tip at index 1
-        assert_eq!(ledger.set_finalized_floor(1), 1, "advances to a held height");
-        assert_eq!(ledger.set_finalized_floor(0), 1, "never moves backward");
+        // HIGH-4: a WRONG hash at the finalized height must NOT advance the floor —
+        // the node is on a finality-overruled fork and must be able to sync `X` later.
         assert_eq!(
-            ledger.set_finalized_floor(999),
+            ledger.set_finalized_floor(1, "not-our-block-hash"),
+            0,
+            "a mismatched finalized hash does NOT freeze our (different) block",
+        );
+        // Matching hash → advance.
+        assert_eq!(ledger.set_finalized_floor(1, &tip.hash), 1, "advances to a held+matching height");
+        assert_eq!(ledger.set_finalized_floor(0, "GENESIS"), 1, "never moves backward");
+        assert_eq!(
+            ledger.set_finalized_floor(999, "whatever"),
             tip.index,
-            "clamped to the tip — can't freeze a not-yet-integrated block",
+            "a not-yet-held height can't freeze (we don't have that block)",
         );
     }
 
@@ -3705,7 +3799,7 @@ mod tests {
         // The floor is persisted (it is NOT chain-derivable — it depends on votes),
         // so a restart keeps finalized history irreversible before votes re-flow.
         let (mut ledger, tip, _g) = forkcap_two_block_chain();
-        ledger.set_finalized_floor(tip.index);
+        ledger.set_finalized_floor(tip.index, &tip.hash);
         let restored = Ledger::restore(ledger.snapshot());
         assert_eq!(
             restored.finalized_floor_index(),

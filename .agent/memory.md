@@ -27,8 +27,10 @@ instance fait tourner un nœud complet.
   les identifiants internes `vrf` sont legacy). Stake min 1 QUANTA, timeout leader 30 s.
   **Gadget de finalité Casper-FFG (GADGET-1→5B, `sm/`)** par-dessus : checkpoints par époque
   (E=32), votes ML-DSA + certificat ⅔, justify/finalize, slashing détecté (double-vote+surround),
-  fork-choice LMD-GHOST. Prouvé en simulation DST ; **LIVE-1** câble le gossip des votes en vivant
-  (`p2p/finality_live.rs`) ; restent LIVE-2 (proposition finalité-consciente) + LIVE-3 (slashing vivant).
+  fork-choice LMD-GHOST. Prouvé en simulation DST **et câblé en vivant (LIVE-1→3, `p2p/finality_live.rs`)** :
+  LIVE-1 = gossip des votes ; LIVE-2 = plancher de finalité (`finalized_floor_index`, histoire finalisée
+  irréversible, veto dans `integrate_remote_block`) ; LIVE-3 = slashing vivant (`TxType::Slash`, équivocation
+  → `FinalityFault` → STAKE→BURN, conservation neutre, `verify_block_slashes` empêche de punir un innocent).
 - **Crypto** : autorité de tx = **ML-DSA-65 pur** (FIPS 204) — la clé **primaire** liée à l'adresse
   du compte (`from`/`to` = `BLAKE3(ADDR_DOMAIN ‖ clé ML-DSA)`, PQ-MIG-3B) ; **Ed25519 = transport**
   (enveloppes gossip + PeerId) + co-facteur tx vestigial. Vault Argon2id + AES-256-GCM ; BLAKE3 ; `zeroize`.
