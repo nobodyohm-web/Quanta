@@ -270,7 +270,7 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 ### Network V2 hardening (NET-3 → NET-16)
 - **NET-3** : priority queue sortante 4-lanes (Critical/High/Medium/Low)
 - **NET-4** : Hello 120s + Ping 15s léger pour la liveness
-- **NET-5** : `TORUS_PROTOCOL_VERSION = 3` (bumpé 2→3 par PQ-MIG-5 : la genèse PQ est une rupture de protocole) ; peers incompatibles loggués
+- **NET-5** : `TORUS_PROTOCOL_VERSION = 4` (2→3 par PQ-MIG-5 : genèse PQ ; 3→4 par LIVE-3B : règles de consensus des slashes-unbonding — la genèse et l'historique existant restent inchangés) ; peers incompatibles loggués
 - **NET-6** : chain sync parallèle (fanout = 4 fenêtres × 50 blocs)
 - **NET-7** : ~~DAG sync incrémental~~ — retiré avec les modules web (le DAG de contenu social n'existe plus ; sans rapport avec le futur consensus DAG-BFT)
 - **NET-8** : ChainSegment gzip optionnel (50 MB inflate cap)

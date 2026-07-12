@@ -29,7 +29,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// PQ-MIG-5 §4: bumped **2 → 3** — the post-quantum genesis (genesis reconstructed
 /// on ML-DSA identities + addresses, canonical content-bound genesis hash) is a
 /// protocol break, so a v3 node's genesis/chain is incompatible with a v2 node's.
-pub const TORUS_PROTOCOL_VERSION: u8 = 3;
+///
+/// LIVE-3B: bumped **3 → 4** — a consensus-rules change for `Slash` txs that
+/// consume **unbonding** stake: they carry a `slash_unbonding` breakdown that is
+/// bound into the tx hash AND the block's Merkle root, and their amount is the
+/// ratified fraction of `staked + unbonding` (not bonded alone). A v3 node
+/// neither produces nor validates that shape (it would recompute a bonded-only
+/// expectation and a breakdown-less Merkle leaf → reject the block). Genesis and
+/// all previously-valid history are UNCHANGED (purely-bonded slashes serialize
+/// byte-identically), so v3↔v4 nodes only diverge once an unbonding-consuming
+/// slash is sealed.
+pub const TORUS_PROTOCOL_VERSION: u8 = 4;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
