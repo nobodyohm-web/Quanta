@@ -3806,7 +3806,7 @@ mod tests {
                 assert!(
                     requeued,
                     "loser-only user tx {} must be re-queued (AUDIT-BLK-1)",
-                    &tx.id
+                    tx.id
                 );
             }
         }
