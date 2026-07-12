@@ -25,7 +25,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// - Unknown payload variants always deserialize as a parse error and are
 ///   silently dropped at the JSON layer, satisfying the "skip unknown
 ///   messages gracefully" requirement.
-pub const TORUS_PROTOCOL_VERSION: u8 = 2;
+///
+/// PQ-MIG-5 §4: bumped **2 → 3** — the post-quantum genesis (genesis reconstructed
+/// on ML-DSA identities + addresses, canonical content-bound genesis hash) is a
+/// protocol break, so a v3 node's genesis/chain is incompatible with a v2 node's.
+pub const TORUS_PROTOCOL_VERSION: u8 = 3;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
@@ -140,6 +144,28 @@ pub enum GossipMessage {
     /// de conflit déterministe).
     PublishUsername {
         record_json: String,
+    },
+    /// LIVE-1 — a finality **vote** (attestation) broadcast by a staked validator.
+    /// `vote_json` = a [`crate::sm::finality_vote::Vote`] serialized. The receiver
+    /// re-verifies it (`Vote::verify` against the on-chain stake, GADGET-2) before
+    /// feeding it to the live fork-choice ([`crate::sm::fork_choice::LatestVotes`])
+    /// and, once a ⅔ certificate forms, the finality rule
+    /// ([`crate::sm::finality_rule::FinalityState`], GADGET-3). The gadget's
+    /// verdict stays a **pure function of the votes + on-chain stake** — this
+    /// variant only carries the vote across the wire; the envelope's Ed25519
+    /// signature is transport authentication (unchanged), the vote's own ML-DSA-65
+    /// signature is the finality authority.
+    FinalityVote {
+        vote_json: String,
+    },
+    /// LIVE-3 — a **fault proof** (GADGET-4): two contradictory ML-DSA votes from
+    /// the same validator (double-vote or surround). `proof_json` = a
+    /// [`crate::sm::finality_slashing::FaultProof`] serialized. Each receiver
+    /// re-verifies it against the on-chain stake and, if valid, queues a slash
+    /// (`Ledger::queue_slash`) that destroys the offender's bonded stake
+    /// (STAKE → BURN) in the next sealed block — accountable safety with teeth.
+    FinalityFault {
+        proof_json: String,
     },
 }
 

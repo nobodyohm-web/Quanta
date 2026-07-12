@@ -11,7 +11,7 @@ prédit l'adoption mieux que l'utilité ; le **risque perçu** est le frein n°1
 Leviers **éthiques** les plus puissants pour QUANTA (du plus fort au moins) :
 1. **Effet IKEA** (Norton-Mochon-Ariely 2012) — « j'ai miné/construit ça » →
    attachement réel. *« Tu as gagné ce QUANTA »* + historique de contribution
-   (heures d'uptime, blocs scellés, pages servies). C'est le levier le plus fort
+   (heures d'uptime, blocs scellés, blocs relayés). C'est le levier le plus fort
    ET le plus honnête car le minage est une vraie contribution.
 2. **Charte d'intégrité en premier** — *« Ce que QUANTA ne fera JAMAIS »* :
    zéro premine, zéro autorité de mint, zéro frais caché, pas de serveur qui
@@ -66,7 +66,10 @@ forts, plat/géométrique, **un seul hex verrouillé par rôle**.
 ## 3. Banques / règlement 24h-24 — VERDICT HONNÊTE : ❌ NE PAS L'AJOUTER
 « Les banques adopteront QUANTA (la pièce rare et volatile) pour le règlement
 24/7 » = **du vent à ne pas revendiquer**. Ça échoue sur **les 5 exigences**
-institutionnelles : finalité **déterministe** (QUANTA = probabiliste, reorgs),
+institutionnelles : finalité **déterministe** (QUANTA = finalité probabiliste sur
+le réseau vivant aujourd'hui ; un gadget de finalité déterministe est implémenté
+en simulation, avec le gossip des votes câblé en vivant (LIVE-1), câblage
+complet à venir),
 **stabilité** de l'actif (le BIS dit les cryptos volatiles inaptes — une pièce
 rare est le pire candidat), **confidentialité** (ledger public), **conformité**
 (AML/KYC/Travel Rule incompatibles avec le pseudonymat ; Basel = 1250 % de
@@ -75,7 +78,8 @@ monnaie centrale) ; les acteurs sérieux (BIS, JPMorgan Kinexys, Canton) vont ve
 **dépôts tokenisés permissionnés**, pas une pièce publique volatile.
 
 **Le noyau défendable** (à reframer, sans hype) :
-- La **signature post-quantique (Ed25519 + ML-DSA-65 / FIPS 204)** est un actif
+- La **signature post-quantique ML-DSA-65 / FIPS 204** (autorité de compte pur
+  PQ depuis PQ-MIG-3B ; Ed25519 conservé au transport) est un actif
   **réel et opportun** (NIST : dépréciation RSA/ECC 2030, interdit 2035 ; SWIFT
   SwiftNet 8.0 PQC visé 2027) — comme **infrastructure open-source**, découplée de
   la pièce.

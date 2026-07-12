@@ -29,6 +29,13 @@ pub struct Transaction {
     pub pq_signature: Option<String>, // ML-DSA-65 signature hex (3309 B, FIPS 204)
     #[serde(default)]
     pub pq_public_key: Option<String>, // ML-DSA-65 public key hex (1952 B, FIPS 204)
+    /// LIVE-3: for a `Slash` tx, the JSON-serialized `FaultProof` (two
+    /// contradictory ML-DSA votes) that authorizes the penalty. A slash is
+    /// NOT signed by the offender — its authority is this proof, which every
+    /// node **re-verifies** in block validation (so a malicious proposer can't
+    /// punish an innocent validator). `None` for every other tx type.
+    #[serde(default)]
+    pub fault_proof: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,6 +45,11 @@ pub enum TxType {
     Stake,    // lock tokens to boost PoC score
     Unstake,  // unlock staked tokens
     Burn,     // permanent destruction (burn-and-mint, 1% per transfer)
+    /// LIVE-3: accountable-safety penalty — destroys an equivocating validator's
+    /// bonded stake (STAKE sink → BURN). Authorized by an embedded `fault_proof`
+    /// (GADGET-4), not the offender's signature. Conservation-neutral: the coins
+    /// move from the locked-stake pool to burned.
+    Slash,
 }
 
 /// A block in the ATN chain
@@ -72,4 +84,10 @@ pub struct LedgerSnapshot {
     /// B2: Persisted nonce state per account
     #[serde(default)]
     pub account_nonces: HashMap<String, u64>,
+    /// LIVE-2: the finality floor (last finalized block index). Persisted so a
+    /// restart keeps finalized history irreversible before votes re-flow (the
+    /// floor is not chain-derivable — it depends on the finality votes). Old
+    /// snapshots restore with `0` (only genesis finalized), a safe default.
+    #[serde(default)]
+    pub finalized_floor_index: u64,
 }

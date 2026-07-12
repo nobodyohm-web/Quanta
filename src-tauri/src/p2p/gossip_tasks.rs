@@ -214,9 +214,15 @@ pub async fn trigger_hello_now(state: &AppState) {
 
 /// Build and send one Hello envelope. Extracted for reuse.
 async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
-    let pk = state.crypto.lock().await.get_identity()
-        .map(|i| i.public_key_hex)
-        .map_err(|e| e.to_string())?;
+    // `pk` = Ed25519 **transport** key (keys `peer_info`, signs the envelope).
+    // `addr` = ML-DSA **address** — the reputation actor identity (REPUT-ID-1),
+    // under which the mining loop accrues this node's uptime.
+    let (pk, addr) = {
+        let crypto = state.crypto.lock().await;
+        let pk = crypto.get_identity().map(|i| i.public_key_hex).map_err(|e| e.to_string())?;
+        let addr = crypto.pq_address_hex().unwrap_or_default();
+        (pk, addr)
+    };
 
     let country = p2p::energy::EnergyOracle::detect_country().to_string();
     let watts = p2p::energy::estimate_watts();
@@ -239,8 +245,9 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
     // Crypto-core: no DAG / marketplace — heads stay empty and tasks_completed 0.
     let heads: Vec<String> = Vec::new();
     let tasks_completed = 0u64;
+    // REPUT-ID-1: read the local uptime under the **address** (reputation actor).
     let uptime_min = state.node.reputation.read().await
-        .get_user(&pk).map(|u| u.uptime_minutes).unwrap_or(0);
+        .get_user(&addr).map(|u| u.uptime_minutes).unwrap_or(0);
     let chain_height = state.node.ledger.read().await.chain_height();
 
     // NET-2: Collect known peer EndpointIds for mesh discovery

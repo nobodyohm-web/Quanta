@@ -28,6 +28,11 @@ updated: 2026-06-21
 > **Sous-décisions encore ouvertes** (implémentation, à fixer avant le code) :
 > longueur d'**epoch** ; format des tx `Stake`/`Unstake` (verrou, délai d'unbonding) ;
 > `MIN_VALIDATOR_STAKE` conservé à 1 QUANTA ?
+>
+> **Résolu depuis (2026-07-12)** : sous-décisions ci-dessus tranchées par **ONCHAIN-STAKE-1**
+> (tx `Stake`/`Unstake` + unbonding `UNBONDING_PERIOD_BLOCKS = 10 080`, indexé par hauteur) et
+> **ADR-009** (`EPOCH_LENGTH_BLOCKS = 32` ; `MIN_VALIDATOR_STAKE` conservé, placeholder
+> ajustable §12 ; quorum **⅔ gravé**).
 
 ## Contexte (code réel)
 - `pos_consensus::build_validator_set(stakes, reputations)` construit l'ensemble

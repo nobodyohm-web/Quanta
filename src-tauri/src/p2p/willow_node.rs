@@ -39,6 +39,13 @@ const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
 const RECONNECT_MAX_ATTEMPTS: u32 = 10;
 
+/// MEM-BOUNDS (HARDEN-HYGIENE-1): hard cap on the LOCAL auto-reconnect table.
+/// `known_peers` is local connectivity state (never gossiped, not consensus),
+/// so bounding it has no convergence effect — it only stops an attacker who
+/// sprays valid EndpointIds (via `Hello.known_peer_ids`) from growing it without
+/// limit.
+const MAX_KNOWN_PEERS: usize = 1024;
+
 /// QUANTA gossip topic — fixe pour tous les nœuds, dérivé d'un hash BLAKE3 stable.
 pub fn quanta_topic_id() -> TopicId {
     TopicId::from_bytes(*blake3::hash(b"quanta-network-v1").as_bytes())
@@ -99,6 +106,29 @@ impl KnownPeer {
     }
 }
 
+/// MEM-BOUNDS (HARDEN-HYGIENE-1): register `peer_id` in the bounded local
+/// reconnect table. A known peer is refreshed (never refused); a new peer is
+/// admitted only if there is room, reclaiming one **exhausted** (terminal,
+/// never-retried) entry first. Returns whether the peer is now tracked. Pure +
+/// synchronous so it is unit-testable without the network. Eviction touches only
+/// local state, so it has no consensus/convergence effect.
+fn register_known_peer(kp: &mut HashMap<String, KnownPeer>, peer_id: &str, max: usize) -> bool {
+    if let Some(p) = kp.get_mut(peer_id) {
+        p.mark_connected();
+        return true;
+    }
+    if kp.len() >= max {
+        match kp.iter().find(|(_, p)| p.exhausted()).map(|(k, _)| k.clone()) {
+            Some(victim) => {
+                kp.remove(&victim);
+            }
+            None => return false, // full of live/pending peers — don't track overflow
+        }
+    }
+    kp.insert(peer_id.to_string(), KnownPeer::new(peer_id.to_string()));
+    true
+}
+
 /// Real Iroh P2P Node — QUIC transport + content serving
 pub struct WillowNode {
     pub reputation: Arc<RwLock<ReputationEngine>>,
@@ -115,6 +145,11 @@ pub struct WillowNode {
     pub nonce_tracker: Arc<RwLock<NonceTracker>>,
     /// Identité — registre de pseudos uniques `@handle` (adresse de wallet lisible)
     pub usernames: Arc<RwLock<UsernameRegistry>>,
+    /// LIVE-1 — live finality gadget state: the fork-choice latest votes
+    /// (GADGET-5A) plus the justify/finalize state (GADGET-3), fed from gossiped
+    /// `FinalityVote`s. Anchored at the ledger's genesis hash. The verdict stays a
+    /// pure `sm/` function; this store is the IO-layer holder.
+    pub finality: Arc<RwLock<crate::p2p::finality_live::FinalityTracker>>,
     /// Phase 3 + NET-3 — channel sortant priorisé pour les enveloppes gossip.
     /// Quatre lanes (Critical/High/Medium/Low) drainées par ordre de priorité.
     /// Le drain est branché à Iroh dès qu'un endpoint est actif ; sinon il
@@ -171,9 +206,13 @@ impl WillowNode {
         let raw_id = blake3::hash(uuid::Uuid::new_v4().as_bytes());
         let node_id = hex::encode(raw_id.as_bytes());
         let (gossip_tx, gossip_rx) = priority_channel();
+        let ledger = Ledger::new();
+        // LIVE-1: anchor the finality tracker at the chain's genesis checkpoint.
+        let finality =
+            crate::p2p::finality_live::FinalityTracker::new(ledger.genesis_hash());
         Self {
             reputation: Arc::new(RwLock::new(ReputationEngine::new())),
-            ledger: Arc::new(RwLock::new(Ledger::new())),
+            ledger: Arc::new(RwLock::new(ledger)),
             consensus: Arc::new(RwLock::new(ConsensusEngine::new())),
             gossip: Arc::new(RwLock::new(GossipRouter::new())),
             energy_oracle: Arc::new(RwLock::new(EnergyOracle::new())),
@@ -181,6 +220,7 @@ impl WillowNode {
             peer_info: Arc::new(RwLock::new(HashMap::new())),
             nonce_tracker: Arc::new(RwLock::new(NonceTracker::new())),
             usernames: Arc::new(RwLock::new(UsernameRegistry::new())),
+            finality: Arc::new(RwLock::new(finality)),
             gossip_tx,
             gossip_rx: Arc::new(RwLock::new(Some(gossip_rx))),
             gossip_topic_sender: Arc::new(RwLock::new(None)),
@@ -200,12 +240,30 @@ impl WillowNode {
     /// B3: Remove peers that haven't sent a valid Hello within PEER_TTL.
     /// Returns the number of peers removed.
     pub async fn cleanup_dead_peers(&self) -> usize {
-        let mut peers = self.peer_info.write().await;
-        let before = peers.len();
-        peers.retain(|_, info| info.elapsed() < PEER_TTL);
-        let removed = before - peers.len();
-        if removed > 0 {
-            log::info!("♻ [B3] Removed {} dead peers ({} → {} alive)", removed, before, peers.len());
+        // Scope the peer_info lock so it is released before taking known_peers
+        // (no two willow stores held at once → no lock-order risk).
+        let removed = {
+            let mut peers = self.peer_info.write().await;
+            let before = peers.len();
+            peers.retain(|_, info| info.elapsed() < PEER_TTL);
+            before - peers.len()
+        };
+        // MEM-BOUNDS (HARDEN-HYGIENE-1): GC the LOCAL reconnect table too — an
+        // exhausted peer (all reconnect attempts spent) is terminal and never
+        // retried (try_reconnect skips it), so it only wastes memory. Local
+        // state, so this eviction has no consensus/convergence effect.
+        let known_gc = {
+            let mut kp = self.known_peers.write().await;
+            let kb = kp.len();
+            kp.retain(|_, p| !p.exhausted());
+            kb - kp.len()
+        };
+        if removed > 0 || known_gc > 0 {
+            log::info!(
+                "♻ [B3] Removed {} dead peers, {} exhausted known-peers",
+                removed,
+                known_gc
+            );
         }
         removed
     }
@@ -273,12 +331,11 @@ impl WillowNode {
         sender.join_peers(vec![peer_id]).await
             .map_err(|e| format!("join_peers failed: {}", e))?;
 
-        // NET-1: Register in known_peers for auto-reconnect
+        // NET-1: Register in known_peers for auto-reconnect (MEM-BOUNDS: bounded
+        // to MAX_KNOWN_PEERS so a flood of valid EndpointIds cannot grow it).
         {
             let mut kp = self.known_peers.write().await;
-            kp.entry(peer_id_str.to_string())
-                .and_modify(|p| p.mark_connected())
-                .or_insert_with(|| KnownPeer::new(peer_id_str.to_string()));
+            register_known_peer(&mut kp, peer_id_str, MAX_KNOWN_PEERS);
         }
 
         log::info!("◈ [P2P] Connected to peer {}", &peer_id_str[..peer_id_str.len().min(16)]);
@@ -454,3 +511,48 @@ impl WillowNode {
 }
 
 impl Default for WillowNode { fn default() -> Self { Self::new() } }
+
+#[cfg(test)]
+mod mem_bounds_tests {
+    //! MEM-BOUNDS (HARDEN-HYGIENE-1): the LOCAL reconnect table stays bounded
+    //! under a flood of valid EndpointIds, never evicts a live/pending peer, and
+    //! reclaims terminal (exhausted) slots. Pure helper → no network needed.
+    use super::{register_known_peer, KnownPeer, RECONNECT_MAX_ATTEMPTS};
+    use std::collections::HashMap;
+
+    #[test]
+    fn known_peers_table_stays_bounded() {
+        let mut kp: HashMap<String, KnownPeer> = HashMap::new();
+        let max = 4;
+        for i in 0..max {
+            assert!(
+                register_known_peer(&mut kp, &format!("peer{i}"), max),
+                "a fresh peer under the cap is tracked"
+            );
+        }
+        assert_eq!(kp.len(), max);
+
+        // A NEW peer when the table is full of LIVE peers is refused — the table
+        // stays bounded and no live peer is evicted.
+        assert!(
+            !register_known_peer(&mut kp, "overflow", max),
+            "overflow refused when full of live peers"
+        );
+        assert_eq!(kp.len(), max, "table stays at the cap");
+        assert!(!kp.contains_key("overflow"));
+
+        // An ALREADY-known peer is always refreshed (never refused), even at cap.
+        assert!(register_known_peer(&mut kp, "peer0", max));
+        assert_eq!(kp.len(), max);
+
+        // Drive one entry to EXHAUSTED → a new peer reclaims that terminal slot.
+        kp.get_mut("peer1").unwrap().reconnect_attempts = RECONNECT_MAX_ATTEMPTS;
+        assert!(
+            register_known_peer(&mut kp, "fresh", max),
+            "a new peer reclaims an exhausted (terminal) slot"
+        );
+        assert_eq!(kp.len(), max, "still bounded after the reclaim");
+        assert!(kp.contains_key("fresh"));
+        assert!(!kp.contains_key("peer1"), "the exhausted peer was evicted, not a live one");
+    }
+}

@@ -34,10 +34,15 @@
       "Bash(node /tmp/cdp_theme_check.mjs)",
       "Bash(pkill -f \"remote-debugging-port=9335\")",
       "Bash(node /tmp/cdp_builder_test.mjs)",
-      "Skill(update-config)",
       "Bash(node *)"
     ],
-    "deny": [],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(sudo *)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)"
+    ],
     "defaultMode": "bypassPermissions"
   },
   "effortLevel": "xhigh",

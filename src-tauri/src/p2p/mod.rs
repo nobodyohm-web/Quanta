@@ -24,6 +24,8 @@ pub mod state_persistence;
 pub mod gossip_tasks;
 // Phase 5 : Proof-of-Stake consensus with VRF leader election
 pub mod pos_consensus;
+// LIVE-1 — câblage vivant du gadget de finalité (gossip des votes → LatestVotes/FinalityState)
+pub mod finality_live;
 // Identité — registre P2P de pseudos uniques @handle (adresse de wallet lisible)
 pub mod username;
 // Simulation réseau

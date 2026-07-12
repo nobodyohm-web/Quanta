@@ -262,6 +262,28 @@ mod tests {
     }
 
     #[test]
+    fn test_shapley_score_is_the_weighted_sum_of_fractions() {
+        // TEST-TEETH (HARDEN-HYGIENE-1): `test_shares_sum_to_one` is a
+        // normalization TAUTOLOGY (compute_all_shares divides by the total, so
+        // the sum is forced to 1.0 regardless of the scoring). Pin the PRE-
+        // normalization `shapley_score` against a hand-computed weighted sum with
+        // four DISTINCT fractions, so a regression in any weight (0.30 energy /
+        // 0.30 work / 0.25 validation / 0.15 uptime) or factor FAILS here.
+        let mut contribs = HashMap::new();
+        contribs.insert("A".into(), make_node("A", 150.0, 4, 2, 9));
+        contribs.insert("B".into(), make_node("B", 50.0, 6, 8, 90));
+        let network = NetworkTotals::from_contributions(&contribs);
+        // A fractions: energy 150/200=0.75, work 4/10=0.4, validation 2/10=0.2,
+        // uptime 9/90=0.1 → 0.30*0.75 + 0.30*0.4 + 0.25*0.2 + 0.15*0.1 = 0.41.
+        let score_a = shapley_score(&contribs["A"], &network);
+        assert!((score_a - 0.41).abs() < 1e-9, "shapley_score(A) = {score_a} (expected 0.41)");
+        // B fractions: energy 0.25, work 0.6, validation 0.8, uptime 1.0 →
+        // 0.30*0.25 + 0.30*0.6 + 0.25*0.8 + 0.15*1.0 = 0.605.
+        let score_b = shapley_score(&contribs["B"], &network);
+        assert!((score_b - 0.605).abs() < 1e-9, "shapley_score(B) = {score_b} (expected 0.605)");
+    }
+
+    #[test]
     fn test_higher_contribution_higher_share() {
         let mut contribs = HashMap::new();
         contribs.insert("A".into(), make_node("A", 200.0, 20, 10, 120));

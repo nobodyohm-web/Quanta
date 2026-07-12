@@ -38,8 +38,9 @@ dérive de `messages_in`/`uptime_secs`/`quality_score` **que j'ai mesurés**. Ef
   un Sybil inactif déclarant 10 000 W obtient ≈ la part d'un nœud inactif.
 
 ### Phase 2b-2 — Reçus de contribution signés (témoignage croisé)
-Les pairs émettent des **reçus signés** (« j'ai reçu le bloc X / la page Y de toi »). On
-agrège ces témoignages (quorum + pondération par le **web-of-trust** existant `trust_graph`)
+Les pairs émettent des **reçus signés** (« j'ai reçu le bloc X / le segment Y de toi »). On
+agrège ces témoignages (quorum + pondération par un web-of-trust — à réintroduire :
+l'ancien `trust_graph` a été retiré avec le module social en crypto-only)
 → contribution témoignée robuste à la collusion (borne d'influence par témoin).
 
 ### Phase 3 — Élection de leader non-grindable (VDF)

@@ -19,7 +19,7 @@
 //! timestamps sont passés en argument), ce qui garantit le déterminisme exigé
 //! par la convergence P2P. Gratuit : aucun paiement, aucune taxe.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use crate::security::CryptoEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,11 +39,20 @@ pub const USERNAME_MAX_LEN: usize = 20;
 pub struct UsernameRecord {
     /// Pseudo canonique, lowercase, sans `@` (ex : `alex`).
     pub username: String,
-    /// Wallet propriétaire = adresse résolue (Ed25519 hex, 64 chars).
+    /// Wallet propriétaire = **adresse ML-DSA** résolue (hex, 64 chars).
+    /// PQ-MIG-3B : `@pseudo` résout vers l'**adresse** (`BLAKE3(ADDR_DOMAIN ‖ clé
+    /// ML-DSA)`), exactement l'identité de compte du ledger — payer `@alex`
+    /// crédite donc une adresse **dépensable**, et non une clé Ed25519 morte.
     pub owner_pk: String,
+    /// Clé publique ML-DSA-65 **révélée** (hex) qui se **lie** à `owner_pk` via
+    /// `lie()` (l'adresse n'est qu'un hash : on ne peut pas vérifier une
+    /// signature sans la clé). Une clé qui ne hashe pas vers `owner_pk` ⇒ rejet
+    /// (même fermeture intrinsèque que CRYPTO-ID-1 côté tx).
+    #[serde(default)]
+    pub owner_key: String,
     /// Date de revendication (epoch secs). Sert au départage déterministe.
     pub claimed_at: u64,
-    /// Signature Ed25519 hex (128 chars) du propriétaire.
+    /// Signature **ML-DSA-65** hex du propriétaire sur [`signable_bytes`].
     pub signature: String,
 }
 
@@ -116,30 +125,47 @@ fn valid_pk_hex(pk: &str) -> bool {
 
 // ─── Signature ───────────────────────────────────────────────────────────────
 
-/// Bytes canoniques signés (tout sauf `signature`).
+/// Bytes canoniques signés (tout sauf `signature`). PQ-MIG-3B : la clé révélée
+/// `owner_key` est **couverte** par la signature — un tiers ne peut pas
+/// substituer une autre clé après coup.
 pub fn signable_bytes(rec: &UsernameRecord) -> Vec<u8> {
-    format!("QUSER|{}|{}|{}", rec.username, rec.owner_pk, rec.claimed_at).into_bytes()
+    format!(
+        "QUSER|{}|{}|{}|{}",
+        rec.username, rec.owner_pk, rec.owner_key, rec.claimed_at
+    )
+    .into_bytes()
 }
 
-fn verify_sig(pk_hex: &str, sig_hex: &str, msg: &[u8]) -> Result<(), UsernameError> {
-    let pk_bytes = hex::decode(pk_hex).map_err(|_| UsernameError::InternalEncoding)?;
-    let sig_bytes = hex::decode(sig_hex).map_err(|_| UsernameError::InternalEncoding)?;
-    let pk_arr: [u8; 32] = pk_bytes
-        .try_into()
-        .map_err(|_| UsernameError::InvalidSignature)?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| UsernameError::InvalidSignature)?;
-    let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| UsernameError::InvalidSignature)?;
-    let sig = Signature::from_bytes(&sig_arr);
-    vk.verify(msg, &sig)
-        .map_err(|_| UsernameError::InvalidSignature)
+/// PQ-MIG-3B — autorité de revendication **post-quantique** :
+///   1. la clé révélée `owner_key` doit **se lier** à l'adresse `owner_pk`
+///      (`lie()` : `owner_pk == BLAKE3(ADDR_DOMAIN ‖ owner_key)`) — sinon
+///      n'importe qui pourrait signer une revendication pour l'adresse d'autrui ;
+///   2. la signature ML-DSA-65 doit être valide pour cette clé sur les bytes
+///      canoniques. Toute entrée malformée ⇒ erreur opaque (jamais de panique).
+fn verify_sig(rec: &UsernameRecord) -> Result<(), UsernameError> {
+    if !CryptoEngine::address_hex_binds_key_hex(&rec.owner_pk, &rec.owner_key) {
+        return Err(UsernameError::InvalidOwner);
+    }
+    let sig = hex::decode(&rec.signature).map_err(|_| UsernameError::InternalEncoding)?;
+    if CryptoEngine::verify_pq(&rec.owner_key, &signable_bytes(rec), &sig) {
+        Ok(())
+    } else {
+        Err(UsernameError::InvalidSignature)
+    }
 }
 
 /// Helper de signature (tests/util — la prod signe via `CryptoEngine`).
-pub fn sign_record(sk: &SigningKey, rec: &mut UsernameRecord) {
-    let sig = sk.sign(&signable_bytes(rec));
-    rec.signature = hex::encode(sig.to_bytes());
+/// PQ-MIG-3B : renseigne `owner_pk` (adresse), `owner_key` (clé ML-DSA révélée)
+/// puis signe en ML-DSA **déterministe** (reproductible). `engine` doit porter
+/// une identité primaire ML-DSA.
+#[cfg(test)]
+pub fn sign_record(engine: &CryptoEngine, rec: &mut UsernameRecord) {
+    rec.owner_pk = engine.pq_address_hex().expect("ml-dsa address");
+    rec.owner_key = engine.pq_identity_hex().expect("ml-dsa primary");
+    let sig = engine
+        .sign_pq_det(&signable_bytes(rec))
+        .expect("ml-dsa sign");
+    rec.signature = hex::encode(sig);
 }
 
 /// Vrai si le challenger l'emporte sur le détenteur en place.
@@ -283,10 +309,11 @@ impl UsernameRegistry {
     /// d'application grâce au départage déterministe de [`challenger_wins`].
     pub fn apply(&mut self, rec: UsernameRecord) -> Result<ApplyOutcome, UsernameError> {
         validate_username(&rec.username)?;
+        // `owner_pk` is the 32-byte ML-DSA **address** (64 hex) — same shape check.
         if !valid_pk_hex(&rec.owner_pk) {
             return Err(UsernameError::InvalidOwner);
         }
-        verify_sig(&rec.owner_pk, &rec.signature, &signable_bytes(&rec))?;
+        verify_sig(&rec)?;
 
         let outcome = match self.by_name.get(&rec.username) {
             None => {
@@ -316,21 +343,29 @@ impl UsernameRegistry {
 mod tests {
     use super::*;
 
-    fn key(seed: u8) -> (SigningKey, String) {
-        let sk = SigningKey::from_bytes(&[seed; 32]);
-        let pk = hex::encode(sk.verifying_key().as_bytes());
-        (sk, pk)
+    /// A deterministic ML-DSA identity from a 1-byte seed (PQ-MIG-3B: the owner
+    /// identity is post-quantum, not Ed25519). Same seed ⇒ same key ⇒ same
+    /// address ⇒ reproducible records.
+    fn engine(seed: u8) -> CryptoEngine {
+        let mut c = CryptoEngine::new();
+        c.import_pq_identity(&[seed; 32]).expect("ml-dsa primary");
+        c
+    }
+
+    /// The ML-DSA address (the `owner_pk` value) of a seeded identity.
+    fn addr(seed: u8) -> String {
+        engine(seed).pq_address_hex().expect("ml-dsa address")
     }
 
     fn record(seed: u8, username: &str, claimed_at: u64) -> UsernameRecord {
-        let (sk, pk) = key(seed);
         let mut rec = UsernameRecord {
             username: username.to_string(),
-            owner_pk: pk,
+            owner_pk: String::new(),
+            owner_key: String::new(),
             claimed_at,
             signature: String::new(),
         };
-        sign_record(&sk, &mut rec);
+        sign_record(&engine(seed), &mut rec); // fills owner_pk + owner_key + signature
         rec
     }
 
@@ -370,7 +405,11 @@ mod tests {
     #[test]
     fn sign_and_verify_roundtrip() {
         let rec = record(1, "alex", 100);
-        assert!(verify_sig(&rec.owner_pk, &rec.signature, &signable_bytes(&rec)).is_ok());
+        // owner_pk is the 32-byte ML-DSA address; owner_key binds to it; the
+        // ML-DSA signature verifies over the canonical bytes.
+        assert_eq!(rec.owner_pk.len(), 64, "owner_pk is a 32-byte address");
+        assert!(CryptoEngine::address_hex_binds_key_hex(&rec.owner_pk, &rec.owner_key));
+        assert!(verify_sig(&rec).is_ok());
     }
 
     #[test]
@@ -457,18 +496,42 @@ mod tests {
     }
 
     #[test]
-    fn rejects_owner_mismatch() {
-        // owner_pk ne correspond pas au signataire.
-        let (_sk1, _pk1) = key(1);
-        let (sk2, _pk2) = key(2);
-        let (_sk3, pk3) = key(3);
+    fn rejects_unbound_key_closes_pseudo_hijack() {
+        // PQ-MIG-3B teeth (CRYPTO-ID-1 analog for @pseudo): claim the VICTIM's
+        // address but reveal + sign with the ATTACKER's own ML-DSA key. The
+        // revealed key does not hash to the victim's address (`lie` false) ⇒
+        // rejected. Nobody can bind @pseudo → victim-address with their own key.
+        let victim_addr = addr(2);
+        let attacker = engine(3);
         let mut rec = UsernameRecord {
             username: "alex".into(),
-            owner_pk: pk3, // clé 3...
+            owner_pk: victim_addr, // the victim's address…
+            owner_key: attacker.pq_identity_hex().unwrap(), // …but the attacker's key
             claimed_at: 100,
             signature: String::new(),
         };
-        sign_record(&sk2, &mut rec); // ...mais signé par la clé 2
+        // A perfectly valid ML-DSA signature for owner_key — still rejected,
+        // because owner_key does not bind to owner_pk.
+        rec.signature = hex::encode(attacker.sign_pq_det(&signable_bytes(&rec)).unwrap());
+        let mut reg = UsernameRegistry::new();
+        assert_eq!(reg.apply(rec).unwrap_err(), UsernameError::InvalidOwner);
+    }
+
+    #[test]
+    fn rejects_owner_mismatch() {
+        // owner_pk + owner_key are a consistent (bound) pair for identity A, but
+        // the signature was produced by a DIFFERENT key ⇒ ML-DSA verify fails.
+        let a = engine(1);
+        let b = engine(2);
+        let mut rec = UsernameRecord {
+            username: "alex".into(),
+            owner_pk: a.pq_address_hex().unwrap(),
+            owner_key: a.pq_identity_hex().unwrap(),
+            claimed_at: 100,
+            signature: String::new(),
+        };
+        // Signed by B over A's canonical bytes → invalid for owner_key (A).
+        rec.signature = hex::encode(b.sign_pq_det(&signable_bytes(&rec)).unwrap());
         let mut reg = UsernameRegistry::new();
         assert_eq!(reg.apply(rec).unwrap_err(), UsernameError::InvalidSignature);
     }
@@ -497,8 +560,10 @@ mod tests {
 
     #[test]
     fn connection_code_deterministic_and_distinct() {
-        let (_s1, pk1) = key(1);
-        let (_s2, pk2) = key(2);
+        // PQ-MIG-3B: the connection code is now derived from the ML-DSA address
+        // (the resolved `owner_pk`), so the "verify @pseudo + code" flow matches.
+        let pk1 = addr(1);
+        let pk2 = addr(2);
         let c1 = connection_code(&pk1).unwrap();
         assert_eq!(c1, connection_code(&pk1).unwrap(), "déterministe");
         assert_eq!(c1.len(), 9); // ABCD-EFGH

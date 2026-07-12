@@ -1,20 +1,29 @@
 # Roadmap — « Crypto + Google Web3 »
 
-> Vision (2026-06-10) : faire de Quanta **la crypto de l'avenir** — un web3 souverain,
-> sans hébergement, où chacun peut **créer, vendre, acheter et partager** (sites,
-> boutiques, blogs), avec QUANTA comme monnaie native et une recherche réseau
-> de classe « Google web3 ».
+> ⚠️ **OBSOLÈTE — supersédé par le refactor crypto-only du 2026-06-20.** Tout le
+> stack web/social/site décrit ci-dessous (Site Engine, PageBuilder, domaines
+> `.torus`, recherche BM25/QuantaRank, likes/follows/tips/forums/modération) a
+> été **retiré du code** (voir `CLAUDE.md`, section Mission, et l'historique
+> 2026-06-20 « Refonte crypto-only »). Ce fichier est conservé comme **trace
+> historique** de l'ancienne direction produit ; ne pas le lire comme un état
+> actuel. Pour la vision courante, voir `/Users/alex/Desktop/Quanta/CLAUDE.md`.
+
+> Vision (2026-06-10, historique) : faire de Quanta **la crypto de l'avenir** — un
+> web3 souverain, sans hébergement, où chacun peut **créer, vendre, acheter et
+> partager** (sites, boutiques, blogs), avec QUANTA comme monnaie native et une
+> recherche réseau de classe « Google web3 ».
 >
 > Ce fichier est l'état de la boucle d'évolution autonome. Chaque itération coche
 > ce qui est fait et choisit l'incrément suivant.
 
-## État des lieux (déjà livré avant la boucle)
+## État des lieux (déjà livré avant la boucle — HISTORIQUE, retiré depuis)
 
-- ✅ Créer : Site Engine v3.3 (PageBuilder no-code 20 blocs, multi-pages, domaines `.torus`)
-- ✅ Chercher : index BM25 + QuantaRank + tags (recherche P2P)
-- ✅ Social : likes quadratiques, follows 3 tiers, tips, boosts, forums, modération jury
-- ✅ Monnaie : ledger PoS + VRF, signatures hybrides Ed25519 + ML-DSA-65, burn 1 %
-- ❌ **Vendre / acheter entre utilisateurs** : `marketplace.rs` ne couvre que les tâches de calcul
+- ❌ *(retiré 2026-06-20)* Créer : Site Engine v3.3 (PageBuilder no-code 20 blocs, multi-pages, domaines `.torus`)
+- ❌ *(retiré 2026-06-20)* Chercher : index BM25 + QuantaRank + tags (recherche P2P)
+- ❌ *(retiré 2026-06-20)* Social : likes quadratiques, follows 3 tiers, tips, boosts, forums, modération jury
+- ✅ Monnaie : ledger PoS, autorité de compte ML-DSA-65 pure (Ed25519 = transport), burn 1 %
+- ❌ **Vendre / acheter entre utilisateurs** : `marketplace.rs` a été retiré ; seule l'adresse
+  synthétique `ESCROW` subsiste dans le ledger, sans aucune couche marketplace autour
 
 ## Phases
 

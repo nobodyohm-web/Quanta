@@ -244,7 +244,11 @@ fn verify_ed25519(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
 }
 
 /// Vérification ML-DSA-65 (FIPS 204). Renvoie `false` sur toute donnée malformée.
-fn verify_ml_dsa(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
+///
+/// `pub(crate)` : c'est l'**unique** vérificateur ML-DSA du projet, réutilisé tel
+/// quel par le gadget de finalité (GADGET-2, votes post-quantiques purs d'ADR-005)
+/// — aucune duplication de la primitive de vérification (une seule source de vérité).
+pub(crate) fn verify_ml_dsa(pk_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
     (|| -> Option<bool> {
         let pk_arr: [u8; ml_dsa_65::PK_LEN] = hex::decode(pk_hex).ok()?.try_into().ok()?;
         let sig_arr: [u8; ml_dsa_65::SIG_LEN] = sig_bytes.try_into().ok()?;

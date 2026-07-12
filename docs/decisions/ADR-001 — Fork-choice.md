@@ -1,9 +1,10 @@
 ---
 type: adr
 id: ADR-001
-status: open
+status: resolved
 decision-class: défaut-réversible (puis 🛑 à la finalité)
-updated: 2026-06-21
+decided: 2026-06-25 (GADGET-5A/5B)
+updated: 2026-07-12
 ---
 
 # ADR-001 — Fork-choice
@@ -32,10 +33,16 @@ updated: 2026-06-21
   des tx perdantes** (AUDIT-BLK-1), validation **avant** mutation (AUDIT-BLK-2) ;
 - hors plage → `Err`.
 
-> [!warning] Drift doc ↔ code
-> [[DESIGN-CONSENSUS-DAG-BFT]] dit « plus-longue-chaîne ». **Faux** : le code ne
-> fait **pas** de reorg multi-blocs. C'est un **départage mono-bloc à hauteur
-> égale** — un placeholder PoC. Au-delà d'1 bloc de divergence, rien ne réconcilie.
+> [!warning] Drift doc ↔ code (état au 2026-06-21)
+> [[DESIGN-CONSENSUS-DAG-BFT]] dit « plus-longue-chaîne ». **Faux** (à l'époque) : le code ne
+> faisait **pas** de reorg multi-blocs. C'était un **départage mono-bloc à hauteur
+> égale** — un placeholder PoC. Au-delà d'1 bloc de divergence, rien ne réconciliait.
+
+> [!success] RÉSOLU (2026-06-25) — GADGET-5A/5B livrés
+> Le reorg **multi-blocs existe** désormais : `Ledger::reorg_to_fork`
+> (`src-tauri/src/p2p/ledger.rs`, GADGET-5B) borné par le plancher de finalité. Le
+> départage **pondéré stake on-chain** (LMD-GHOST) est implémenté par `ghost_head`
+> (`src-tauri/src/sm/fork_choice.rs:230`, GADGET-5A). Le drift ci-dessus est **clos**.
 
 ## Ce que le simulateur (T0.4) force
 Les assertions de **convergence n-nœuds** dépendent entièrement de cette règle.
@@ -73,3 +80,8 @@ décision (heaviest-stake intérimaire vs aller droit au finality gadget) est un
 
 **À trancher par toi** : intérim heaviest-stake (option 2) maintenant, ou sauter
 direct au finality gadget (option 3) ?
+
+✅ **Résolu (2026-06-25)** : **option 3** réalisée — le finality gadget est livré
+(GADGET-1→5B). Le reorg multi-blocs (GADGET-5B) et le départage pondéré stake
+(GADGET-5A `ghost_head`) couvrent la fenêtre non-finalisée ; un bloc finalisé n'est
+jamais réorganisé.

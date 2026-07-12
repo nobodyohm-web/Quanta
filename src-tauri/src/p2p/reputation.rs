@@ -15,6 +15,11 @@ use crate::p2p::ledger::MICRO;
 /// User reputation profile — V2 (énergie + mining uniquement). Balances in µQTA.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserReputation {
+    /// **Identity = the ML-DSA address** of the economic actor (REPUT-ID-1), i.e.
+    /// `CryptoEngine::pq_address_hex()` — the same key under which the ledger
+    /// holds the actor's balance/stake — **not** the ephemeral Ed25519 transport
+    /// key. (Field name kept for snapshot/frontend wire compatibility; it now
+    /// carries an address.)
     pub public_key: String,
     pub trust_score: f64,
     pub status: TrustStatus,
@@ -96,6 +101,15 @@ fn compute_trust_score(user: &UserReputation) -> f64 {
     (uptime_factor + energy_factor + stake_factor).max(0.0)
 }
 
+/// Application-level reputation/mining signal engine — **off the consensus
+/// security path** (ADR-002 / STAKE-WEIGHT-1: it no longer feeds election,
+/// quorum, or stake weight). Its identity (`users` keys, every `pk`/`from`/`to`
+/// argument below) is the **ML-DSA address** of the economic actor (REPUT-ID-1),
+/// coherent with the ledger and the mining loop's `uptime_tick(&addr, …)`. The
+/// *only* place transport keys remain on this path is the Shapley **peer
+/// contribution** map (peers are network entities identified by their transport
+/// pubkey via `peer_info`); those values are summed, never used as a reputation
+/// identity, so no mix leaks into the actor model.
 pub struct ReputationEngine {
     users: HashMap<String, UserReputation>,
     #[allow(dead_code)]

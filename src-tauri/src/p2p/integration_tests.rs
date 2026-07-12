@@ -81,11 +81,12 @@ mod integration_tests {
         node_a.mine_tx(&pk_a, 10 * MICRO, 0.01);
         node_b.mine_tx(&pk_b, 10 * MICRO, 0.01);
         node_c.mine_tx(&pk_c, 10 * MICRO, 0.01);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // TEST-TEETH (HARDEN-HYGIENE-1): the three blocks already differ by miner
+        // (pk_a/pk_b/pk_c is bound into the block hash), so their hashes are
+        // content-distinct without any wall-clock sleep — the old
+        // `thread::sleep(2ms)` calls were a vestigial timing dependency.
         let b3_a = node_a.seal_block(&pk_a, 0.01);
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let b3_b = node_b.seal_block(&pk_b, 0.01);
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let b3_c = node_c.seal_block(&pk_c, 0.01);
 
         // Determine winner by lexicographic hash comparison (same rule as consensus)
@@ -169,6 +170,23 @@ mod integration_tests {
                 &pk[..12], cached, full_bal
             );
         }
+
+        // TEST-TEETH (HARDEN-HYGIENE-1): the loop above only checks cache ⊇ scan
+        // over SCAN's keys — a phantom/stale account in the cache but absent from
+        // the chain scan (the exact reorg-revert bug this test guards) would pass
+        // silently. Assert the non-zero key SETS are EQUAL both ways, and the
+        // totals agree, so an invented cache account breaks the test.
+        let scan_keys: std::collections::HashSet<&String> =
+            full_scan.iter().filter(|(_, v)| **v > 0).map(|(k, _)| k).collect();
+        let cache_keys: std::collections::HashSet<&String> =
+            cache_all.iter().filter(|(_, v)| **v > 0).map(|(k, _)| k).collect();
+        assert_eq!(
+            cache_keys, scan_keys,
+            "cache and full-scan must hold the SAME set of non-zero accounts"
+        );
+        let scan_total: u64 = full_scan.values().sum();
+        let cache_total: u64 = cache_all.values().sum();
+        assert_eq!(cache_total, scan_total, "cache and scan must agree on the total balance");
 
         // Also verify individual balance_of calls
         assert_eq!(

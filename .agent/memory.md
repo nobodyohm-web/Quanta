@@ -23,15 +23,22 @@ instance fait tourner un nœud complet.
 - **Burn** : 1% détruit à chaque transfert (burn-and-mint, déflationniste).
 - **Valeur** : QUANTA n'est coté nulle part. Miner coûte de l'électricité réelle,
   mais **un coût de production n'est pas un prix** — ne JAMAIS afficher de valeur fiat inventée.
-- **Consensus** : Proof-of-Stake + VRF (BLAKE3). Stake min 1 QUANTA, timeout leader
-  30 s, graine d'élection d'un beacon enterré (non-grindable).
-- **Crypto** : signatures **hybrides Ed25519 + ML-DSA-65** (FIPS 204) sur chaque tx
-  (clé ML-DSA dérivée de la graine Ed25519) ; vault Argon2id + AES-256-GCM ; BLAKE3 ; `zeroize`.
-- **Identité** : une paire de clés + un court **`@pseudo`** (`UsernameRegistry`,
-  module `p2p/username.rs`) + code de connexion + clé de récupération. Aucun KYC.
-- **Gossip** : `GossipEnvelope` signé, nonce monotone, fenêtre ±90 s, dédup LRU 100K,
-  rate-limit adaptatif, ban. **9 variants** : Hello, RequestChain, ChainSegment,
-  NewBlock, BroadcastTx, Ping, Pong, ReportPeer, PublishUsername.
+- **Consensus** : Proof-of-Stake (élection déterministe vérifiable, beacon enterré non-grindable ;
+  les identifiants internes `vrf` sont legacy). Stake min 1 QUANTA, timeout leader 30 s.
+  **Gadget de finalité Casper-FFG (GADGET-1→5B, `sm/`)** par-dessus : checkpoints par époque
+  (E=32), votes ML-DSA + certificat ⅔, justify/finalize, slashing détecté (double-vote+surround),
+  fork-choice LMD-GHOST. Prouvé en simulation DST **et câblé en vivant (LIVE-1→3, `p2p/finality_live.rs`)** :
+  LIVE-1 = gossip des votes ; LIVE-2 = plancher de finalité (`finalized_floor_index`, histoire finalisée
+  irréversible, veto dans `integrate_remote_block`) ; LIVE-3 = slashing vivant (`TxType::Slash`, équivocation
+  → `FinalityFault` → STAKE→BURN, conservation neutre, `verify_block_slashes` empêche de punir un innocent).
+- **Crypto** : autorité de tx = **ML-DSA-65 pur** (FIPS 204) — la clé **primaire** liée à l'adresse
+  du compte (`from`/`to` = `BLAKE3(ADDR_DOMAIN ‖ clé ML-DSA)`, PQ-MIG-3B) ; **Ed25519 = transport**
+  (enveloppes gossip + PeerId) + co-facteur tx vestigial. Vault Argon2id + AES-256-GCM ; BLAKE3 ; `zeroize`.
+- **Identité** : adresse ML-DSA (valeur) + paire Ed25519 (transport, graine de dérivation ML-DSA)
+  + un court **`@pseudo`** (`UsernameRegistry`, `p2p/username.rs`) + code + clé de récup. Aucun KYC.
+- **Gossip** : `GossipEnvelope` signé Ed25519, nonce monotone, fenêtre ±90 s, dédup LRU 100K,
+  rate-limit adaptatif, ban. **10 variants** : Hello, RequestChain, ChainSegment, NewBlock,
+  BroadcastTx, Ping, Pong, ReportPeer, PublishUsername, **FinalityVote** (LIVE-1).
 - **Frontend** : Wallet (défaut), Contacts, Tableau de bord, Réseau (globe 3D), Explorateur,
   Profil, Réglages. Barre latérale. **i18n 6 langues** (EN par défaut · FR · ES · RU · ZH · JA).
   Thème clair « Arc » (papier crayon + grain + champ quantique sur les moments/états vides).
@@ -41,7 +48,8 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
 `page_store`, `domains` (.torus sites), `search`/QuantaRank, `social` (likes/follows/tips),
 `moderation` (jury), `forums`, `trust_graph`, `marketplace`, `merkle_dag`, `commerce`, `dev_api`
 — + leurs variants gossip, commandes, stores et tests. L'identité `@pseudo` et la crypto-core
-(ledger, consensus, mining, sécurité) ont été préservées. `cargo test` : **174 passés, 0 échec**.
+(ledger, consensus, mining, sécurité) ont été préservées. `cargo test` : **379 passés, 0 échec**
+(174 était le compte au 2026-06-20 ; a crû avec ONCHAIN-STAKE, COVER, PQ-MIG, le gadget de finalité, LIVE-1).
 
 > Note héritage : les identifiants wire `.torus` / `TORUS_PROTOCOL_VERSION` / events `torus://…`
 > sont **conservés tels quels** pour la compatibilité réseau — ne pas les renommer sans bump de protocole.
@@ -91,3 +99,27 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
 - Ne JAMAIS afficher un **prix/valeur fiat inventé** (le coût énergétique est un coût, pas un prix).
 - Ne pas réintroduire les features **web/social/marketplace** (sites, recherche, likes, forums, modération, compute).
 - Garder l'identité = **`@pseudo`** (pas un domaine payant).
+
+---
+
+## Cycle de vie d'une tx `Slash` (LIVE-3 — invariants durcis, ne pas régresser)
+- Un `Slash` est **réseau-autorisé** (autorité = `FaultProof` embarquée, PAS une signature) → il
+  appartient à un **bloc**, jamais au mempool utilisateur. Conséquences gravées :
+  - **Exempté de l'éviction TTL** de `prune_mempool` (il porte `GENESIS_TIMESTAMP` fixe par déterminisme/C1 ;
+    sinon il serait évincé avant le seal → slashing inopérant). Cf. `audit_pending_slash_survives_mempool_ttl_prune`.
+  - **Jamais re-mis en file au reorg** (boucles de re-queue de `integrate_remote_block`/`reorg_to_fork`) —
+    même saut que les émetteurs synthétiques `NETWORK`/`ESCROW`. Cf. `audit_reorg_does_not_requeue_a_popped_slash`.
+  - **Un seul `Slash` pending par offenseur** (`queue_slash` refuse un doublon même preuve-distincte).
+  - À l'application d'un bloc (seal + integrate), `evict_stale_pending_slashes` retire tout `Slash` pending
+    devenu redondant (offenseur déjà slashé → `staked=0`) et **révoque son débit sink** → conservation
+    exacte au temps du bloc. Cf. `audit_pending_slash_evicted_when_a_block_slashes_the_same_offender`.
+  - Conservation neutre : `cache_apply_tx(Slash)` débite le **sink STAKE** (pas le spendable), `total_burned`
+    compte le Slash ; `revert_block_stake_effects` restaure `staked += tx.amount` (montant propre, symétrique).
+
+## Limitations connues (roadmap — nommage honnête)
+- **Unstake-and-run (837)** : un offenseur qui `Unstake` **avant** que son slash ne soit scellé échappe au
+  slash (celui-ci cible le *bonded*, pas l'unbonding). Mitigé : coins verrouillés `UNBONDING_PERIOD_BLOCKS`
+  (~2 sem.) ≫ fenêtre de détection. Correctif complet (slash atteignant l'unbonding / gel de l'`Unstake`
+  sur preuve existante) = addition de conception, au roadmap avec le vrai VRF/VDF + slashing d'inactivité.
+- **Fork-choice (`ghost_head`) non conscient de la finalité** : sans danger — l'enforcement est le **veto de
+  plancher** LIVE-2 dans `integrate_remote_block`/`reorg_to_fork` (rejette tout reorg ≤ `finalized_floor_index`).

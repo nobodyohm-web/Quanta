@@ -86,11 +86,30 @@ async fn create_identity(
 
     let mut engine = state.crypto.lock().await;
     let (id, pk_bytes, enc_sk, nonce) = PQVault::create_identity(&mut engine, &display_name, &password)?;
+    // PQ-MIG-3 §3: establish + persist the **independent** ML-DSA primary — the
+    // post-quantum tx-authority key the ledger binds. Its 32-byte root seed is
+    // generated separately (OsRng, not derived from the Ed25519 seed) and stored
+    // encrypted alongside the identity, so a quantum break of Ed25519 cannot yield it.
+    let (pq_pk, pq_enc, pq_nonce) = PQVault::create_pq_identity(&mut engine, &password)?;
     let db = state.db.lock().await;
-    db.as_ref().ok_or("DB not ready")?
-        .store_keypair(&pk_bytes, &enc_sk, &nonce, &display_name)
-        .await?;
+    let dbref = db.as_ref().ok_or("DB not ready")?;
+    dbref.store_keypair(&pk_bytes, &enc_sk, &nonce, &display_name).await?;
+    dbref.save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce)).await?;
     Ok(id)
+}
+
+/// Storage key for the persisted post-quantum (ML-DSA-65) primary identity bundle.
+const PQ_IDENTITY_KEY: &str = "pq_identity_v1";
+
+/// Serialize the encrypted ML-DSA primary bundle for the `state_snapshots` KV
+/// (no `keypairs` schema migration; transparent to the frontend).
+fn pq_identity_blob(pq_pk: &str, enc_seed: &[u8], nonce: &[u8]) -> String {
+    serde_json::json!({
+        "pq_public_key": pq_pk,
+        "encrypted_seed": enc_seed,
+        "nonce": nonce,
+    })
+    .to_string()
 }
 
 #[tauri::command]
@@ -98,29 +117,67 @@ async fn unlock_identity(
     state: tauri::State<'_, Arc<AppState>>, password: String,
 ) -> Result<security::pq_vault::QuantaIdentity, String> {
     let db = state.db.lock().await;
-    let kp = db.as_ref().ok_or("DB not ready")?.get_active_keypair().await?.ok_or("No identity")?;
+    let dbref = db.as_ref().ok_or("DB not ready")?;
+    let kp = dbref.get_active_keypair().await?.ok_or("No identity")?;
     let mut engine = state.crypto.lock().await;
-    PQVault::unlock_identity(
+    let id = PQVault::unlock_identity(
         &mut engine,
         &kp.public_key, &kp.encrypted_secret_key, &kp.nonce,
         &password,
         &kp.display_name,
         &kp.created_at,
-    )
+    )?;
+    // PQ-MIG-3 §3: restore the independent ML-DSA primary (the tx-authority key).
+    // A legacy identity created before PQ-MIG-3 has no stored bundle yet — establish
+    // and persist one now (TOFU at first unlock), so every unlocked wallet can sign
+    // post-quantum-authoritative transactions.
+    match dbref.load_state(PQ_IDENTITY_KEY).await? {
+        Some(json) => {
+            let v: serde_json::Value =
+                serde_json::from_str(&json).map_err(|_| "PQ identity corrompue".to_string())?;
+            let pq_pk = v["pq_public_key"].as_str().ok_or("PQ identity invalide")?;
+            let enc_seed: Vec<u8> = serde_json::from_value(v["encrypted_seed"].clone())
+                .map_err(|_| "PQ identity invalide".to_string())?;
+            let nonce: Vec<u8> = serde_json::from_value(v["nonce"].clone())
+                .map_err(|_| "PQ identity invalide".to_string())?;
+            PQVault::unlock_pq_identity(&mut engine, pq_pk, &enc_seed, &nonce, &password)?;
+        }
+        None => {
+            let (pq_pk, pq_enc, pq_nonce) = PQVault::create_pq_identity(&mut engine, &password)?;
+            dbref
+                .save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce))
+                .await?;
+        }
+    }
+    Ok(id)
 }
 
 #[tauri::command]
 async fn get_public_key(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
-    state.crypto.lock().await.get_identity().map(|i| i.public_key_hex)
+    // PQ-MIG-3B: the wallet identity exposed to the UI is the ML-DSA **address**
+    // (the value identity: balance key, receive address, `from`/`to`, @pseudo
+    // target). The Ed25519 transport key is internal plumbing and never the
+    // user's account. (Command name kept for wire/UI compat, per CLAUDE.md.)
+    state
+        .crypto
+        .lock()
+        .await
+        .pq_address_hex()
+        .ok_or_else(|| "Identité ML-DSA absente".to_string())
 }
 
 #[tauri::command]
 async fn get_recovery_key(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
     let engine = state.crypto.lock().await;
+    // ZEROIZE-SWEEP: `secret` is a self-wiping `Zeroizing<Vec<u8>>`; wrap the
+    // full-secret hex `String` in `Zeroizing` too so neither intermediate
+    // lingers on the heap after this command returns. Only the formatted
+    // recovery key the user explicitly asked to see leaves the function.
     let secret = engine.get_secret_bytes()?;
     // Format: 8 groups of 8 hex chars (64 chars total = 32 bytes Ed25519 secret)
-    let hex = hex::encode(&secret);
-    let formatted: Vec<&str> = (0..8).map(|i| &hex[i*8..(i+1)*8]).collect();
+    let hex = zeroize::Zeroizing::new(hex::encode(&secret));
+    let hs: &str = &hex;
+    let formatted: Vec<&str> = (0..8).map(|i| &hs[i * 8..(i + 1) * 8]).collect();
     Ok(formatted.join("-"))
 }
 
@@ -302,7 +359,9 @@ async fn connect_peer(state: tauri::State<'_, Arc<AppState>>, peer_id: String) -
 
 #[tauri::command]
 async fn get_my_reputation(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
-    let pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
+    // REPUT-ID-1: reputation is keyed by the ML-DSA **address** (economic actor),
+    // matching the mining loop's `uptime_tick(&addr, …)` — not the transport key.
+    let pk = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
     let rep = state.node.reputation.read().await;
     let micro = p2p::ledger::MICRO as f64;
     // Convert µQTA → QUANTA for frontend display
@@ -336,14 +395,16 @@ async fn get_my_reputation(state: tauri::State<'_, Arc<AppState>>) -> Result<ser
 
 #[tauri::command]
 async fn transfer_atn(state: tauri::State<'_, Arc<AppState>>, to_pk: String, amount: f64) -> Result<(), String> {
-    let my_pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
+    // REPUT-ID-1: local actor = ML-DSA address (coherent with mining/ledger_transfer).
+    let my_pk = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
     let uqta = quanta_to_uqta(amount)?;
     state.node.reputation.write().await.transfer(&my_pk, &to_pk, uqta)
 }
 
 #[tauri::command]
 async fn stake_atn(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Result<f64, String> {
-    let my_pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
+    // REPUT-ID-1: local actor = ML-DSA address (coherent with mining/ledger_transfer).
+    let my_pk = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
     let uqta = quanta_to_uqta(amount)?;
     let staked_uqta = state.node.reputation.write().await.stake(&my_pk, uqta)?;
     Ok(staked_uqta as f64 / p2p::ledger::MICRO as f64)
@@ -404,8 +465,9 @@ async fn get_network_health(state: tauri::State<'_, Arc<AppState>>) -> Result<se
     let stats = state.node.ledger.read().await.stats();
     let total_quanta_supply = stats.total_mined as f64 / p2p::ledger::MICRO as f64;
 
-    // PoC score de l'identité courante (si présente)
-    let pk = state.crypto.lock().await.get_identity().map(|i| i.public_key_hex).unwrap_or_default();
+    // PoC score de l'identité courante (si présente). REPUT-ID-1 : la réputation
+    // est keyée par l'**adresse** ML-DSA (acteur économique), pas le transport.
+    let pk = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
     let (poc_score, mining_multiplier) = if pk.is_empty() {
         (0.0_f64, 0.1_f64)
     } else {
@@ -628,13 +690,24 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     }
     let uqta = quanta_to_uqta(amount)?;
     let crypto = state.crypto.lock().await;
-    let from = crypto.get_identity()?.public_key_hex;
+    // PQ-MIG-3B: the account identity (`from`, balance key, and the CRDT/reputation
+    // mirror key) is the ML-DSA **address**; the gossip envelope sender stays the
+    // Ed25519 **transport** key (deferred). `to` is already an address (64-hex).
+    let from = crypto
+        .pq_address_hex()
+        .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
+    let transport_pk = crypto.get_identity()?.public_key_hex;
     let mut ledger = state.node.ledger.write().await;
     let (tx, burn_tx, burn_uqta) = ledger.transfer_with_burn(&from, &to, uqta, &crypto)?;
     let net_uqta = uqta - burn_uqta;
     drop(ledger);
+    // REPUT-ID-1: the reputation mirror is keyed by the ML-DSA **address** (the
+    // economic actor) — both legs. The mining loop now fills it under `addr`
+    // (`uptime_tick(&addr, …)`), so a received credit lands in the SAME bucket
+    // the recipient mines into. Off the security path (ADR-002), but coherent.
     let _ = state.node.reputation.write().await.transfer(&from, &to, net_uqta);
-    // Phase 3 — double-ledger : refléter le transfert net dans le PN-Counter CRDT (µQTA).
+    // Phase 3 — double-ledger : refléter le transfert net dans le PN-Counter CRDT
+    // (µQTA), en **espace de valeur** (adresse ML-DSA), miroir du ledger on-chain.
     {
         let mut cons = state.node.consensus.write().await;
         cons.ledger.debit(&from, &from, net_uqta);
@@ -649,10 +722,10 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
             let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
             let timestamp = chrono::Utc::now().to_rfc3339();
             let nonce = state.node.gossip.read().await.next_outgoing_nonce();
-            let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&from, nonce, &timestamp, &msg);
+            let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&transport_pk, nonce, &timestamp, &msg);
             let sig = crypto.sign(&signable).unwrap_or_default();
             if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
-                from.clone(), msg, nonce, timestamp, &sig,
+                transport_pk.clone(), msg, nonce, timestamp, &sig,
             ) {
                 state.node.gossip.write().await.mark_seen(&env.id);
                 let _ = state.node.gossip_tx.send(env);
