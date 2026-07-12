@@ -150,6 +150,10 @@ pub struct WillowNode {
     /// `FinalityVote`s. Anchored at the ledger's genesis hash. The verdict stays a
     /// pure `sm/` function; this store is the IO-layer holder.
     pub finality: Arc<RwLock<crate::p2p::finality_live::FinalityTracker>>,
+    /// LIVE-4 — bounded orphan-branch buffer + live caller of `reorg_to_fork`
+    /// (deep-fork / partition reconciliation). IO-layer state, never persisted.
+    /// Lock order: acquire AFTER `ledger`, release before gossip broadcasts.
+    pub fork_heal: Arc<RwLock<crate::p2p::fork_heal::ForkReconciler>>,
     /// Phase 3 + NET-3 — channel sortant priorisé pour les enveloppes gossip.
     /// Quatre lanes (Critical/High/Medium/Low) drainées par ordre de priorité.
     /// Le drain est branché à Iroh dès qu'un endpoint est actif ; sinon il
@@ -221,6 +225,9 @@ impl WillowNode {
             nonce_tracker: Arc::new(RwLock::new(NonceTracker::new())),
             usernames: Arc::new(RwLock::new(UsernameRegistry::new())),
             finality: Arc::new(RwLock::new(finality)),
+            fork_heal: Arc::new(RwLock::new(
+                crate::p2p::fork_heal::ForkReconciler::new(),
+            )),
             gossip_tx,
             gossip_rx: Arc::new(RwLock::new(Some(gossip_rx))),
             gossip_topic_sender: Arc::new(RwLock::new(None)),

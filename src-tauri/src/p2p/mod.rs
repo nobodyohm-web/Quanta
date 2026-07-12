@@ -26,6 +26,8 @@ pub mod gossip_tasks;
 pub mod pos_consensus;
 // LIVE-1 — câblage vivant du gadget de finalité (gossip des votes → LatestVotes/FinalityState)
 pub mod finality_live;
+// LIVE-4 — réconciliation de fork profonde en vivant (l'appelant réseau de GADGET-5B)
+pub mod fork_heal;
 // Identité — registre P2P de pseudos uniques @handle (adresse de wallet lisible)
 pub mod username;
 // Simulation réseau
