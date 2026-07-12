@@ -307,6 +307,7 @@ impl Ledger {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: None,
+            slash_unbonding: None,
         }
     }
 
@@ -658,15 +659,41 @@ impl Ledger {
                         tx_hash: tx.hash.clone(),
                     });
                 }
-                // LIVE-3: a Slash **destroys** the offender's bonded weight — debit
-                // `staked` with NO unbonding entry and NO spendable credit (the coins
-                // are burned, not returned). The matching STAKE-sink debit happened
-                // in `cache_apply_tx`, so sink == Σstaked+Σunbonding stays consistent.
+                // LIVE-3: a Slash **destroys** the offender's stake — NO unbonding
+                // entry created, NO spendable credit (the coins are burned). The
+                // matching STAKE-sink debit happened in `cache_apply_tx`, so
+                // sink == Σstaked+Σunbonding stays consistent.
+                // LIVE-3B: the tx's verified breakdown says exactly what dies —
+                // `amount - Σ(consumed unbonding)` from the bonded weight, plus the
+                // listed unbonding entries (matched by their Unstake tx hash). The
+                // breakdown was checked == this node's own deterministic plan by
+                // `verify_block_slashes`/COVER-2, so the arithmetic is exact; the
+                // saturating ops are pure defense-in-depth.
                 TxType::Slash => {
-                    let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
-                    *bonded = bonded.saturating_sub(tx.amount);
-                    if *bonded == 0 {
+                    let consumed_unbonding: u64 =
+                        tx.slash_unbonding.iter().flatten().map(|e| e.amount).sum();
+                    let bonded_take = tx.amount.saturating_sub(consumed_unbonding);
+                    if bonded_take > 0 {
+                        let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
+                        *bonded = bonded.saturating_sub(bonded_take);
+                    }
+                    if self.staked.get(&tx.from).copied().unwrap_or(0) == 0 {
                         self.staked.remove(&tx.from);
+                    }
+                    if let Some(consumed) = &tx.slash_unbonding {
+                        if let Some(list) = self.unbonding.get_mut(&tx.from) {
+                            for c in consumed {
+                                if let Some(e) =
+                                    list.iter_mut().find(|e| e.tx_hash == c.tx_hash)
+                                {
+                                    e.amount = e.amount.saturating_sub(c.amount);
+                                }
+                            }
+                            list.retain(|e| e.amount > 0);
+                        }
+                        if self.unbonding.get(&tx.from).is_some_and(|l| l.is_empty()) {
+                            self.unbonding.remove(&tx.from);
+                        }
                     }
                 }
                 _ => {}
@@ -730,11 +757,36 @@ impl Ledger {
                         }
                     }
                 }
-                // LIVE-3: reverse a Slash — restore the offender's bonded weight
-                // (mirror of the apply-side debit; the sink credit is done by
+                // LIVE-3: reverse a Slash — restore the offender's stake (mirror
+                // of the apply-side debit; the sink credit is done by
                 // `cache_revert_tx` in the reorg's cache-revert loop).
+                // LIVE-3B: the carried breakdown is what makes this EXACT — the
+                // bonded portion returns to `staked`, and each consumed unbonding
+                // entry is re-created (or topped back up, if partially consumed)
+                // with its original amount + unlock height + origin tx hash. This
+                // is the reversibility property the breakdown exists for: a popped
+                // slash leaves the state byte-identical to pre-slash.
                 TxType::Slash => {
-                    *self.staked.entry(tx.from.clone()).or_insert(0) += tx.amount;
+                    let consumed_unbonding: u64 =
+                        tx.slash_unbonding.iter().flatten().map(|e| e.amount).sum();
+                    let bonded_take = tx.amount.saturating_sub(consumed_unbonding);
+                    if bonded_take > 0 {
+                        *self.staked.entry(tx.from.clone()).or_insert(0) += bonded_take;
+                    }
+                    if let Some(consumed) = &tx.slash_unbonding {
+                        let list = self.unbonding.entry(tx.from.clone()).or_default();
+                        for c in consumed {
+                            if let Some(e) = list.iter_mut().find(|e| e.tx_hash == c.tx_hash) {
+                                e.amount += c.amount; // partial consumption restored
+                            } else {
+                                list.push(UnbondEntry {
+                                    amount: c.amount,
+                                    unlock_height: c.unlock_height,
+                                    tx_hash: c.tx_hash.clone(),
+                                });
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -781,28 +833,112 @@ impl Ledger {
         (((staked as u128 * SLASH_NUM as u128) / SLASH_DEN.max(1) as u128) as u64).min(staked)
     }
 
+    /// LIVE-3B — the **deterministic consumption plan** of a slash against this
+    /// ledger's current state: `(amount, bonded_take, consumed_unbonding)`.
+    ///
+    /// The slash base is `staked + unbonding` (Casper semantics: a validator is
+    /// slashable until its withdrawal completes — this is what closes the
+    /// *unstake-and-run* escape, audit 837). The ratified fraction (ADR-009,
+    /// `SLASH_NUM/SLASH_DEN`) applies to that base; **bonded stake is consumed
+    /// first**, then unbonding entries in `(unlock_height, tx_hash)` order (the
+    /// soonest-to-mature coins burn first — they are the flight risk), the last
+    /// entry possibly partially. Pure over `&self` → every node computes the
+    /// SAME plan from the same chain, which is what lets `slash_tx_valid`
+    /// require the tx's carried breakdown to match **exactly**.
+    fn expected_slash_consumption(&self, addr: &str) -> (u64, u64, Vec<ConsumedUnbond>) {
+        let bonded = self.staked_of(addr);
+        let unbonding = self.unbonding_of(addr);
+        let amount = Self::slash_amount_for(bonded.saturating_add(unbonding));
+        let bonded_take = amount.min(bonded);
+        let mut rest = amount - bonded_take;
+        let mut entries = Vec::new();
+        if rest > 0 {
+            if let Some(list) = self.unbonding.get(addr) {
+                let mut sorted: Vec<&UnbondEntry> = list.iter().collect();
+                sorted.sort_by(|a, b| {
+                    (a.unlock_height, &a.tx_hash).cmp(&(b.unlock_height, &b.tx_hash))
+                });
+                for e in sorted {
+                    if rest == 0 {
+                        break;
+                    }
+                    let take = rest.min(e.amount);
+                    entries.push(ConsumedUnbond {
+                        tx_hash: e.tx_hash.clone(),
+                        unlock_height: e.unlock_height,
+                        amount: take,
+                    });
+                    rest -= take;
+                }
+            }
+        }
+        (amount, bonded_take, entries)
+    }
+
+    /// LIVE-3B — the **slashable** weight per revealed ML-DSA pubkey:
+    /// `staked + unbonding` (vs [`Self::validator_stakes_by_pubkey`], the
+    /// **voting** weight = bonded only). Two maps, two purposes: an unbonding
+    /// validator must NOT vote (its weight left the active set) but MUST remain
+    /// punishable until withdrawal completes — passing this map to
+    /// `verify_proof` is what keeps a fully-unstaked equivocator slashable.
+    /// Same chain-walk binding as the voting map (each `Stake` tx reveals its
+    /// `pq_public_key`, graven to the address by `verify_tx`).
+    pub fn slashable_stakes_by_pubkey(&self) -> HashMap<String, u64> {
+        let mut out = HashMap::new();
+        for block in &self.chain {
+            for tx in &block.transactions {
+                if tx.tx_type != TxType::Stake {
+                    continue;
+                }
+                let Some(pk) = tx.pq_public_key.as_ref() else {
+                    continue;
+                };
+                let weight = self
+                    .staked_of(&tx.from)
+                    .saturating_add(self.unbonding_of(&tx.from));
+                if weight > 0 {
+                    out.insert(pk.clone(), weight);
+                }
+            }
+        }
+        out
+    }
+
     /// LIVE-3 — build the network-authorized **Slash** tx that destroys the
-    /// offender's bonded stake, carrying `proof` (GADGET-4) as its authority. The
-    /// offender is taken from the proof; the amount is the ratified fraction of
-    /// their **current** bonded stake. `None` if the proof names no bonded
-    /// validator (nothing to slash) or its offender key is malformed. The tx is
-    /// **unsigned** (no offender signature — a slash is authorized by the proof,
-    /// which every node re-verifies via [`Self::verify_block_slashes`]).
+    /// offender's **slashable** stake (bonded + unbonding, LIVE-3B — Casper
+    /// semantics: punishable until the withdrawal completes), carrying `proof`
+    /// (GADGET-4) as its authority. The offender is taken from the proof; the
+    /// amount is the ratified fraction of their current slashable base, and the
+    /// tx carries the exact consumed-unbonding breakdown (hash-bound, verified
+    /// by every node, restored exactly on reorg). `None` if the proof names no
+    /// slashable validator (nothing anywhere) or its offender key is malformed.
+    /// The tx is **unsigned** (no offender signature — a slash is authorized by
+    /// the proof, which every node re-verifies via [`Self::verify_block_slashes`]).
     pub fn build_slash_tx(&self, proof: &crate::sm::finality_slashing::FaultProof) -> Option<Transaction> {
         let offender_pk = proof.offender();
         let pk_bytes = hex::decode(offender_pk).ok()?;
         let offender_addr = CryptoEngine::ml_dsa_address_hex(&pk_bytes);
-        let staked = self.staked_of(&offender_addr);
-        let amount = Self::slash_amount_for(staked);
+        // LIVE-3B: the slash base is bonded + unbonding (unstake-and-run closed);
+        // the consumption plan is the shared deterministic computation every
+        // verifier re-runs (`slash_tx_valid`).
+        let (amount, _bonded_take, consumed) = self.expected_slash_consumption(&offender_addr);
         if amount == 0 {
-            return None; // nothing bonded to slash
+            return None; // nothing bonded OR unbonding to slash
         }
         let proof_json = serde_json::to_string(proof).ok()?;
         let ts = Self::GENESIS_TIMESTAMP; // deterministic; the hash binds the content
         // The id/hash bind the offender + amount + the FULL proof deterministically
         // (not a truncation — so two distinct proofs never collide on the tx hash).
+        // LIVE-3B: the consumed-unbonding breakdown is bound too (appended ONLY
+        // when non-empty, so a purely-bonded slash hashes byte-identically to
+        // pre-LIVE-3B — zero wire drift on the existing flow).
         let id = format!("slash_{}", short(&offender_addr, 16));
-        let payload = format!("slash:{offender_addr}:{amount}:{proof_json}");
+        let payload = if consumed.is_empty() {
+            format!("slash:{offender_addr}:{amount}:{proof_json}")
+        } else {
+            let consumed_json = serde_json::to_string(&consumed).ok()?;
+            format!("slash:{offender_addr}:{amount}:{proof_json}:{consumed_json}")
+        };
         let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
         Some(Transaction {
             id,
@@ -817,17 +953,20 @@ impl Ledger {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: Some(proof_json),
+            slash_unbonding: (!consumed.is_empty()).then_some(consumed),
         })
     }
 
     /// LIVE-3 — whether ONE `Slash` tx is legitimate against this ledger's on-chain
     /// stake (pure over `&self` + the tx + a precomputed pubkey-keyed stake map). A
     /// slash is authorized NOT by a signature but by its embedded [`FaultProof`], so
-    /// the checks are: (1) the proof verifies against the on-chain stake (a real
-    /// double-vote/surround, valid ML-DSA sigs, offender is an **active** validator);
-    /// (2) `from` is exactly the offender key's address `BLAKE3(ADDR_DOMAIN ‖ pk)`;
-    /// (3) the amount is the ratified fraction of the offender's **current** bonded
-    /// stake; (4) the destination is `BURN`. A non-Slash tx is trivially "valid" here.
+    /// the checks are: (1) the proof verifies against the on-chain **slashable**
+    /// stake (a real double-vote/surround, valid ML-DSA sigs, offender bonded OR
+    /// unbonding — LIVE-3B); (2) `from` is exactly the offender key's address
+    /// `BLAKE3(ADDR_DOMAIN ‖ pk)`; (3) the amount is the ratified fraction of the
+    /// offender's current slashable base AND the carried consumed-unbonding
+    /// breakdown matches this node's own deterministic plan exactly; (4) the
+    /// destination is `BURN`. A non-Slash tx is trivially "valid" here.
     fn slash_tx_valid(&self, tx: &Transaction, stakes_by_pk: &HashMap<String, u64>) -> bool {
         use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
         use crate::sm::finality_slashing::{verify_proof, FaultProof};
@@ -841,14 +980,25 @@ impl Ledger {
             return false;
         };
         if !verify_proof(&proof, stakes_by_pk, EPOCH_LENGTH_BLOCKS) {
-            return false; // no real fault / forged / non-validator
+            return false; // no real fault / forged / not slashable
         }
         let Ok(pk_bytes) = hex::decode(proof.offender()) else {
             return false;
         };
         let offender_addr = CryptoEngine::ml_dsa_address_hex(&pk_bytes);
-        let expected = Self::slash_amount_for(self.staked_of(&offender_addr));
-        tx.from == offender_addr && tx.to == "BURN" && expected > 0 && tx.amount == expected
+        // LIVE-3B: re-run the SAME deterministic consumption plan this node would
+        // build, and require the tx to match it EXACTLY — total amount AND the
+        // per-entry unbonding breakdown. A proposer can neither over-slash, nor
+        // under-slash, nor lie about WHICH unbonding entries were destroyed
+        // (the breakdown is what a reorg restores, so it must be beyond dispute).
+        let (expected_amount, _bonded_take, expected_consumed) =
+            self.expected_slash_consumption(&offender_addr);
+        let carried: &[ConsumedUnbond] = tx.slash_unbonding.as_deref().unwrap_or(&[]);
+        tx.from == offender_addr
+            && tx.to == "BURN"
+            && expected_amount > 0
+            && tx.amount == expected_amount
+            && carried == expected_consumed.as_slice()
     }
 
     /// LIVE-3 — indices of the **invalid** `Slash` txs in `txs` (the single source
@@ -873,7 +1023,10 @@ impl Ledger {
         if !txs.iter().any(|t| t.tx_type == TxType::Slash) {
             return Vec::new();
         }
-        let stakes_by_pk = self.validator_stakes_by_pubkey();
+        // LIVE-3B: proofs verify against the SLASHABLE weight (bonded + unbonding)
+        // — an offender who fully unstaked remains punishable until withdrawal
+        // completes (the voting map would drop them and let them run).
+        let stakes_by_pk = self.slashable_stakes_by_pubkey();
         // Addresses that move stake (Stake/Unstake) in THIS block — a slash of any
         // of them is refused (the unbonding-escape / double-move hazard above).
         let stake_movers: HashSet<&str> = txs
@@ -917,10 +1070,11 @@ impl Ledger {
 
     /// LIVE-3 — **queue a slash** from a verified fault proof: build the network-
     /// authorized `Slash` tx (amount = the ratified fraction of the offender's
-    /// current bonded stake), apply its STAKE-sink debit to the cache (admission,
-    /// like any tx), and push it to the mempool so the next seal includes it. Idempotent
-    /// via `seen_tx_hashes`. Returns the queued tx, or `None` if there is nothing to
-    /// slash (offender not bonded) or the slash is already pending/applied.
+    /// current **slashable** stake — bonded + unbonding, LIVE-3B), apply its
+    /// STAKE-sink debit to the cache (admission, like any tx), and push it to the
+    /// mempool so the next seal includes it. Idempotent via `seen_tx_hashes`.
+    /// Returns the queued tx, or `None` if there is nothing to slash (offender
+    /// neither bonded nor unbonding) or the slash is already pending/applied.
     pub fn queue_slash(&mut self, proof: &crate::sm::finality_slashing::FaultProof) -> Option<Transaction> {
         let tx = self.build_slash_tx(proof)?;
         // **Per-offender mempool guard (audit CRITICAL/HIGH).** `seen_tx_hashes`
@@ -1860,6 +2014,7 @@ impl Ledger {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: None,
+            slash_unbonding: None,
         };
         let mut out = Vec::with_capacity(rest.len() + 1);
         out.push(reward);
@@ -2681,8 +2836,23 @@ impl Ledger {
         // when present, so every non-slash tx's content stays byte-identical (no
         // existing block/genesis hash shifts). Deterministic (the proof JSON is
         // built from deterministic votes).
-        match &tx.fault_proof {
+        let base = match &tx.fault_proof {
             Some(proof) => format!("{base}|slash_proof={proof}"),
+            None => base,
+        };
+        // LIVE-3B: bind the consumed-unbonding breakdown too — it drives BOTH the
+        // apply (which entries die) and the reorg revert (which entries come back),
+        // so a relay must not be able to alter it without changing the block hash.
+        // Appended only when present: purely-bonded slashes and all other txs stay
+        // byte-identical (genesis/history hashes unshifted).
+        match &tx.slash_unbonding {
+            Some(consumed) => match serde_json::to_string(consumed) {
+                Ok(j) => format!("{base}|slash_unbonding={j}"),
+                // Serialization of plain structs cannot fail; if it somehow did,
+                // fall back to a marker that still perturbs the leaf (never allow
+                // a silent unbound breakdown).
+                Err(_) => format!("{base}|slash_unbonding=<unserializable>"),
+            },
             None => base,
         }
     }
@@ -2918,6 +3088,7 @@ impl Ledger {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: None,
+            slash_unbonding: None,
         }
     }
 
@@ -3004,6 +3175,7 @@ impl Ledger {
             pq_signature: Some(hex::encode(&quantum)),
             pq_public_key: Some(pq_pk),
             fault_proof: None,
+            slash_unbonding: None,
         })
     }
 }
@@ -3986,6 +4158,7 @@ mod tests {
             pq_signature: Some(hex::encode(&quantum)),
             pq_public_key: Some(pq_pk),
             fault_proof: None,
+            slash_unbonding: None,
         }
     }
 
@@ -4218,6 +4391,7 @@ mod tests {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: None,
+            slash_unbonding: None,
         };
         assert!(
             Ledger::verify_tx(&forged).is_err(),

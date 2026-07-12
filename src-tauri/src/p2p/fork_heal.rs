@@ -567,6 +567,7 @@ mod tests {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: None,
+            slash_unbonding: None,
         }); // merkle/hash no longer match → trial reorg must reject
         let tip_before = a.chain.last().unwrap().hash.clone();
 

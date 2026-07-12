@@ -662,6 +662,7 @@ mod tests {
             pq_signature: None,
             pq_public_key: None,
             fault_proof: None,
+            slash_unbonding: None,
         };
         let block = Ledger::forge_block_at(
             ledger.chain_height(),
@@ -934,6 +935,281 @@ mod tests {
             "O's bonded stake restored by the reorg revert (its slash is gone with the loser)"
         );
         assert!(conserves(&ledger), "conserves after the reorg");
+    }
+
+    // ─── LIVE-3B: the slash reaches unbonding coins (unstake-and-run closed) ──
+
+    #[test]
+    fn live3b_unstake_and_run_is_now_slashed() {
+        use crate::p2p::ledger::UNBONDING_PERIOD_BLOCKS;
+        // THE escape (audit 837): the offender fully unstakes at block 2, THEN its
+        // equivocation proof lands. Pre-LIVE-3B the slash targeted bonded stake only
+        // (staked=0 → nothing to slash) and the coins matured back ~2 weeks later.
+        // Now the slash base is bonded+unbonding: the queued slash consumes the
+        // unbonding entry itself — the runner is caught.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .expect("full unstake");
+        let unstake_block = ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .expect("seal the unstake");
+        assert_eq!(ledger.staked_of(&addr), 0, "fully unbonded — the pre-3B blind spot");
+        assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "coins in flight");
+        assert!(conserves(&ledger));
+
+        // The proof arrives AFTER the unstake sealed — and still bites.
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        let tx = ledger
+            .queue_slash(&proof)
+            .expect("an unbonding offender is STILL slashable (LIVE-3B)");
+        assert_eq!(tx.amount, 5 * MICRO, "the full slashable base is destroyed");
+        let carried = tx.slash_unbonding.as_deref().expect("carries the breakdown");
+        assert_eq!(carried.len(), 1, "one consumed unbonding entry");
+        assert_eq!(carried[0].amount, 5 * MICRO);
+        assert_eq!(
+            carried[0].unlock_height,
+            unstake_block.index + UNBONDING_PERIOD_BLOCKS,
+            "the breakdown pins the entry's exact unlock height"
+        );
+
+        let burned_before = ledger.total_burned();
+        let slash_block = ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .expect("seal the slash");
+        assert_eq!(ledger.unbonding_of(&addr), 0, "the in-flight coins are DESTROYED");
+        assert_eq!(ledger.staked_of(&addr), 0);
+        assert_eq!(ledger.total_burned(), burned_before, "burned already counted while pending");
+        assert_eq!(ledger.total_burned(), 5 * MICRO, "5 QTA burned in total");
+        assert!(conserves(&ledger), "conservation exact after the unbonding slash");
+
+        // Receiver convergence: a fresh node replays unstake block + slash block and
+        // lands on the identical state (verify_block_slashes re-runs the same plan).
+        let mut receiver = staked_ledger(&[(&a, 5 * MICRO)]);
+        assert_eq!(receiver.integrate_remote_block(unstake_block), Ok(true));
+        assert_eq!(receiver.integrate_remote_block(slash_block), Ok(true), "receiver accepts");
+        assert_eq!(receiver.unbonding_of(&addr), 0, "receiver destroyed the same entry");
+        assert_eq!(receiver.total_burned(), 5 * MICRO);
+        assert!(conserves(&receiver), "receiver conserves identically");
+    }
+
+    #[test]
+    fn live3b_mixed_bonded_and_unbonding_slash_consumes_both() {
+        // Partial unstake: 3 QTA still bonded, 2 QTA unbonding. The slash destroys
+        // BOTH compartments (bonded first, then the entry), total = 5.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        ledger
+            .unstake_tx_at(&addr, 2 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .expect("partial unstake");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .expect("seal the unstake");
+        assert_eq!(ledger.staked_of(&addr), 3 * MICRO);
+        assert_eq!(ledger.unbonding_of(&addr), 2 * MICRO);
+
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        let tx = ledger.queue_slash(&proof).expect("slashable");
+        assert_eq!(tx.amount, 5 * MICRO, "bonded 3 + unbonding 2");
+        let carried = tx.slash_unbonding.as_deref().expect("breakdown");
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].amount, 2 * MICRO, "exactly the unbonding part");
+
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .expect("seal the slash");
+        assert_eq!(ledger.staked_of(&addr), 0, "bonded destroyed");
+        assert_eq!(ledger.unbonding_of(&addr), 0, "unbonding destroyed");
+        assert_eq!(ledger.total_burned(), 5 * MICRO);
+        assert!(ledger.validator_stakes().is_empty(), "no validator left");
+        assert!(conserves(&ledger));
+    }
+
+    #[test]
+    fn live3b_reorg_restores_consumed_unbonding_exactly() {
+        use crate::p2p::ledger::UNBONDING_PERIOD_BLOCKS;
+        // The reversibility property the carried breakdown exists for: a fork reorg
+        // that pops a slash block must restore the consumed unbonding entry with its
+        // ORIGINAL amount and unlock height — pinned here by maturing at exactly
+        // that height afterwards (one block earlier must release nothing).
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .expect("unstake");
+        let unstake_block = ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .expect("seal unstake");
+        let unlock = unstake_block.index + UNBONDING_PERIOD_BLOCKS;
+        let spendable_before = ledger.balance_of(&addr);
+
+        // Slash sealed at height 3 (this branch will lose).
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        ledger.queue_slash(&proof).expect("queued");
+        let slash_block = ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .expect("seal slash");
+        assert_eq!(ledger.unbonding_of(&addr), 0, "entry consumed on this branch");
+        assert_eq!(ledger.total_burned(), 5 * MICRO);
+
+        // A competing empty block at the same height wins reconciliation.
+        let winner = Ledger::forge_block_at(
+            slash_block.index,
+            &unstake_block.hash,
+            "2026-07-13T00:02:30+00:00",
+            &addr,
+            vec![],
+        );
+        assert_eq!(
+            ledger.reorg_to_fork(std::slice::from_ref(&winner), 0),
+            Ok(true),
+            "the slash block is popped by the reorg"
+        );
+
+        // The consumed entry is BACK — amount and unlock height exact.
+        assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "entry restored in full");
+        assert_eq!(ledger.total_burned(), 0, "popped slash not re-queued (network-authored)");
+        assert!(conserves(&ledger), "conservation exact after the revert");
+        // Height pin: nothing matures one block early…
+        ledger.mature_unbonding(unlock - 1);
+        assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "not a block early");
+        // …and everything matures at the original unlock height.
+        ledger.mature_unbonding(unlock);
+        assert_eq!(ledger.unbonding_of(&addr), 0, "matures at the ORIGINAL height");
+        assert_eq!(
+            ledger.balance_of(&addr),
+            spendable_before + 5 * MICRO,
+            "the runner's coins return only because the slash was reorged away"
+        );
+        assert!(conserves(&ledger), "conserves through maturation");
+    }
+
+    #[test]
+    fn live3b_forged_breakdown_is_rejected() {
+        // A proposer cannot lie about WHAT the slash destroyed. Two forgeries over a
+        // REAL fault proof: (a) a breakdown pointing at a wrong entry id, (b) a
+        // stripped breakdown pretending the slash was all-bonded. Both must be
+        // rejected by block validation (the breakdown must equal each node's own
+        // deterministic plan).
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .expect("unstake");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .expect("seal unstake");
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        let good = ledger.build_slash_tx(&proof).expect("valid slash");
+
+        // (a) wrong entry id.
+        let mut wrong_entry = good.clone();
+        if let Some(entries) = wrong_entry.slash_unbonding.as_mut() {
+            entries[0].tx_hash = "not-the-real-unstake".into();
+        }
+        let blk_a = Ledger::forge_block_at(
+            ledger.chain_height(),
+            &ledger.chain.last().unwrap().hash,
+            "ts",
+            &addr,
+            vec![wrong_entry],
+        );
+        assert!(
+            ledger.verify_block_slashes(&blk_a).is_err(),
+            "a breakdown naming the wrong entry is rejected"
+        );
+
+        // (b) stripped breakdown (claims all-bonded while the plan says unbonding).
+        let mut stripped = good;
+        stripped.slash_unbonding = None;
+        let blk_b = Ledger::forge_block_at(
+            ledger.chain_height(),
+            &ledger.chain.last().unwrap().hash,
+            "ts",
+            &addr,
+            vec![stripped],
+        );
+        assert!(
+            ledger.verify_block_slashes(&blk_b).is_err(),
+            "a stripped breakdown is rejected"
+        );
+    }
+
+    #[test]
+    fn live3b_matured_entry_stales_the_pending_slash() {
+        use crate::p2p::ledger::UNBONDING_PERIOD_BLOCKS;
+        // Boundary: the consumed entry MATURES while the slash is still pending
+        // (per ADR-003's const-assert the unbonding period ≥ the slashing window, so
+        // in production a proof lands long before maturity — this is the defensive
+        // boundary, not the normal path). The pending slash must go STALE — excluded
+        // at seal with its admission-time sink debit reverted — never over-debit a
+        // sink whose coins already left. Conservation exact throughout.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .expect("unstake");
+        let unstake_block = ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .expect("seal unstake");
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        ledger.queue_slash(&proof).expect("queued while unbonding");
+        assert_eq!(ledger.pending_slash_count_for_test(), 1);
+
+        // The entry matures under the pending slash (simulated height jump).
+        ledger.mature_unbonding(unstake_block.index + UNBONDING_PERIOD_BLOCKS);
+        assert_eq!(ledger.unbonding_of(&addr), 0, "matured");
+
+        // Seal: the stale slash is excluded (its plan no longer matches), its
+        // sink debit reverted — the offender legitimately keeps the matured coins
+        // (the proof arrived after the withdrawal completed).
+        let burned_genesis = 0u64;
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .expect("seal");
+        assert_eq!(ledger.pending_slash_count_for_test(), 0, "stale slash gone");
+        assert_eq!(ledger.total_burned(), burned_genesis, "nothing burned");
+        assert_eq!(
+            ledger.balance_of(&addr),
+            10 * MICRO,
+            "matured coins spendable (5 genesis-spare + 5 matured)"
+        );
+        assert!(conserves(&ledger), "conservation exact — no sink over-debit");
+    }
+
+    #[test]
+    fn live3b_slashable_map_carries_unbonding_weight() {
+        // Two maps, two purposes: after a FULL unstake the voting map must drop the
+        // validator (an unbonding validator must not vote / weigh certificates),
+        // while the slashable map must keep its full weight (punishable until the
+        // withdrawal completes).
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        let pk = a.pq_identity_hex().unwrap();
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .expect("unstake");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .expect("seal unstake");
+
+        assert_eq!(
+            ledger.validator_stakes_by_pubkey().get(&pk),
+            None,
+            "voting weight gone (must not vote while unbonding)"
+        );
+        assert_eq!(
+            ledger.slashable_stakes_by_pubkey().get(&pk).copied(),
+            Some(5 * MICRO),
+            "slashable weight intact (punishable until withdrawal)"
+        );
     }
 
     #[test]

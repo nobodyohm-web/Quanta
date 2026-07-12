@@ -567,8 +567,9 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
 }
 
 /// LIVE-3 — a gossiped fault proof. Deserialize → re-verify against the on-chain
-/// stake (GADGET-4 `verify_proof`) → queue a slash of the offender's bonded stake
-/// (STAKE → BURN), which the next sealed block includes. A malicious accuser
+/// stake (GADGET-4 `verify_proof`) → queue a slash of the offender's **slashable**
+/// stake (bonded + unbonding, LIVE-3B — STAKE → BURN), which the next sealed
+/// block includes. A malicious accuser
 /// cannot punish an innocent validator: the queued slash carries the proof and
 /// every node re-verifies it in block validation (`verify_block_slashes`). The
 /// envelope's Ed25519 signature (transport) was already checked upstream; the
@@ -586,14 +587,17 @@ async fn handle_finality_fault(state: &Arc<AppState>, sender: &str, proof_json: 
         }
     };
     // Verify + queue under a single write lock (queue_slash re-verifies via
-    // build_slash_tx → only slashes a bonded offender; the proof is re-checked
-    // in-block on every node). The offender's stake is read from the live ledger.
+    // build_slash_tx → only slashes a slashable offender — bonded or unbonding;
+    // the proof is re-checked in-block on every node). The offender's stake is
+    // read from the live ledger.
     let queued = {
         let mut ledger = state.node.ledger.write().await;
         // Re-verify the proof against on-chain stake before queueing, so a bogus
         // proof never even enters the mempool (defense-in-depth; block validation
-        // re-checks regardless).
-        let stakes = ledger.validator_stakes_by_pubkey();
+        // re-checks regardless). LIVE-3B: use the SLASHABLE weight (bonded +
+        // unbonding) — a fully-unstaked equivocator must stay punishable until
+        // its withdrawal completes (unstake-and-run closed).
+        let stakes = ledger.slashable_stakes_by_pubkey();
         if !crate::sm::finality_slashing::verify_proof(
             &proof,
             &stakes,
