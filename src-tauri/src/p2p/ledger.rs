@@ -1800,11 +1800,11 @@ impl Ledger {
         // ONCHAIN-STAKE-1: apply this block's Stake/Unstake + height-triggered
         // maturation now that it is the chain tip (block-index-anchored).
         self.apply_block_stake_effects(&block);
-        // LIVE-3 (audit 2318): if this block slashed an offender, any *pending* slash
-        // for the same offender is now redundant — evict it so its admission-time
-        // STAKE-sink debit is reverted (else `total_burned` would double-count a
-        // stake that no longer exists). No-op unless a slash is pending.
-        self.evict_stale_pending_slashes();
+        // LIVE-3 (audit 2318): no `evict_stale_pending_slashes` needed HERE — `pending`
+        // was drained by `std::mem::take` above and COVER-2 DROPS excluded txs (never
+        // re-queues), so it is empty now. The stale-pending-slash race is integrate-only
+        // (a *remote* block slashing an offender we still hold a pending slash for); this
+        // node just sealed its OWN pending slash into the block, leaving nothing stale.
         block
     }
 
