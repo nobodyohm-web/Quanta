@@ -3912,3 +3912,39 @@ de régression encodant la panne :
 
 **Portes après la grappe** : **399 tests + 1 intégration / 0 échec** ; C1 128-runs byte-identique ;
 sweep multi-seed conservation + émission + **slashing** verts ; clippy `--all-targets` propre.
+
+---
+
+## LIVE-4 + LIVE-3B — les deux derniers trous réels fermés (2026-07-13)
+
+### LIVE-4 — réconciliation de fork profonde en vivant (trou de convergence)
+Constat vérifié dans le code : `reorg_to_fork` (GADGET-5B, la réconciliation de partition) était
+DST-prouvé **mais jamais appelé du chemin réseau** — `integrate_remote_block` ne gère que l'extension
+linéaire et le fork 1-bloc, donc **deux partitions scellant chacune ≥2 blocs ne convergeaient jamais**
+(boucle `"out of range"`), en violation de la règle « fork convergence <60s ». Fermé par
+`p2p/fork_heal.rs` (`ForkReconciler`) : tampon borné déterministe nourri des blocs qui échouent
+l'intégration linéaire, assemblage de la branche concurrente, règle de victoire vivante
+(plus-longue-au-dessus-du-plancher + départage lexicographique — généralisation N-blocs de la règle
+1-bloc, convergence symétrique), application via `reorg_to_fork` (clone d'essai, plancher LIVE-2
+absolu), sondes d'ancêtre par `RequestChain` descendantes. Bonus : guérit les fenêtres ChainSegment
+hors-ordre (NET-6). 8 tests (heal symétrique 2-3, départage à égalité, veto plancher, hors-ordre,
+branche invalide purgée sans retry, tampon borné sous flood, sondes clampées, conservation à travers
+un heal avec récompenses).
+
+### LIVE-3B — le slash atteint l'unbonding (« unstake-and-run », ex-837, FERMÉ)
+Le sous-problème de réversibilité (un slash poppé au reorg doit restaurer les entrées d'unbonding
+exactes) est résolu par conception : la tx `Slash` **porte sa ventilation de consommation**
+(`slash_unbonding`, ordre déterministe `(unlock_height, tx_hash)`), liée **hash + Merkle**, que chaque
+nœud **re-vérifie contre son propre plan** (`expected_slash_consumption`, source unique build+verify —
+un proposeur ne peut ni sur-slasher, ni sous-slasher, ni mentir sur ce qui meurt) et que le revert
+rejoue **à l'identique** (montant + hauteur de déverrouillage + tx d'origine). Base slashable =
+staké + unbonding ; deux cartes d'enjeu (vote = bondé seul ; slashable = bondé + unbonding pour
+`verify_proof` — ledger et dispatcher). Les slashes purement bondés restent **byte-identiques**
+(zéro dérive wire, C1 sous slashing vert). La fraction de slash (ADR-009) est **inchangée** — 🛑
+décision d'Alexandre. 6 tests (unstake-and-run attrapé bout-en-bout + convergence du récepteur,
+mixte bondé+unbonding, reorg restaure exactement — hauteur épinglée par maturation, ventilation
+forgée/dépouillée rejetée, entrée mûrie → slash périmé évincé proprement, carte de vote vs carte
+slashable).
+
+**Portes** : **413 tests + 1 intégration / 0 échec** ; C1 128-runs byte-identique ; sweeps
+conservation + émission + slashing verts ; clippy `--all-targets -D warnings` propre.

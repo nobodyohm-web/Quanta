@@ -116,10 +116,32 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
   - Conservation neutre : `cache_apply_tx(Slash)` débite le **sink STAKE** (pas le spendable), `total_burned`
     compte le Slash ; `revert_block_stake_effects` restaure `staked += tx.amount` (montant propre, symétrique).
 
+## LIVE-3B — le slash atteint l'unbonding (« unstake-and-run » FERMÉ, ex-837)
+- Base slashable = **staké + en-déverrouillage** (Casper : punissable tant que le retrait n'est pas complété).
+- La tx `Slash` porte sa **ventilation** (`slash_unbonding` : entrées consommées, ordre déterministe
+  `(unlock_height, tx_hash)`), liée **hash + Merkle** (`tx_content_bytes`) ; chaque nœud la re-vérifie contre
+  son propre plan (`expected_slash_consumption` — source unique build+verify) ; un reorg restaure **exactement**
+  les entrées consommées. Slashes purement bondés = byte-identiques à avant (zéro dérive wire).
+- **Deux cartes d'enjeu, deux rôles** : `validator_stakes_by_pubkey` = poids de **vote** (bondé seul — un
+  validateur en déverrouillage ne vote pas) ; `slashable_stakes_by_pubkey` = poids **punissable**
+  (bondé + unbonding) pour `verify_proof` sur les chemins de slash (ledger + dispatcher). Ne pas confondre.
+
+## LIVE-4 — réconciliation de fork profonde (`p2p/fork_heal.rs`)
+- `integrate_remote_block` ne gère que le linéaire + fork 1-bloc ; tout plus profond passe par le
+  `ForkReconciler` (tampon borné 1024, éviction déterministe du plus haut index) → assemble la branche
+  enracinée chez nous → **règle de victoire vivante** : plus-longue-au-dessus-du-plancher, départage
+  lexicographique du tip à hauteur égale (exactement un côté adopte) → `reorg_to_fork` (clone d'essai).
+- Sondes d'ancêtre par fenêtres `RequestChain` descendantes (50/round), bornées au plancher. Pas de
+  nouveau message wire. Guérit aussi les fenêtres ChainSegment hors-ordre (NET-6).
+- Verrous : `ledger` → `fork_heal`, relâchés avant tout broadcast gossip. État IO, jamais persisté.
+- Honnête : la règle vivante n'est PAS LMD-GHOST pondéré (les votes vivants sont par-époque) ; GHOST reste
+  au niveau checkpoints (`sm/`), le plancher LIVE-2 reste absolu sur ce chemin.
+
 ## Limitations connues (roadmap — nommage honnête)
-- **Unstake-and-run (837)** : un offenseur qui `Unstake` **avant** que son slash ne soit scellé échappe au
-  slash (celui-ci cible le *bonded*, pas l'unbonding). Mitigé : coins verrouillés `UNBONDING_PERIOD_BLOCKS`
-  (~2 sem.) ≫ fenêtre de détection. Correctif complet (slash atteignant l'unbonding / gel de l'`Unstake`
-  sur preuve existante) = addition de conception, au roadmap avec le vrai VRF/VDF + slashing d'inactivité.
 - **Fork-choice (`ghost_head`) non conscient de la finalité** : sans danger — l'enforcement est le **veto de
   plancher** LIVE-2 dans `integrate_remote_block`/`reorg_to_fork` (rejette tout reorg ≤ `finalized_floor_index`).
+- **Liveness de la punition** (nuance, pas un trou de conservation) : un slash pending dont le plan devient
+  périmé (l'enjeu de l'offenseur a bougé entre queue et seal) est exclu/évincé proprement ; il est re-queue-able
+  par tout nœud recevant la `FinalityFault` après le bloc qui a changé l'état (le plan re-calculé est valide).
+- Vrai VRF/VDF, slashing d'inactivité, reorg actif piloté `ghost_head`, audit tiers : au roadmap.
+- **Économie §12** (`MIN_VALIDATOR_STAKE`, fraction de slash, allocation) : décisions d'Alexandre (🛑).
