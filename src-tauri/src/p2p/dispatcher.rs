@@ -557,6 +557,52 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         GossipMessage::PublishUsername { record_json } => {
             handle_publish_username(state, &record_json).await;
         }
+        GossipMessage::FinalityVote { vote_json } => {
+            handle_finality_vote(state, &env.sender, &vote_json).await;
+        }
+    }
+}
+
+/// LIVE-1 — a gossiped finality vote (pipeline step ⑨). Deserialize → hand to the
+/// live gadget, which **re-verifies** it against the on-chain stake (GADGET-2)
+/// before observing it into the fork-choice and (on a ⅔ certificate) advancing
+/// finality (GADGET-3). The envelope's Ed25519 signature (transport) was already
+/// checked upstream; the vote's own ML-DSA-65 signature (finality authority) is
+/// re-checked inside `ingest_vote`. Dedup is the shared `seen_messages` LRU
+/// upstream. The verdict stays a pure `sm/` function — this handler only routes.
+async fn handle_finality_vote(state: &Arc<AppState>, sender: &str, vote_json: &str) {
+    let vote: crate::sm::finality_vote::Vote = match serde_json::from_str(vote_json) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "◈ [Dispatch] FinalityVote JSON invalide from {}: {}",
+                short(sender, 12),
+                e
+            );
+            return;
+        }
+    };
+    // Snapshot the chain (read lock) so the gadget verifies + weighs against a
+    // consistent on-chain stake state. `ingest_vote` re-derives the pubkey-keyed
+    // stake map from the ledger internally.
+    let ledger = state.node.ledger.read().await;
+    let outcome = {
+        let mut fin = state.node.finality.write().await;
+        // Keep the block tree current so GHOST can weigh votes on real blocks.
+        fin.observe_chain(&ledger);
+        fin.ingest_vote(vote, &ledger)
+    };
+    if !outcome.accepted {
+        log::debug!(
+            "◈ [Dispatch] FinalityVote from {} rejected (forged / non-validator / malformed)",
+            short(sender, 12)
+        );
+        return;
+    }
+    if outcome.finalized {
+        log::info!("◈ [Finality] ✓ certificate finalized a checkpoint (from votes via {})", short(sender, 12));
+    } else if outcome.justified {
+        log::info!("◈ [Finality] ✓ certificate justified a checkpoint (from votes via {})", short(sender, 12));
     }
 }
 

@@ -145,6 +145,11 @@ pub struct WillowNode {
     pub nonce_tracker: Arc<RwLock<NonceTracker>>,
     /// Identité — registre de pseudos uniques `@handle` (adresse de wallet lisible)
     pub usernames: Arc<RwLock<UsernameRegistry>>,
+    /// LIVE-1 — live finality gadget state: the fork-choice latest votes
+    /// (GADGET-5A) plus the justify/finalize state (GADGET-3), fed from gossiped
+    /// `FinalityVote`s. Anchored at the ledger's genesis hash. The verdict stays a
+    /// pure `sm/` function; this store is the IO-layer holder.
+    pub finality: Arc<RwLock<crate::p2p::finality_live::FinalityTracker>>,
     /// Phase 3 + NET-3 — channel sortant priorisé pour les enveloppes gossip.
     /// Quatre lanes (Critical/High/Medium/Low) drainées par ordre de priorité.
     /// Le drain est branché à Iroh dès qu'un endpoint est actif ; sinon il
@@ -201,9 +206,13 @@ impl WillowNode {
         let raw_id = blake3::hash(uuid::Uuid::new_v4().as_bytes());
         let node_id = hex::encode(raw_id.as_bytes());
         let (gossip_tx, gossip_rx) = priority_channel();
+        let ledger = Ledger::new();
+        // LIVE-1: anchor the finality tracker at the chain's genesis checkpoint.
+        let finality =
+            crate::p2p::finality_live::FinalityTracker::new(ledger.genesis_hash());
         Self {
             reputation: Arc::new(RwLock::new(ReputationEngine::new())),
-            ledger: Arc::new(RwLock::new(Ledger::new())),
+            ledger: Arc::new(RwLock::new(ledger)),
             consensus: Arc::new(RwLock::new(ConsensusEngine::new())),
             gossip: Arc::new(RwLock::new(GossipRouter::new())),
             energy_oracle: Arc::new(RwLock::new(EnergyOracle::new())),
@@ -211,6 +220,7 @@ impl WillowNode {
             peer_info: Arc::new(RwLock::new(HashMap::new())),
             nonce_tracker: Arc::new(RwLock::new(NonceTracker::new())),
             usernames: Arc::new(RwLock::new(UsernameRegistry::new())),
+            finality: Arc::new(RwLock::new(finality)),
             gossip_tx,
             gossip_rx: Arc::new(RwLock::new(Some(gossip_rx))),
             gossip_topic_sender: Arc::new(RwLock::new(None)),

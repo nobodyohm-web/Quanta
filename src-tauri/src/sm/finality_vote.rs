@@ -61,7 +61,11 @@ const QUORUM_DEN: u128 = 3;
 /// A finality **vote**: the validator attests a super-majority *link*
 /// `source → target` for `voting_epoch`. A pure value (no clock, no entropy),
 /// signed in ML-DSA-65.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The `serde` derives (LIVE-1) let a vote cross the gossip wire
+/// (`GossipMessage::FinalityVote`); they are on the **data carrier** only —
+/// verification stays a pure function, C1 preserved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Vote {
     /// Source checkpoint (GADGET-1) — the link's tail.
     pub source: Checkpoint,

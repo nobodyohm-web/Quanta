@@ -40,7 +40,14 @@ pub const EPOCH_LENGTH_BLOCKS: u64 = 32; // ADR-009 : défaut réglable (fork-on
 /// `height` is the block's **position** in the chain (genesis = 0), consistent
 /// with how the harness `Safety` invariant indexes blocks (`enumerate()`), not
 /// the `Block::index` field — in a well-formed chain the two coincide.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Ord`/`serde` derives (LIVE-1) are on the **data carrier**, not the verdict
+/// logic: they let a checkpoint be a `BTreeMap` key and cross the gossip wire
+/// (`FinalityVote`) — no clock/entropy/`HashMap`-order enters any verdict, C1
+/// preserved.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct Checkpoint {
     /// Epoch number this checkpoint opens (`height / E`).
     pub epoch: u64,

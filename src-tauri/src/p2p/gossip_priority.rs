@@ -50,7 +50,10 @@ pub fn priority_for(payload: &GossipMessage) -> Priority {
         GossipMessage::Hello { .. }
         | GossipMessage::RequestChain { .. }
         | GossipMessage::ChainSegment { .. }
-        | GossipMessage::NewBlock { .. } => Priority::Critical,
+        | GossipMessage::NewBlock { .. }
+        // LIVE-1: a finality vote is consensus material — it drives fork-choice
+        // and finalization, so it rides the same lane as blocks.
+        | GossipMessage::FinalityVote { .. } => Priority::Critical,
 
         GossipMessage::BroadcastTx { .. } => Priority::High,
 

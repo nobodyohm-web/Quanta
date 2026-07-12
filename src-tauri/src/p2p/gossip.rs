@@ -145,6 +145,19 @@ pub enum GossipMessage {
     PublishUsername {
         record_json: String,
     },
+    /// LIVE-1 — a finality **vote** (attestation) broadcast by a staked validator.
+    /// `vote_json` = a [`crate::sm::finality_vote::Vote`] serialized. The receiver
+    /// re-verifies it (`Vote::verify` against the on-chain stake, GADGET-2) before
+    /// feeding it to the live fork-choice ([`crate::sm::fork_choice::LatestVotes`])
+    /// and, once a ⅔ certificate forms, the finality rule
+    /// ([`crate::sm::finality_rule::FinalityState`], GADGET-3). The gadget's
+    /// verdict stays a **pure function of the votes + on-chain stake** — this
+    /// variant only carries the vote across the wire; the envelope's Ed25519
+    /// signature is transport authentication (unchanged), the vote's own ML-DSA-65
+    /// signature is the finality authority.
+    FinalityVote {
+        vote_json: String,
+    },
 }
 
 /// NET-5: Default the embedded `Hello.version` field for legacy envelopes

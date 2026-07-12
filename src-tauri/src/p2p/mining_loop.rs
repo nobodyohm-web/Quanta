@@ -125,6 +125,14 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
         pos_seal_if_leader(state, &addr, &pk).await;
     }
 
+    // ── 7. LIVE-1: cast a finality vote when the tip is on an epoch boundary ──
+    // A bonded validator attests `last-justified → current-epoch-checkpoint`;
+    // the vote is gossiped so peers' fork-choice + finality can consume it. A
+    // non-validator / non-boundary tick produces nothing. Additive: until LIVE-2
+    // wires the head into proposal, votes only *observe* finality (no chain
+    // divergence for peers that ignore them).
+    cast_finality_vote_if_validator(state, &pk).await;
+
     let elapsed = tick_start.elapsed();
     if elapsed.as_millis() > SLOW_TICK_MS {
         log::warn!(
@@ -181,6 +189,41 @@ async fn broadcast_mining_tx(
 /// PQ-MIG-3B: `addr` (the ML-DSA **address**) is the block's miner-reward target
 /// (value identity); `pk` (the Ed25519 **transport** key) signs the carrying
 /// gossip envelope.
+/// LIVE-1 — cast this node's finality vote if it is a bonded validator sitting on
+/// an epoch boundary. Builds the honest vote (last-justified → current-epoch
+/// checkpoint) via the live gadget, signs it with the ML-DSA authority key, and
+/// gossips it as `FinalityVote`. Also ingests it locally (a validator counts its
+/// own attestation). `pk` (Ed25519) signs the carrying envelope; the vote itself
+/// is ML-DSA-signed. No-ops when there is nothing honest to attest.
+async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
+    let vote = {
+        let ledger = state.node.ledger.read().await;
+        let mut fin = state.node.finality.write().await;
+        // Keep the block tree current before reading state/anchors.
+        fin.observe_chain(&ledger);
+        let crypto = state.crypto.lock().await;
+        p2p::finality_live::build_vote_to_cast(&ledger, &fin, &crypto)
+    };
+    let Some(vote) = vote else { return };
+
+    // Ingest locally first (self-attestation counts toward the certificate).
+    {
+        let ledger = state.node.ledger.read().await;
+        let mut fin = state.node.finality.write().await;
+        fin.ingest_vote(vote.clone(), &ledger);
+    }
+
+    let Ok(vote_json) = serde_json::to_string(&vote) else {
+        return;
+    };
+    let msg = p2p::gossip::GossipMessage::FinalityVote { vote_json };
+    if let Some(env) = sign_and_wrap(state, pk, msg).await {
+        state.node.gossip.write().await.mark_seen(&env.id);
+        let _ = state.node.gossip_tx.send(env);
+        log::info!("◈ [Finality] cast vote for epoch {}", vote.target.epoch);
+    }
+}
+
 async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
     let sealed = state.node.ledger.write().await.seal_if_pending(addr, 0.0);
     if let Some(b) = sealed {

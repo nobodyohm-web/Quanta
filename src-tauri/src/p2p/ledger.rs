@@ -700,6 +700,52 @@ impl Ledger {
             .collect()
     }
 
+    /// LIVE-1 — the on-chain stake snapshot **re-keyed by the validator's ML-DSA
+    /// public key** (hex), the identity a finality [`Vote`](crate::sm::finality_vote::Vote)
+    /// carries. `validator_stakes()` is keyed by the ML-DSA **address**
+    /// `BLAKE3(ADDR_DOMAIN ‖ pk)`; a finality vote's signature is verified against
+    /// the **public key** itself, so weighing votes needs the map keyed that way.
+    ///
+    /// The bridge is a **pure function of the chain**: every `Stake` tx reveals the
+    /// staker's `pq_public_key` (`verify_tx` requires it to hash to `from`), so
+    /// scanning sealed blocks yields, for every currently-bonded validator, the
+    /// `pk → stake` pair — **complete** (each staker revealed its key when it
+    /// staked) and **identical on every node** (same chain ⇒ same map). The
+    /// address→pk binding is unforgeable (BLAKE3), so no attacker can map a
+    /// foreign account's stake onto its own key. Read-only; touches no mutation
+    /// path, so conservation/coverage are unaffected. Non-Stake txs and the
+    /// synthetic mint are skipped.
+    pub fn validator_stakes_by_pubkey(&self) -> HashMap<String, u64> {
+        let by_addr = self.validator_stakes();
+        let mut out = HashMap::new();
+        for block in &self.chain {
+            for tx in &block.transactions {
+                if tx.tx_type != TxType::Stake {
+                    continue;
+                }
+                let Some(pk) = tx.pq_public_key.as_ref() else {
+                    continue;
+                };
+                if let Some(&stake) = by_addr.get(&tx.from) {
+                    // The address→pk binding is graven by the tx (verify_tx), so
+                    // this maps each bonded address to the exact key it committed to.
+                    out.insert(pk.clone(), stake);
+                }
+            }
+        }
+        out
+    }
+
+    /// LIVE-1 — the genesis block hash (the finality gadget's epoch-0 checkpoint,
+    /// justified and finalized by definition). Always present: the chain ships
+    /// with genesis (PQ-MIG-5).
+    pub fn genesis_hash(&self) -> String {
+        self.chain
+            .first()
+            .map(|b| b.hash.clone())
+            .unwrap_or_default()
+    }
+
     // ── B2: Nonce management ────────────────────────────────────────────
 
     /// Get the next expected nonce for an account.
