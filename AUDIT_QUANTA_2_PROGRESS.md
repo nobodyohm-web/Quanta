@@ -3784,3 +3784,41 @@ finalité et le slashing tournent sur le réseau réel, plus seulement en simula
 validateur qui équivoque perd son enjeu pour de vrai, et un proposeur malveillant ne peut pas punir
 un validateur innocent (`verify_block_slashes` re-vérifié sur chaque nœud). Commit = **manuel,
 Alexandre**.
+
+---
+
+## Revue adversariale LIVE-2/LIVE-3 — 4 failles trouvées & corrigées (2026-07-12)
+
+Avant de livrer du code qui **détruit de l'enjeu** (LIVE-3), une **revue adversariale
+indépendante** (agent dédié, mission : « casse la conservation / forge un slash / brise le
+déterminisme ») a été passée sur les chemins monétaires. Elle a trouvé **2 CRITICAL + 2 HIGH**
+réelles, toutes corrigées avec un test de régression encodant l'attaque (commit `39b9cff`) :
+
+- **CRITICAL-1 — multi-slash / slash+unstake cassaient la conservation.** `invalid_slash_indices`
+  validait chaque `Slash` **indépendamment** contre le même enjeu pré-bloc : un leader pouvait
+  s'auto-équivoquer une fois puis **dupliquer** la tx `Slash` K fois (ou coupler un `Slash` avec
+  l'`Unstake` de l'offenseur) → le sink STAKE débité K× pendant que `staked` sature à 0 → rupture
+  **permanente** de conservation (sink négatif masqué par `.max(0)`). Corrigé : passe **séquentielle**
+  — au plus **un slash par offenseur par bloc**, et un offenseur slashé ne peut pas aussi Stake/Unstake
+  dans le même bloc. Tests : `live3_duplicate_slash_*`, `live3_slash_with_concurrent_unstake_*`.
+- **CRITICAL-2 — `rebuild_cache` (restore) mal-comptait le `Slash` → divergence C1.** Au restore
+  (snapshot toutes les ~30 s / reprise sur crash), un `Slash` débitait le **spendable** de
+  l'offenseur au lieu du **sink STAKE** → un nœud redémarré divergeait d'un nœud en vif (et
+  conservation cassée si spendable < montant). Corrigé via un helper `replay_cache_effect` partagé
+  qui reflète `cache_apply_tx`. Test : `live3_slash_survives_snapshot_restore_identically`.
+- **HIGH-3 — inversion d'ordre de locks → deadlock possible.** `cast_finality_vote_if_validator`
+  tenait ledger→finality→crypto alors que `transfer` tient crypto→ledger (cycle croisé). Corrigé :
+  `crypto` pris **en premier** (ordre documenté crypto→ledger→finality→gossip).
+- **HIGH-4 — plancher de finalité agnostique au hash.** `set_finalized_floor` gelait par index seul :
+  un nœud sur un bloc `Y@H` pendant que le gadget finalisait `X@H` gelait `Y` et rejetait `X`
+  finalisé **pour toujours**. Corrigé : le plancher n'avance que si **notre** bloc à cette hauteur
+  correspond au **hash** du checkpoint finalisé (sinon warning + le nœud doit synchroniser la branche
+  finalisée). Test : `live2_finalized_floor_is_monotonic_hash_checked_and_bounded`.
+- **Durcissement LOW** : le hash de la tx `Slash` **et** la feuille de Merkle lient désormais la
+  **preuve complète** (plus un préfixe 32 chars) — un relais ne peut pas échanger la preuve sans
+  changer le hash du bloc ; `slash_amount_for` clampe à l'enjeu (défense pour une future fraction > 1).
+
+**Portes après corrections** : 391 tests / 0 échec ; C1 128-runs byte-identique ; sweep multi-seed
+conservation + émission verts ; clippy `--all-targets` propre. **Reste (suivi)** : le harnais DST
+(`sim.rs`) ne génère pas encore de tx `Slash` — les attaques ci-dessus sont couvertes par des tests
+unitaires ciblés ; ajouter un `Move::Slash` au sweep donnerait une couverture fuzz continue.
