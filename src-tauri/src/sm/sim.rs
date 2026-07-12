@@ -588,7 +588,7 @@ impl Sim {
     fn run_checked(&mut self, max_steps: u64) -> Result<(), Violation> {
         self.run_checked_steps(max_steps)
             .map(|_| ())
-            .map_err(|(_, v)| v)
+            .map_err(|e| e.1)
     }
 
     /// As [`Sim::run_checked`], but returns the **number of event steps
@@ -597,8 +597,10 @@ impl Sim {
     /// sums these across a move timeline to report *where* a sweep failure first
     /// appeared (spec §4: "enregistre le premier pas fautif, pas seulement
     /// l'état final"). `run_checked` is the value-only wrapper, so existing
-    /// callers are unchanged.
-    fn run_checked_steps(&mut self, max_steps: u64) -> Result<u64, (u64, Violation)> {
+    /// callers are unchanged. The `Err` is boxed: `Violation` carries full
+    /// snapshots, large enough to trip `clippy::result_large_err` under the CI
+    /// `--all-targets -D warnings` gate.
+    fn run_checked_steps(&mut self, max_steps: u64) -> Result<u64, Box<(u64, Violation)>> {
         let mut steps = 0;
         while let Some(Reverse(s)) = self.queue.pop() {
             if steps >= max_steps {
@@ -616,7 +618,7 @@ impl Sim {
             let effects = node.handle(s.event, &mut self.rng);
             self.route(s.node, s.time_ms, effects);
             if let Err(v) = self.check_invariants() {
-                return Err((steps, v));
+                return Err(Box::new((steps, v)));
             }
         }
         Ok(steps)
@@ -2895,7 +2897,8 @@ fn run_plan(plan: &ScenarioPlan) -> (Sim, Option<Violation>, Option<u64>) {
                 let run_budget = (*budget).min(remaining);
                 match sim.run_checked_steps(run_budget) {
                     Ok(ran) => steps += ran,
-                    Err((ran, v)) => {
+                    Err(e) => {
+                        let (ran, v) = *e;
                         steps += ran;
                         violation = Some(v);
                         first_faulty_step = Some(steps);
