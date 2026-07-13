@@ -164,3 +164,22 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
   note honnête in-app (`wallet.recv.interop`) — ne jamais promettre l'envoi vers Bitcoin.
 - **Nav** : vue `dashboard` = écran **Minage** (label i18n renommé, icône éclair).
 - i18n : toute nouvelle string → 6 langues dans `i18n.generated.ts` (EX_*), sections fin de dict.
+
+## Sécurité v3.4 + 3D (2026-07-13)
+- **Touch ID (biometric.rs)** : modèle honnête — KEK 32 o aléatoire dans le Keychain
+  (`AccessControlOptions::BIOMETRY_CURRENT_SET` via security-framework 3) ; lecture =
+  prompt système ; le KEK enveloppe les clés **dérivées** (`PQVault::derive_*_vault_key`,
+  `unlock_*_with_key`) ; JAMAIS le mot de passe. Probe dispo = add/delete d'un item jetable
+  (l'add échoue sans biométrie enrôlée). Appels Keychain BLOQUANTS → `spawn_blocking`.
+- `UnlockGuard` (lib.rs) partagé par les DEUX chemins de déverrouillage — toute nouvelle
+  commande d'unlock doit appeler check/on_failure/on_success.
+- **Événements UI** : `quanta://mined` (mining_loop), `quanta://block-sealed` (seal local
+  `mine:true` + NewBlock distant `mine:false` — PAS les ChainSegment, sinon tempête au sync),
+  `quanta://tx-applied` (dispatcher, sans lock crypto — le front filtre par adresse).
+- **three.js** : scènes dans `src/lib/three/` sur le shell `scene.ts` (pause hors-viewport,
+  reduced-motion = frames statiques re-rendues sur événement, dispose systématique).
+  Piège TS : le narrowing ne pénètre pas les `function` hoistées → alias `const sh = shell`.
+  Piège Svelte 5 (récurrent) : props lues dans l'$effect de création → `untrack`, suivi
+  réactif dans un `$effect.root` interne.
+- Wallet garde le `Torus3D` sans dépendance ; Dashboard = `MiningScene` ; Réseau = `ChainScene`
+  (défaut 3D). `Blockchain3D.svelte` supprimé.

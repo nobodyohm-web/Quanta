@@ -1,6 +1,6 @@
 [package]
 name = "quanta-protocol"
-version = "3.3.0"
+version = "3.4.0"
 description = "Quanta Protocol — sovereign peer-to-peer web and value network (coin: QUANTA)"
 authors = ["Quanta Protocol Contributors"]
 edition = "2021"
