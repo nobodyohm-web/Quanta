@@ -996,7 +996,25 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
     // nonce only when the tx is actually applied.
     if from != "NETWORK" && from != "ESCROW" {
         let mut ledger = state.node.ledger.write().await;
-        let _applied = ledger.apply_verified_remote_tx(vtx);
+        let applied = ledger.apply_verified_remote_tx(vtx);
+        drop(ledger);
+        // Live UX: surface freshly-applied remote txs to the frontend (the UI
+        // filters for its own address — no crypto lock needed here, which
+        // keeps the lock ordering untouched). Best-effort.
+        if applied {
+            if let Some(handle) = state.app_handle.read().await.as_ref() {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "quanta://tx-applied",
+                    serde_json::json!({
+                        "from": from,
+                        "to": to,
+                        "amount": amount as f64 / crate::p2p::ledger::MICRO as f64,
+                        "tx_type": format!("{:?}", tx_type),
+                    }),
+                );
+            }
+        }
     }
 
     log::debug!(
@@ -1087,6 +1105,19 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
                 "◈ [Dispatch] ✓ Accepted remote block from {}",
                 short(sender, 12)
             );
+            drop(ledger);
+            // Live UX: remote block landed — pulse the 3D scenes.
+            if let Some(handle) = state.app_handle.read().await.as_ref() {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "quanta://block-sealed",
+                    serde_json::json!({
+                        "index": block.index,
+                        "txs": block.transactions.len(),
+                        "mine": false,
+                    }),
+                );
+            }
             // CRIT-B: Increment validated block counter for Shapley distribution
             state
                 .node
@@ -1475,6 +1506,7 @@ mod tests {
             crypto: tokio::sync::Mutex::new(CryptoEngine::new()),
             db: tokio::sync::Mutex::new(None),
             node: crate::p2p::willow_node::WillowNode::new(),
+            unlock_guard: crate::UnlockGuard::default(),
             display_name: tokio::sync::RwLock::new(None),
             app_handle: tokio::sync::RwLock::new(None),
         })

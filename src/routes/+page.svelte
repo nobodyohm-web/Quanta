@@ -8,6 +8,7 @@
   import Explorer from "$lib/Explorer.svelte";
   import Contacts from "$lib/Contacts.svelte";
   import CommandPalette from "$lib/CommandPalette.svelte";
+  import Toasts from "$lib/Toasts.svelte";
   import Welcome from "$lib/Welcome.svelte";
   import Aurora from "$lib/Aurora.svelte";
   import LanguageSelect from "$lib/LanguageSelect.svelte";
@@ -35,6 +36,12 @@
   let cmdOpen = $state(false);
   let helpOpen = $state(false);
   let profilePk = $state<string | null>(null);
+  // Touch ID quick unlock (macOS) — the OS gates the Keychain KEK by biometry.
+  let bioEnabled = $state(false);
+  let bioBusy = $state(false);
+  let bioAutoTried = false;
+  // ML-DSA value address of the unlocked wallet — feeds the live toasts.
+  let myAddr = $state("");
 
   // ─── Pseudo unique (@handle) — adresse de wallet lisible ──────
   let usernameInput = $state("");
@@ -96,9 +103,44 @@
       await new Promise(r => setTimeout(r, 400));
       const has = await invoke<boolean>("check_identity");
       step = has ? "unlock" : "welcome";
+      if (has) {
+        try {
+          const st = await invoke<{ supported: boolean; enabled: boolean }>("biometric_status");
+          bioEnabled = st.supported && st.enabled;
+        } catch { /* biometry optional */ }
+      }
     } catch { setTimeout(init, 800); return; }
     loading = false;
   }
+
+  async function unlockBio() {
+    if (bioBusy) return;
+    bioBusy = true; err = "";
+    try {
+      const id = await invoke<{ public_key_hex: string }>("unlock_biometric");
+      pk = id.public_key_hex;
+      await proceedAfterAuth();
+    } catch (e) {
+      // Cancel/backoff → stay on the password form, show the reason quietly.
+      const msg = String(e);
+      if (!msg.includes("refusé")) err = msg.replace(/^Error: /, "");
+    } finally { bioBusy = false; }
+  }
+
+  // Auto-offer Touch ID once at app start (1Password-style). Never re-fires
+  // after an auto-lock — the user explicitly clicks the button then.
+  $effect(() => {
+    if (!loading && step === "unlock" && bioEnabled && !bioAutoTried && !ready) {
+      bioAutoTried = true;
+      unlockBio();
+    }
+  });
+
+  // Load the value address once unlocked — feeds the live toasts layer.
+  $effect(() => {
+    if (!ready) return;
+    invoke<string>("get_public_key").then((a) => { myAddr = a; }).catch(() => {});
+  });
 
   async function create() {
     err = "";
@@ -341,6 +383,17 @@
         </div>
       {:else}
         <div class="setup-form">
+          {#if bioEnabled}
+            <button class="bio-btn" onclick={unlockBio} disabled={bioBusy}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <path d="M12 11v3.5M8.5 9.5a3.5 3.5 0 017 0v4a3.5 3.5 0 01-.6 2"/>
+                <path d="M5.5 8a6.5 6.5 0 0113 0v5a6.5 6.5 0 01-1.4 4"/>
+                <path d="M8.6 18.2A3.5 3.5 0 018.5 17v-2"/>
+              </svg>
+              {bioBusy ? t('auth.bioBusy') : t('auth.bioUnlock')}
+            </button>
+            <div class="bio-sep"><span>{t('auth.bioOr')}</span></div>
+          {/if}
           <div class="fg">
             <label for="unlock-pass">{t('auth.password')}</label>
             <input class="input" id="unlock-pass" type="password" bind:value={pass} placeholder={t('auth.passwordPh')}
@@ -375,6 +428,7 @@
   </div>
   <CommandPalette isOpen={cmdOpen} onClose={() => cmdOpen = false} onCommand={handleCmd} />
   <HelpModal isOpen={helpOpen} onClose={() => helpOpen = false} />
+  <Toasts myAddress={myAddr} />
 {/if}
 
 <style>
@@ -475,6 +529,31 @@
     color: var(--color-text-0);
     letter-spacing: 0.04em; line-height: 1.8;
   }
+  /* Touch ID — the fast path, visually first-class on the unlock card. */
+  .bio-btn {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    width: 100%; padding: 13px;
+    background: var(--color-bg-1);
+    border: 1px solid var(--color-border-hover);
+    border-radius: var(--radius);
+    color: var(--color-text-0);
+    font-family: inherit; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+  }
+  .bio-btn:hover:not(:disabled) { border-color: var(--color-accent); background: var(--cyan-dim); }
+  .bio-btn:active:not(:disabled) { transform: scale(0.99); }
+  .bio-btn:disabled { opacity: 0.55; cursor: default; }
+  .bio-btn svg { color: var(--color-accent); }
+  .bio-sep {
+    display: flex; align-items: center; gap: 12px;
+    color: var(--color-text-3); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .bio-sep::before, .bio-sep::after {
+    content: ""; flex: 1; height: 1px; background: var(--color-border);
+  }
+
   .recovery-warn {
     display: flex; align-items: flex-start; gap: 10px;
     font-size: 12px; color: var(--color-text-1);

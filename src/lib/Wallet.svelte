@@ -5,7 +5,9 @@
   import Torus3D from "./Torus3D.svelte";
   import Qr from "./Qr.svelte";
   import EmptyState from "./EmptyState.svelte";
+  import { untrack } from "svelte";
   import { t, type TKey } from "./i18n.svelte";
+  import { getPrefs, setPrefs } from "./prefs";
   import {
     parsePaymentUri, formatPaymentUri, splitTransfer, fmtQ, shortAddr, blocksToEta, isAddress,
   } from "./quanta";
@@ -79,6 +81,36 @@
   let filter = $state<Filter>("all");
   let page = $state(0);
   function setFilter(f: Filter) { filter = f; page = 0; }
+
+  // ── Mode privé : montants floutés jusqu'au survol (regard par-dessus l'épaule).
+  let privacy = $state(getPrefs().privacy);
+  function togglePrivacy() {
+    privacy = !privacy;
+    setPrefs({ ...getPrefs(), privacy });
+  }
+
+  // ── Solde animé : le montant COMPTE jusqu'à sa nouvelle valeur (ticker).
+  let shownBalance = $state(0);
+  $effect(() => {
+    const target = ov?.spendable ?? 0;
+    const start = untrack(() => shownBalance);
+    if (Math.abs(target - start) < 1e-9) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      shownBalance = target;
+      return;
+    }
+    const t0 = performance.now();
+    const dur = 750;
+    let raf = 0;
+    const step = (now: number) => {
+      const p = Math.min(1, (now - t0) / dur);
+      const e = 1 - Math.pow(1 - p, 3);
+      shownBalance = start + (target - start) * e;
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  });
 
   $effect(() => {
     refresh();
@@ -335,9 +367,19 @@
       <div class="skeleton sk-unit"></div>
     {:else}
       <div class="w-coin3d"><Torus3D height={120} {peers} {pulse} /></div>
-      <div class="w-balance mono">{(ov?.spendable ?? 0).toFixed(2)}</div>
+      <div class="w-bal-row">
+        <div class="w-balance mono" class:amt-private={privacy}>{shownBalance.toFixed(2)}</div>
+        <button class="w-eye" onclick={togglePrivacy}
+          aria-label={t('wallet.privacyToggle')} title={t('wallet.privacyToggle')}>
+          {#if privacy}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l18 18M10.6 10.7a2.8 2.8 0 003.9 3.9M6.6 6.7C4.3 8.1 2.7 10.2 2 12c1.6 4 5.4 7 10 7 1.9 0 3.7-.5 5.2-1.4M12 5c4.6 0 8.4 3 10 7-.4 1.1-1.1 2.2-2 3.2"/></svg>
+          {:else}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 12c1.6-4 5.4-7 10-7s8.4 3 10 7c-1.6 4-5.4 7-10 7S3.6 16 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+          {/if}
+        </button>
+      </div>
       <div class="w-unit">QUANTA</div>
-      <div class="w-meta">
+      <div class="w-meta" class:amt-private={privacy}>
         <span class="w-pos">+{(ov?.earned ?? 0).toFixed(2)} {t('wallet.earned')}</span>
         <span class="w-sep">·</span>
         <span>{(ov?.staked ?? 0).toFixed(2)} {t('wallet.stakedShort')}</span>
@@ -560,22 +602,22 @@
       <div class="w-grid">
         <div class="w-cell c-green">
           <div class="w-cell-k">{t('wallet.available')}</div>
-          <div class="w-cell-v mono">{(ov?.spendable ?? 0).toFixed(2)}</div>
+          <div class="w-cell-v mono" class:amt-private={privacy}>{(ov?.spendable ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.availableSub')}</div>
         </div>
         <div class="w-cell c-violet">
           <div class="w-cell-k">{t('wallet.inStaking')}</div>
-          <div class="w-cell-v mono">{(ov?.staked ?? 0).toFixed(2)}</div>
+          <div class="w-cell-v mono" class:amt-private={privacy}>{(ov?.staked ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.inStakingSub')}</div>
         </div>
         <div class="w-cell c-amber">
           <div class="w-cell-k">{t('wallet.unbonding')}</div>
-          <div class="w-cell-v mono">{(ov?.unbonding ?? 0).toFixed(2)}</div>
+          <div class="w-cell-v mono" class:amt-private={privacy}>{(ov?.unbonding ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.unbondingSub')}</div>
         </div>
         <div class="w-cell c-teal">
           <div class="w-cell-k">{t('wallet.forged')}</div>
-          <div class="w-cell-v mono">+{(ov?.earned ?? 0).toFixed(2)}</div>
+          <div class="w-cell-v mono" class:amt-private={privacy}>+{(ov?.earned ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.forgedSub')}</div>
         </div>
       </div>
@@ -700,6 +742,18 @@
   .w-sep { opacity: 0.5; }
   .w-pos { color: var(--quanta-accent); }
   .w-coin3d { width: 100%; max-width: 340px; margin-bottom: 4px; }
+  .w-bal-row { display: flex; align-items: center; gap: 10px; }
+  .w-eye {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 8px;
+    background: none; border: none; cursor: pointer;
+    color: var(--color-text-3);
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  .w-eye:hover { color: var(--color-text-1); background: var(--color-bg-2); }
+  /* Mode privé : flouté au repos, révélé au survol — le regard du propriétaire. */
+  .amt-private { filter: blur(10px); transition: filter 0.2s ease; }
+  .amt-private:hover { filter: none; }
 
   .sk-bal  { width: 180px; height: 54px; border-radius: var(--radius-sm); }
   .sk-unit { width: 48px; height: 18px; border-radius: 4px; margin-top: 8px; }

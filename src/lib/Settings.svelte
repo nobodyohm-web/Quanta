@@ -178,6 +178,13 @@
         <button class="seg-btn" class:active={prefs.theme === "auto"} onclick={() => setTheme("auto")}>{t('set.themeAuto')}</button>
       </div>
     </div>
+    <div class="set-row">
+      <span class="set-label">{t('set.sounds')}</span>
+      <div class="seg">
+        <button class="seg-btn" class:active={prefs.sound} onclick={() => prefs = { ...prefs, sound: true }}>{t('set.soundsOn')}</button>
+        <button class="seg-btn" class:active={!prefs.sound} onclick={() => prefs = { ...prefs, sound: false }}>{t('set.soundsOff')}</button>
+      </div>
+    </div>
   </section>
 
   <!-- Sécurité -->

@@ -48,6 +48,11 @@ export const EX_EN = {
   "tx.Slash": "Slash", "time.today": "Today", "time.yesterday": "Yesterday",
   "wallet.err.bitcoinAddress": "This looks like a Bitcoin address. QUANTA lives on its own network — coins sent to Bitcoin (BlueWallet, Electrum…) would be lost forever. Ask for the person's @username or their quanta: link instead.",
   "help.start_li5": "<b>One network only</b> — QUANTA moves between Quanta wallets exclusively: never to Bitcoin/BlueWallet/Electrum. The QR codes and quanta: links merely follow the same familiar conventions.",
+  "auth.bioUnlock": "Unlock with Touch ID", "auth.bioBusy": "Touch ID…", "auth.bioOr": "or with your password",
+  "pf.bioUnavailable": "Not available on this Mac (no enrolled Touch ID).", "pf.bioEnable": "Enable", "pf.bioDisable": "Disable", "pf.bioConfirm": "Confirm your password to enable Touch ID. A random key is stored in the macOS Keychain, gated by your fingerprint — the password itself is never stored.", "pf.bioActivate": "Activate", "pf.bioEnabled": "Touch ID enabled — the fingerprint opens your wallet, the password remains the fallback.",
+  "toast.mined": "forged by your node", "toast.sealedTpl": "Block #{n} sealed · {t} tx", "toast.sealedSub": "you were the elected leader", "toast.receivedFrom": "received from",
+  "wallet.privacyToggle": "Hide amounts (reveal on hover)",
+  "set.sounds": "Sounds", "set.soundsOn": "On", "set.soundsOff": "Off",
 } as const;
 
 type EKey = keyof typeof EX_EN;
@@ -83,6 +88,11 @@ export const EX_FR: Dict = {
   "tx.Slash": "Slash", "time.today": "Aujourd'hui", "time.yesterday": "Hier",
   "wallet.err.bitcoinAddress": "Ceci ressemble à une adresse Bitcoin. QUANTA vit sur son propre réseau — des pièces envoyées vers Bitcoin (BlueWallet, Electrum…) seraient perdues à jamais. Demandez plutôt le @pseudo de la personne ou son lien quanta:.",
   "help.start_li5": "<b>Un seul réseau</b> — QUANTA ne circule qu'entre wallets Quanta : jamais vers Bitcoin/BlueWallet/Electrum. Les QR et liens quanta: en suivent simplement les conventions familières.",
+  "auth.bioUnlock": "Déverrouiller avec Touch ID", "auth.bioBusy": "Touch ID…", "auth.bioOr": "ou avec votre mot de passe",
+  "pf.bioUnavailable": "Indisponible sur ce Mac (pas de Touch ID enrôlé).", "pf.bioEnable": "Activer", "pf.bioDisable": "Désactiver", "pf.bioConfirm": "Confirmez votre mot de passe pour activer Touch ID. Une clé aléatoire est stockée dans le trousseau macOS, verrouillée par votre empreinte — le mot de passe lui-même n'est jamais stocké.", "pf.bioActivate": "Activer", "pf.bioEnabled": "Touch ID activé — l'empreinte ouvre votre wallet, le mot de passe reste la solution de repli.",
+  "toast.mined": "forgé par votre nœud", "toast.sealedTpl": "Bloc #{n} scellé · {t} tx", "toast.sealedSub": "vous étiez le leader élu", "toast.receivedFrom": "reçu de",
+  "wallet.privacyToggle": "Masquer les montants (révélés au survol)",
+  "set.sounds": "Sons", "set.soundsOn": "Activés", "set.soundsOff": "Coupés",
 };
 
 export const EX_ES: Dict = {
@@ -115,6 +125,11 @@ export const EX_ES: Dict = {
   "tx.Slash": "Slash", "time.today": "Hoy", "time.yesterday": "Ayer",
   "wallet.err.bitcoinAddress": "Esto parece una dirección Bitcoin. QUANTA vive en su propia red — monedas enviadas a Bitcoin (BlueWallet, Electrum…) se perderían para siempre. Pide mejor el @usuario de la persona o su enlace quanta:.",
   "help.start_li5": "<b>Una sola red</b> — QUANTA solo circula entre carteras Quanta: nunca hacia Bitcoin/BlueWallet/Electrum. Los QR y enlaces quanta: solo siguen sus convenciones familiares.",
+  "auth.bioUnlock": "Desbloquear con Touch ID", "auth.bioBusy": "Touch ID…", "auth.bioOr": "o con tu contraseña",
+  "pf.bioUnavailable": "No disponible en este Mac (sin Touch ID registrado).", "pf.bioEnable": "Activar", "pf.bioDisable": "Desactivar", "pf.bioConfirm": "Confirma tu contraseña para activar Touch ID. Una clave aleatoria se guarda en el Llavero de macOS, protegida por tu huella — la contraseña nunca se almacena.", "pf.bioActivate": "Activar", "pf.bioEnabled": "Touch ID activado — la huella abre tu cartera, la contraseña sigue siendo el respaldo.",
+  "toast.mined": "forjado por tu nodo", "toast.sealedTpl": "Bloque #{n} sellado · {t} tx", "toast.sealedSub": "fuiste el líder elegido", "toast.receivedFrom": "recibido de",
+  "wallet.privacyToggle": "Ocultar importes (se revelan al pasar el cursor)",
+  "set.sounds": "Sonidos", "set.soundsOn": "Activados", "set.soundsOff": "Apagados",
 };
 
 export const EX_RU: Dict = {
@@ -147,6 +162,11 @@ export const EX_RU: Dict = {
   "tx.Slash": "Слэш", "time.today": "Сегодня", "time.yesterday": "Вчера",
   "wallet.err.bitcoinAddress": "Это похоже на биткоин-адрес. QUANTA живёт в собственной сети — монеты, отправленные в Bitcoin (BlueWallet, Electrum…), будут потеряны навсегда. Попросите @имя человека или его ссылку quanta:.",
   "help.start_li5": "<b>Только одна сеть</b> — QUANTA ходит исключительно между кошельками Quanta: никогда в Bitcoin/BlueWallet/Electrum. QR-коды и ссылки quanta: лишь следуют знакомым соглашениям.",
+  "auth.bioUnlock": "Разблокировать по Touch ID", "auth.bioBusy": "Touch ID…", "auth.bioOr": "или паролем",
+  "pf.bioUnavailable": "Недоступно на этом Mac (Touch ID не настроен).", "pf.bioEnable": "Включить", "pf.bioDisable": "Отключить", "pf.bioConfirm": "Подтвердите пароль, чтобы включить Touch ID. Случайный ключ хранится в Связке ключей macOS под защитой отпечатка — сам пароль никогда не сохраняется.", "pf.bioActivate": "Активировать", "pf.bioEnabled": "Touch ID включён — отпечаток открывает кошелёк, пароль остаётся запасным входом.",
+  "toast.mined": "выковано вашим узлом", "toast.sealedTpl": "Блок #{n} запечатан · {t} tx", "toast.sealedSub": "вы были избранным лидером", "toast.receivedFrom": "получено от",
+  "wallet.privacyToggle": "Скрыть суммы (показываются при наведении)",
+  "set.sounds": "Звуки", "set.soundsOn": "Вкл", "set.soundsOff": "Выкл",
 };
 
 export const EX_ZH: Dict = {
@@ -179,6 +199,11 @@ export const EX_ZH: Dict = {
   "tx.Slash": "罚没", "time.today": "今天", "time.yesterday": "昨天",
   "wallet.err.bitcoinAddress": "这看起来是比特币地址。QUANTA 运行在自己的网络上——发往比特币（BlueWallet、Electrum…）的币将永久丢失。请改为索要对方的 @用户名或 quanta: 链接。",
   "help.start_li5": "<b>只有一个网络</b>——QUANTA 只在 Quanta 钱包之间流通：绝不通向 Bitcoin/BlueWallet/Electrum。二维码与 quanta: 链接只是沿用了熟悉的约定。",
+  "auth.bioUnlock": "使用触控 ID 解锁", "auth.bioBusy": "触控 ID…", "auth.bioOr": "或使用密码",
+  "pf.bioUnavailable": "此 Mac 不可用（未注册触控 ID）。", "pf.bioEnable": "启用", "pf.bioDisable": "停用", "pf.bioConfirm": "确认密码以启用触控 ID。随机密钥存放在 macOS 钥匙串中，由你的指纹守护——密码本身绝不存储。", "pf.bioActivate": "启用", "pf.bioEnabled": "触控 ID 已启用——指纹打开钱包，密码仍是后备方式。",
+  "toast.mined": "由你的节点铸造", "toast.sealedTpl": "区块 #{n} 已封存 · {t} 笔交易", "toast.sealedSub": "你是当选的领导者", "toast.receivedFrom": "收到自",
+  "wallet.privacyToggle": "隐藏金额（悬停显示）",
+  "set.sounds": "音效", "set.soundsOn": "开", "set.soundsOff": "关",
 };
 
 export const EX_JA: Dict = {
@@ -211,4 +236,9 @@ export const EX_JA: Dict = {
   "tx.Slash": "スラッシュ", "time.today": "今日", "time.yesterday": "昨日",
   "wallet.err.bitcoinAddress": "これはビットコインのアドレスのようです。QUANTA は独自のネットワーク上にあります——Bitcoin（BlueWallet、Electrum…）へ送られたコインは永遠に失われます。相手の @ユーザー名か quanta: リンクを聞いてください。",
   "help.start_li5": "<b>ネットワークはひとつだけ</b>——QUANTA は Quanta ウォレット間だけを移動します：Bitcoin/BlueWallet/Electrum へは決して送れません。QR と quanta: リンクは馴染みある流儀に倣っているだけです。",
+  "auth.bioUnlock": "Touch ID でロック解除", "auth.bioBusy": "Touch ID…", "auth.bioOr": "またはパスワードで",
+  "pf.bioUnavailable": "この Mac では利用できません（Touch ID 未登録）。", "pf.bioEnable": "有効にする", "pf.bioDisable": "無効にする", "pf.bioConfirm": "Touch ID を有効にするにはパスワードを確認してください。ランダムな鍵が macOS キーチェーンに指紋で保護されて保存されます——パスワード自体は決して保存されません。", "pf.bioActivate": "有効化", "pf.bioEnabled": "Touch ID 有効——指紋でウォレットが開き、パスワードは予備手段として残ります。",
+  "toast.mined": "あなたのノードが鋳造", "toast.sealedTpl": "ブロック #{n} 封印 · {t} tx", "toast.sealedSub": "あなたが選ばれたリーダーでした", "toast.receivedFrom": "受信元",
+  "wallet.privacyToggle": "金額を隠す（ホバーで表示）",
+  "set.sounds": "サウンド", "set.soundsOn": "オン", "set.soundsOff": "オフ",
 };

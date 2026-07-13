@@ -109,6 +109,18 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
     if uqta_mined > 0 {
         state.node.consensus.write().await
             .ledger.credit("network", &addr, uqta_mined);
+        // Live UX: tell the frontend a reward just landed (toast + 3D surge).
+        // Best-effort — nobody listening is fine.
+        if let Some(handle) = state.app_handle.read().await.as_ref() {
+            use tauri::Emitter;
+            let _ = handle.emit(
+                "quanta://mined",
+                serde_json::json!({
+                    "amount": uqta_mined as f64 / p2p::ledger::MICRO as f64,
+                    "kwh": kwh,
+                }),
+            );
+        }
     }
 
     // ── 5. Broadcast mining TX (uses captured tx, no ledger re-read) ──
@@ -241,6 +253,18 @@ async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
     let sealed = state.node.ledger.write().await.seal_if_pending(addr, 0.0);
     if let Some(b) = sealed {
         log::info!("◈ [Ledger] Block #{} sealed ({} tx)", b.index, b.transactions.len());
+        // Live UX: block-seal pulse for the 3D scenes + toast.
+        if let Some(handle) = state.app_handle.read().await.as_ref() {
+            use tauri::Emitter;
+            let _ = handle.emit(
+                "quanta://block-sealed",
+                serde_json::json!({
+                    "index": b.index,
+                    "txs": b.transactions.len(),
+                    "mine": true,
+                }),
+            );
+        }
         if let Ok(block_json) = serde_json::to_string(&b) {
             let msg = p2p::gossip::GossipMessage::NewBlock { block_json };
             if let Some(env) = sign_and_wrap(state, pk, msg).await {
