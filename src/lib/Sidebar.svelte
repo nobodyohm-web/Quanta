@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import Aurora from "./Aurora.svelte";
+  import { listen } from "@tauri-apps/api/event";
   import QuantaMark from "./brand/QuantaMark.svelte";
   import { t, type TKey } from "./i18n.svelte";
 
@@ -22,6 +22,20 @@
     return () => { alive = false; clearInterval(iv); };
   });
 
+  // The nav mark pulses its seam whenever a real block seals — the brand's
+  // heartbeat wired to actual finality (best-effort; one-shot, reduced-motion safe).
+  let sealing = $state(false);
+  $effect(() => {
+    let un: (() => void) | undefined;
+    let to: ReturnType<typeof setTimeout> | undefined;
+    listen("quanta://block-sealed", () => {
+      sealing = true;
+      clearTimeout(to);
+      to = setTimeout(() => (sealing = false), 80);
+    }).then((u) => (un = u)).catch(() => {});
+    return () => { un?.(); clearTimeout(to); };
+  });
+
   // Le mode du nœud vient du backend ("Actif"/"Guardian"/"Recherche") → traduit.
   const MODE_KEY: Record<string, TKey> = { 'Actif': 'db.mode.actif', 'Guardian': 'db.mode.guardian', 'Recherche': 'db.mode.research' };
 
@@ -37,7 +51,7 @@
 
 <nav class="sidebar">
   <div class="sidebar-logo">
-    <Aurora radius={7}><QuantaMark size={19} tone="white" /></Aurora>
+    <QuantaMark size={26} tone="teal" {sealing} />
     <span class="logo-text">QUANTA</span>
   </div>
 
@@ -84,8 +98,6 @@
 </nav>
 
 <style>
-  .sidebar-logo :global(.aurora) {
-    width: 28px; height: 28px; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-  }
+  /* Monument lockup — the teal mark rests on chrome (Aurora is moments only). */
+  .sidebar-logo :global(svg) { flex-shrink: 0; }
 </style>

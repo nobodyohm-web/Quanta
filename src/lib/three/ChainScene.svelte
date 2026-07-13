@@ -74,7 +74,7 @@
 
     const boxGeo = new RoundedBoxGeometry(0.66, 0.5, 0.5, 4, 0.09);
     const sealedMat = new THREE.MeshStandardMaterial({
-      color: PALETTE.teal, roughness: 0.38, metalness: 0.12,
+      color: PALETTE.sealedStone, roughness: 0.42, metalness: 0.14, // teal-900 carved stone
     });
     const frostedMat = new THREE.MeshPhysicalMaterial({
       color: 0xffffff, roughness: 0.55, metalness: 0,

@@ -78,6 +78,14 @@
   --teal-800: #0a5f66;
   --teal-900: #0b4a50;
 
+  /* ── v14 « l'anneau et le quantum » — rôles sémantiques (source unique
+     pour la marque ET les scènes 3D) ─────────────────────────────────── */
+  --color-mark: var(--teal-500);          /* marque au repos / logo nav */
+  --color-mark-monument: var(--teal-700); /* gravé sur blanc / petites tailles */
+  --color-sealed-stone: var(--teal-900);  /* bloc finalisé (≤ plancher) */
+  --color-seal-flash: #14C8B8;            /* éclat au scellement / récompense */
+  --aurora-1: #14C8B8; --aurora-2: #3D6FE0; --aurora-3: #7C3AED; /* Aurora — moments only */
+
   /* ── Mouvement — une seule grammaire d'easing pour toute l'app ── */
   --ease-out:    cubic-bezier(0.22, 0.61, 0.36, 1);
   --ease-spring: cubic-bezier(0.21, 1.02, 0.55, 1);

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <!-- Quanta app icon — FLAT variant for ≤64px rasters (favicon, badges).
+       No gradient (muddy when small): teal-700 #087F8C mark on white squircle,
+       higher contrast. The Aurora master (quanta-app-icon.svg) is for ≥128px. -->
+  <rect width="1024" height="1024" rx="229" fill="#ffffff"/>
+  <rect x="1.5" y="1.5" width="1021" height="1021" rx="227.5" fill="none" stroke="#0b4a50" stroke-opacity="0.10" stroke-width="3"/>
+  <g transform="translate(64 64) scale(18)">
+    <path d="M27.882 38.489 A15 15 0 1 1 38.489 27.882" stroke="#087F8C" stroke-width="5.5" stroke-linecap="round"/>
+    <line x1="30.364" y1="30.364" x2="38.849" y2="38.849" stroke="#087F8C" stroke-width="5.5" stroke-linecap="round"/>
+  </g>
+</svg>
