@@ -101,6 +101,25 @@ export function shortAddr(s: string): string {
 }
 
 /**
+ * Copy a SENSITIVE string (recovery phrase, private material) and schedule a
+ * best-effort clipboard wipe: after `ttlMs`, if the clipboard still holds
+ * exactly this text (the user hasn't copied anything else), it is cleared.
+ * If the platform forbids reading the clipboard, we leave it untouched
+ * rather than risk destroying something the user copied since.
+ */
+export async function copySensitive(text: string, ttlMs = 45_000): Promise<void> {
+  await navigator.clipboard.writeText(text);
+  setTimeout(async () => {
+    try {
+      const cur = await navigator.clipboard.readText();
+      if (cur === text) await navigator.clipboard.writeText("");
+    } catch {
+      /* clipboard read unavailable — do nothing */
+    }
+  }, ttlMs);
+}
+
+/**
  * Human ETA for `blocks` remaining, from the ~2 min/block seal cadence
  * (SEAL_EVERY_N_TICKS × MINE_INTERVAL). Approximate by design — the chain
  * only advances while leaders seal — so it is worded as "≈".

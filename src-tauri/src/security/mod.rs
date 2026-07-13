@@ -2,6 +2,8 @@
 // ML-KEM (FIPS 203), ML-DSA (FIPS 204), AES-256-GCM, Argon2id, zeroize
 
 pub mod pq_vault;
+// Touch ID quick unlock (macOS Keychain, biometry-gated KEK)
+pub mod biometric;
 pub mod cipher;
 pub mod crypto_agility;
 pub mod hybrid_crypto;

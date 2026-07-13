@@ -85,6 +85,18 @@ impl PQVault {
         Ok((identity, pk.public_key_bytes, enc.ciphertext, enc.nonce))
     }
 
+    /// Argon2id-derived AES key of the **Ed25519** vault blob (salt =
+    /// `blake3(ed_pk_hex)[..16]`, exactly what create/unlock use). Exposed so
+    /// the Touch ID quick-unlock can wrap this derived key under a
+    /// Keychain-gated KEK — the password itself is never stored.
+    pub fn derive_ed_vault_key(
+        password: &str,
+        public_key: &[u8],
+    ) -> Result<Zeroizing<[u8; 32]>, String> {
+        let salt = CryptoEngine::blake3_hash(hex::encode(public_key).as_bytes());
+        Ok(Zeroizing::new(cipher::derive_key(password, &salt[..16])?))
+    }
+
     /// Unlock identity from encrypted storage
     pub fn unlock_identity(
         engine: &mut CryptoEngine,
@@ -95,10 +107,24 @@ impl PQVault {
         display_name: &str,
         created_at: &str,
     ) -> Result<QuantaIdentity, String> {
-        let salt = CryptoEngine::blake3_hash(hex::encode(public_key).as_bytes());
-        // ZEROIZE-SWEEP: the Argon2id-derived AES key wipes on drop.
-        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
-        let mut sk_bytes = cipher::decrypt(encrypted_sk, &enc_key, nonce)?;
+        let enc_key = Self::derive_ed_vault_key(password, public_key)?;
+        Self::unlock_identity_with_key(
+            engine, encrypted_sk, nonce, &enc_key, display_name, created_at,
+        )
+    }
+
+    /// Decryption core of [`Self::unlock_identity`] taking the **derived** AES
+    /// key directly (Touch ID path: the key comes unwrapped from the
+    /// Keychain-gated KEK instead of Argon2id). Identical hygiene.
+    pub fn unlock_identity_with_key(
+        engine: &mut CryptoEngine,
+        encrypted_sk: &[u8],
+        nonce: &[u8],
+        enc_key: &[u8; 32],
+        display_name: &str,
+        created_at: &str,
+    ) -> Result<QuantaIdentity, String> {
+        let mut sk_bytes = cipher::decrypt(encrypted_sk, enc_key, nonce)?;
 
         // ZEROIZE-SWEEP: build the [u8;32] directly from the slice (no un-wiped
         // `.clone()` Vec), then erase BOTH the decrypted Vec and the stack copy.
@@ -159,6 +185,19 @@ impl PQVault {
     /// moteur. Round-trip vers la clé publique **identique** (keygen
     /// déterministe). Mauvais mot de passe ⇒ échec opaque. La graine déchiffrée
     /// est effacée après usage. Renvoie la clé publique ML-DSA (hex).
+    /// Argon2id-derived AES key of the **ML-DSA seed** vault blob
+    /// (domain-separated salt — see [`PQ_VAULT_SALT_DOMAIN`]). Same rationale
+    /// as [`Self::derive_ed_vault_key`].
+    pub fn derive_pq_vault_key(
+        password: &str,
+        pq_public_key_hex: &str,
+    ) -> Result<Zeroizing<[u8; 32]>, String> {
+        let salt = CryptoEngine::blake3_hash(
+            format!("{PQ_VAULT_SALT_DOMAIN}:{pq_public_key_hex}").as_bytes(),
+        );
+        Ok(Zeroizing::new(cipher::derive_key(password, &salt[..16])?))
+    }
+
     pub fn unlock_pq_identity(
         engine: &mut CryptoEngine,
         pq_public_key_hex: &str,
@@ -166,11 +205,19 @@ impl PQVault {
         nonce: &[u8],
         password: &str,
     ) -> Result<String, String> {
-        let salt = CryptoEngine::blake3_hash(
-            format!("{PQ_VAULT_SALT_DOMAIN}:{pq_public_key_hex}").as_bytes(),
-        );
-        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
-        let mut seed_bytes = cipher::decrypt(encrypted_seed, &enc_key, nonce)?;
+        let enc_key = Self::derive_pq_vault_key(password, pq_public_key_hex)?;
+        Self::unlock_pq_identity_with_key(engine, encrypted_seed, nonce, &enc_key)
+    }
+
+    /// Decryption core of [`Self::unlock_pq_identity`] taking the derived AES
+    /// key directly (Touch ID path). Identical zeroize/opaque-error posture.
+    pub fn unlock_pq_identity_with_key(
+        engine: &mut CryptoEngine,
+        encrypted_seed: &[u8],
+        nonce: &[u8],
+        enc_key: &[u8; 32],
+    ) -> Result<String, String> {
+        let mut seed_bytes = cipher::decrypt(encrypted_seed, enc_key, nonce)?;
         // Construit le [u8;32] depuis la tranche (pas de clone non effacé), puis
         // efface les DEUX copies — même hygiène que le vault Ed25519.
         let mut seed_arr: [u8; 32] = seed_bytes

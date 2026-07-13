@@ -36,10 +36,56 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::Manager;
 
+/// Local brute-force throttle on vault unlocks (password AND Touch ID paths).
+/// Exponential backoff: after `n ≥ 3` consecutive failures the next attempt is
+/// only accepted `min(2^(n−3), 60)` seconds later. In-memory by design — a
+/// reboot resets it, but a reboot also costs the attacker far more than the
+/// wait, and the real wall is Argon2id (64 MiB, 3 iters) per guess.
+#[derive(Default)]
+pub struct UnlockGuard {
+    failures: std::sync::atomic::AtomicU32,
+    not_before: Mutex<Option<std::time::Instant>>,
+}
+
+impl UnlockGuard {
+    /// Err(message) while the backoff window is still open.
+    pub async fn check(&self) -> Result<(), String> {
+        if let Some(t) = *self.not_before.lock().await {
+            let now = std::time::Instant::now();
+            if now < t {
+                let secs = (t - now).as_secs().max(1);
+                return Err(format!(
+                    "Trop de tentatives — réessayez dans {} s",
+                    secs
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn on_failure(&self) {
+        use std::sync::atomic::Ordering;
+        let n = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
+        if n >= 3 {
+            let delay = 2u64.saturating_pow(n.saturating_sub(3)).min(60);
+            *self.not_before.lock().await =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
+        }
+    }
+
+    pub async fn on_success(&self) {
+        use std::sync::atomic::Ordering;
+        self.failures.store(0, Ordering::SeqCst);
+        *self.not_before.lock().await = None;
+    }
+}
+
 pub struct AppState {
     pub crypto: Mutex<CryptoEngine>,
     pub db: Mutex<Option<Database>>,
     pub node: WillowNode,
+    /// Brute-force throttle shared by every unlock path.
+    pub unlock_guard: UnlockGuard,
     /// NET-15: Optional human-readable display name embedded in our outgoing
     /// Hello messages. The wallet's Ed25519 signature on the envelope already
     /// authenticates the name; sanitisation happens at receive time.
@@ -116,17 +162,24 @@ fn pq_identity_blob(pq_pk: &str, enc_seed: &[u8], nonce: &[u8]) -> String {
 async fn unlock_identity(
     state: tauri::State<'_, Arc<AppState>>, password: String,
 ) -> Result<security::pq_vault::QuantaIdentity, String> {
+    state.unlock_guard.check().await?;
     let db = state.db.lock().await;
     let dbref = db.as_ref().ok_or("DB not ready")?;
     let kp = dbref.get_active_keypair().await?.ok_or("No identity")?;
     let mut engine = state.crypto.lock().await;
-    let id = PQVault::unlock_identity(
+    let id = match PQVault::unlock_identity(
         &mut engine,
         &kp.public_key, &kp.encrypted_secret_key, &kp.nonce,
         &password,
         &kp.display_name,
         &kp.created_at,
-    )?;
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            state.unlock_guard.on_failure().await;
+            return Err(e);
+        }
+    };
     // PQ-MIG-3 §3: restore the independent ML-DSA primary (the tx-authority key).
     // A legacy identity created before PQ-MIG-3 has no stored bundle yet — establish
     // and persist one now (TOFU at first unlock), so every unlocked wallet can sign
@@ -149,7 +202,217 @@ async fn unlock_identity(
                 .await?;
         }
     }
+    state.unlock_guard.on_success().await;
     Ok(id)
+}
+
+// ─── Touch ID quick unlock (security/biometric.rs) ──────────────
+//
+// A random KEK sits in the macOS Keychain behind `.BIOMETRY_CURRENT_SET`
+// (the OS demands the fingerprint at read time and invalidates the item if
+// enrolled prints change). It wraps the two Argon2id-DERIVED vault keys —
+// the password is never stored. Password unlock stays the fallback.
+
+/// SQLite settings key of the KEK-wrapped vault keys.
+const BIOMETRIC_WRAP_KEY: &str = "biometric_wrap_v1";
+
+/// Whether the machine supports biometry (probed once per run) and whether
+/// quick unlock is currently enabled for this wallet.
+#[tauri::command]
+async fn biometric_status(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let supported = match SUPPORTED.get() {
+        Some(v) => *v,
+        None => {
+            let v = tokio::task::spawn_blocking(security::biometric::probe_available)
+                .await
+                .unwrap_or(false);
+            *SUPPORTED.get_or_init(|| v)
+        }
+    };
+    let enabled = {
+        let db = state.db.lock().await;
+        match db.as_ref() {
+            Some(d) => matches!(d.load_state(BIOMETRIC_WRAP_KEY).await, Ok(Some(s)) if !s.is_empty()),
+            None => false,
+        }
+    };
+    Ok(serde_json::json!({ "supported": supported, "enabled": enabled }))
+}
+
+/// Enable Touch ID quick unlock. Requires the password (deliberate re-auth:
+/// enabling a new unlock factor is a security-sensitive act), which is used
+/// ONLY to re-derive + verify the two vault keys before wrapping them.
+#[tauri::command]
+async fn enable_biometric_unlock(
+    state: tauri::State<'_, Arc<AppState>>, password: String,
+) -> Result<(), String> {
+    use zeroize::Zeroize;
+    let db = state.db.lock().await;
+    let dbref = db.as_ref().ok_or("DB not ready")?;
+    let kp = dbref.get_active_keypair().await?.ok_or("No identity")?;
+    let pq_json = dbref
+        .load_state(PQ_IDENTITY_KEY)
+        .await?
+        .ok_or("Identité PQ absente — déverrouillez d'abord une fois")?;
+    let v: serde_json::Value =
+        serde_json::from_str(&pq_json).map_err(|_| "PQ identity corrompue".to_string())?;
+    let pq_pk = v["pq_public_key"].as_str().ok_or("PQ identity invalide")?;
+    let pq_enc: Vec<u8> = serde_json::from_value(v["encrypted_seed"].clone())
+        .map_err(|_| "PQ identity invalide".to_string())?;
+    let pq_nonce: Vec<u8> = serde_json::from_value(v["nonce"].clone())
+        .map_err(|_| "PQ identity invalide".to_string())?;
+
+    // Derive both vault keys and PROVE the password is right (decrypt both
+    // blobs; plaintexts wiped immediately). Opaque error on mismatch.
+    let ed_key = PQVault::derive_ed_vault_key(&password, &kp.public_key)?;
+    let pq_key = PQVault::derive_pq_vault_key(&password, pq_pk)?;
+    let mut probe = security::cipher::decrypt(&kp.encrypted_secret_key, &ed_key, &kp.nonce)
+        .map_err(|_| "Mot de passe invalide".to_string())?;
+    probe.zeroize();
+    let mut probe = security::cipher::decrypt(&pq_enc, &pq_key, &pq_nonce)
+        .map_err(|_| "Mot de passe invalide".to_string())?;
+    probe.zeroize();
+
+    // Random KEK → Keychain (biometry-gated); KEK-wrapped derived keys → disk.
+    let mut kek = [0u8; 32];
+    {
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut kek);
+    }
+    let mut plain = Vec::with_capacity(64);
+    plain.extend_from_slice(&ed_key[..]);
+    plain.extend_from_slice(&pq_key[..]);
+    let wrapped = security::cipher::encrypt_and_wipe(&mut plain, &kek)?;
+    let kek_owned = kek;
+    let store = tokio::task::spawn_blocking(move || {
+        let r = security::biometric::store_kek(&kek_owned);
+        let mut k = kek_owned;
+        k.zeroize();
+        r
+    })
+    .await
+    .map_err(|_| "Tâche Keychain interrompue".to_string())?;
+    kek.zeroize();
+    store?;
+    dbref
+        .save_state(
+            BIOMETRIC_WRAP_KEY,
+            &serde_json::json!({ "wrapped": wrapped.ciphertext, "nonce": wrapped.nonce }).to_string(),
+        )
+        .await?;
+    log::info!("◈ [Security] Touch ID quick unlock ENABLED (Keychain biometry-gated KEK)");
+    Ok(())
+}
+
+/// Disable Touch ID quick unlock: the Keychain KEK is deleted (the on-disk
+/// wrap becomes undecryptable garbage, also cleared).
+#[tauri::command]
+async fn disable_biometric_unlock(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    tokio::task::spawn_blocking(security::biometric::delete_kek)
+        .await
+        .map_err(|_| "Tâche Keychain interrompue".to_string())?;
+    let db = state.db.lock().await;
+    if let Some(d) = db.as_ref() {
+        d.save_state(BIOMETRIC_WRAP_KEY, "").await?;
+    }
+    log::info!("◈ [Security] Touch ID quick unlock disabled");
+    Ok(())
+}
+
+/// Unlock the wallet with Touch ID: macOS shows the biometric sheet while we
+/// read the KEK; the unwrapped derived keys decrypt both vault blobs. Ends in
+/// exactly the same engine state as a password unlock.
+#[tauri::command]
+async fn unlock_biometric(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<security::pq_vault::QuantaIdentity, String> {
+    use zeroize::Zeroize;
+    state.unlock_guard.check().await?;
+    let db = state.db.lock().await;
+    let dbref = db.as_ref().ok_or("DB not ready")?;
+    let kp = dbref.get_active_keypair().await?.ok_or("No identity")?;
+    let wrap_json = dbref
+        .load_state(BIOMETRIC_WRAP_KEY)
+        .await?
+        .filter(|s| !s.is_empty())
+        .ok_or("Touch ID non activé")?;
+    let w: serde_json::Value =
+        serde_json::from_str(&wrap_json).map_err(|_| "Wrap biométrique corrompu".to_string())?;
+    let wrapped: Vec<u8> = serde_json::from_value(w["wrapped"].clone())
+        .map_err(|_| "Wrap biométrique invalide".to_string())?;
+    let wnonce: Vec<u8> = serde_json::from_value(w["nonce"].clone())
+        .map_err(|_| "Wrap biométrique invalide".to_string())?;
+    let pq_json = dbref
+        .load_state(PQ_IDENTITY_KEY)
+        .await?
+        .ok_or("Identité PQ absente")?;
+    let v: serde_json::Value =
+        serde_json::from_str(&pq_json).map_err(|_| "PQ identity corrompue".to_string())?;
+    let pq_enc: Vec<u8> = serde_json::from_value(v["encrypted_seed"].clone())
+        .map_err(|_| "PQ identity invalide".to_string())?;
+    let pq_nonce: Vec<u8> = serde_json::from_value(v["nonce"].clone())
+        .map_err(|_| "PQ identity invalide".to_string())?;
+
+    // The Touch ID moment — blocking while the system sheet is up.
+    let kek = tokio::task::spawn_blocking(security::biometric::read_kek)
+        .await
+        .map_err(|_| "Tâche Keychain interrompue".to_string())?;
+    let kek = match kek {
+        Ok(k) => k,
+        Err(e) => {
+            state.unlock_guard.on_failure().await;
+            return Err(e);
+        }
+    };
+    let kek_arr: [u8; 32] = kek[..]
+        .try_into()
+        .map_err(|_| "KEK invalide".to_string())?;
+    let mut keys = match security::cipher::decrypt(&wrapped, &kek_arr, &wnonce) {
+        Ok(k) => k,
+        Err(_) => {
+            state.unlock_guard.on_failure().await;
+            return Err("Déverrouillage refusé".to_string());
+        }
+    };
+    if keys.len() != 64 {
+        keys.zeroize();
+        state.unlock_guard.on_failure().await;
+        return Err("Déverrouillage refusé".to_string());
+    }
+    let mut ed_key = [0u8; 32];
+    let mut pq_key = [0u8; 32];
+    ed_key.copy_from_slice(&keys[..32]);
+    pq_key.copy_from_slice(&keys[32..]);
+    keys.zeroize();
+
+    let mut engine = state.crypto.lock().await;
+    let unlocked = PQVault::unlock_identity_with_key(
+        &mut engine,
+        &kp.encrypted_secret_key,
+        &kp.nonce,
+        &ed_key,
+        &kp.display_name,
+        &kp.created_at,
+    )
+    .and_then(|id| {
+        PQVault::unlock_pq_identity_with_key(&mut engine, &pq_enc, &pq_nonce, &pq_key)
+            .map(|_| id)
+    });
+    ed_key.zeroize();
+    pq_key.zeroize();
+    match unlocked {
+        Ok(id) => {
+            state.unlock_guard.on_success().await;
+            log::info!("◈ [Security] Wallet unlocked via Touch ID");
+            Ok(id)
+        }
+        Err(_) => {
+            state.unlock_guard.on_failure().await;
+            // Opaque: don't reveal which layer failed.
+            Err("Déverrouillage refusé".to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -944,6 +1207,7 @@ pub fn run() {
         crypto: Mutex::new(CryptoEngine::new()),
         db: Mutex::new(None),
         node: WillowNode::new(),
+        unlock_guard: UnlockGuard::default(),
         display_name: tokio::sync::RwLock::new(None),
         app_handle: tokio::sync::RwLock::new(None),
     });
@@ -1000,6 +1264,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
+            biometric_status, enable_biometric_unlock, disable_biometric_unlock, unlock_biometric,
             get_node_status, get_node_mode,
             get_peer_metrics, get_network_topology,
             set_display_name, get_display_name,

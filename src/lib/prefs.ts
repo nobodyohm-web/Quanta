@@ -11,6 +11,8 @@ export interface Prefs {
   lockMinutes: number;       // 0 = never
   confirmThreshold: number;  // ATN amount above which transfers prompt confirmation
   locale: Locale;            // UI language
+  sound: boolean;            // subtle forge/receive chimes (WebAudio, generated)
+  privacy: boolean;          // blur balances until hovered (over-the-shoulder mode)
 }
 
 const LEGACY_KEY = "titan.prefs.v1";
@@ -21,6 +23,8 @@ const DEFAULT_PREFS: Prefs = {
   lockMinutes: 15,
   confirmThreshold: 100,
   locale: "en",
+  sound: true,
+  privacy: false,
 };
 
 export function getPrefs(): Prefs {
@@ -38,6 +42,8 @@ export function getPrefs(): Prefs {
       lockMinutes: typeof p.lockMinutes === "number" ? p.lockMinutes : DEFAULT_PREFS.lockMinutes,
       confirmThreshold: typeof p.confirmThreshold === "number" ? p.confirmThreshold : DEFAULT_PREFS.confirmThreshold,
       locale: LOCALES.includes(p.locale as Locale) ? (p.locale as Locale) : DEFAULT_PREFS.locale,
+      sound: typeof p.sound === "boolean" ? p.sound : DEFAULT_PREFS.sound,
+      privacy: typeof p.privacy === "boolean" ? p.privacy : DEFAULT_PREFS.privacy,
     };
   } catch { return { ...DEFAULT_PREFS }; }
 }

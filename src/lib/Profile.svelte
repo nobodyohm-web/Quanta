@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
   import { t } from "./i18n.svelte";
+  import { copySensitive } from "./quanta";
 
   let pk = $state("");
   let balance = $state(0);
@@ -28,6 +29,48 @@
   let phraseCopied = $state(false);
   let backedUp = $state(false);
 
+  // ─── Touch ID (déverrouillage rapide, Keychain gated par biométrie) ──
+  let bioSupported = $state(false);
+  let bioEnabled = $state(false);
+  let bioForm = $state(false);
+  let bioPass = $state("");
+  let bioBusy = $state(false);
+  let bioErr = $state("");
+  let bioOk = $state(false);
+
+  async function loadBioStatus() {
+    try {
+      const st = await invoke<{ supported: boolean; enabled: boolean }>("biometric_status");
+      bioSupported = st.supported;
+      bioEnabled = st.enabled;
+    } catch { bioSupported = false; }
+  }
+
+  async function enableBio() {
+    if (!bioPass) return;
+    bioBusy = true; bioErr = "";
+    try {
+      await invoke("enable_biometric_unlock", { password: bioPass });
+      bioPass = "";
+      bioForm = false;
+      bioEnabled = true;
+      bioOk = true;
+      setTimeout(() => (bioOk = false), 3000);
+    } catch (e) {
+      bioErr = String(e).replace(/^Error: /, "");
+    } finally { bioBusy = false; }
+  }
+
+  async function disableBio() {
+    bioBusy = true; bioErr = "";
+    try {
+      await invoke("disable_biometric_unlock");
+      bioEnabled = false;
+    } catch (e) {
+      bioErr = String(e).replace(/^Error: /, "");
+    } finally { bioBusy = false; }
+  }
+
   function loadLocal() {
     try { backedUp = localStorage.getItem("quanta-recovery-backed-up") === "1"; } catch {}
   }
@@ -48,7 +91,9 @@
   }
 
   function copyPhrase() {
-    navigator.clipboard?.writeText(recoveryPhrase);
+    // Sensitive copy: the clipboard is auto-wiped after 45 s (if unchanged) —
+    // a forgotten recovery phrase in the clipboard is a real exfiltration path.
+    copySensitive(recoveryPhrase).catch(() => {});
     phraseCopied = true;
     setTimeout(() => (phraseCopied = false), 2000);
   }
@@ -88,6 +133,7 @@
   $effect(() => {
     loadLocal();
     refresh();
+    loadBioStatus();
     const iv = setInterval(refresh, 10000);
     return () => clearInterval(iv);
   });
@@ -282,10 +328,41 @@
         <div class="sec-factor-ic">⚷</div>
         <div style="flex:1;">
           <div class="sec-factor-t">{t('pf.biometric')}</div>
-          <div class="sec-hint">{t('pf.biometricHint')}</div>
+          <div class="sec-hint">{bioSupported ? t('pf.biometricHint') : t('pf.bioUnavailable')}</div>
         </div>
-        <span class="tag tag-dim">{t('pf.soon')}</span>
+        {#if !bioSupported}
+          <span class="tag tag-dim">—</span>
+        {:else if bioEnabled}
+          <button class="btn btn-ghost btn-sm" onclick={disableBio} disabled={bioBusy}>
+            {bioBusy ? "…" : t('pf.bioDisable')}
+          </button>
+        {:else if !bioForm}
+          <button class="btn btn-primary btn-sm" onclick={() => { bioForm = true; bioErr = ""; }}>
+            {t('pf.bioEnable')}
+          </button>
+        {/if}
       </div>
+      {#if bioForm && !bioEnabled}
+        <div class="bio-form">
+          <div class="sec-hint" style="margin-bottom:8px;">{t('pf.bioConfirm')}</div>
+          <div style="display:flex;gap:8px;">
+            <input class="input" type="password" placeholder={t('pf.password')}
+              bind:value={bioPass} style="flex:1;"
+              onkeydown={(e) => e.key === 'Enter' && enableBio()} />
+            <button class="btn btn-primary btn-sm" onclick={enableBio} disabled={bioBusy || !bioPass}>
+              {bioBusy ? "…" : t('pf.bioActivate')}
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick={() => { bioForm = false; bioPass = ""; bioErr = ""; }}>
+              {t('pf.cancel')}
+            </button>
+          </div>
+          {#if bioErr}<div class="sec-err">{bioErr}</div>{/if}
+          {#if bioOk}<div class="sec-ok">✓ {t('pf.bioEnabled')}</div>{/if}
+        </div>
+      {/if}
+      {#if bioOk && bioEnabled}
+        <div class="sec-ok" style="margin:-4px 0 10px 42px;">✓ {t('pf.bioEnabled')}</div>
+      {/if}
       <div class="sec-factor">
         <div class="sec-factor-ic">✉</div>
         <div style="flex:1;">
@@ -335,6 +412,9 @@
   .sec-phrase-box { background: var(--color-bg-2); border: 1px solid var(--color-border); border-radius: 10px; padding: 14px; margin-bottom: 8px; }
   .sec-phrase { font-size: 13px; line-height: 1.8; color: var(--color-text-0); word-break: break-all; user-select: all; }
   .sec-warn { font-size: 12px; color: var(--color-red); margin-bottom: 10px; }
+  .bio-form { margin: 0 0 12px 42px; }
+  .sec-err { font-size: 12px; color: var(--color-red); margin-top: 8px; }
+  .sec-ok { font-size: 12px; color: var(--color-green); font-weight: 600; margin-top: 8px; }
   .sec-factor { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
   .sec-factor-ic {
     width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
