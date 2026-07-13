@@ -6,11 +6,11 @@
   let { size = 104, label = "Q", spin = true } = $props<{ size?: number; label?: string; spin?: boolean }>();
 
   const SEGMENTS = 48;                         // densité de la tranche (cylindre)
-  const R = size / 2;                           // rayon de la pièce
-  const thickness = Math.max(8, size * 0.12);   // épaisseur de la tranche
-  const segW = (2 * Math.PI * R) / SEGMENTS * 1.12; // largeur d'un segment (+recouvrement)
+  const R = $derived(size / 2);                 // rayon de la pièce
+  const thickness = $derived(Math.max(8, size * 0.12)); // épaisseur de la tranche
+  const segW = $derived((2 * Math.PI * R) / SEGMENTS * 1.12); // largeur d'un segment (+recouvrement)
   const segs = Array.from({ length: SEGMENTS }, (_, i) => i * (360 / SEGMENTS));
-  const fontPx = Math.round(size * 0.4);
+  const fontPx = $derived(Math.round(size * 0.4));
 </script>
 
 <div class="stage" style="width:{size}px;height:{size + thickness}px;--s:{size}px;" role="img" aria-label="Pièce QUANTA">

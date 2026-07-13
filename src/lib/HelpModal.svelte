@@ -56,6 +56,7 @@
           <li>{@html t('help.start_li2')}</li>
           <li>{@html t('help.start_li3')}</li>
           <li>{@html t('help.start_li4')}</li>
+          <li>{@html t('help.start_li5')}</li>
         </ol>
         <p class="help-tip">{t('help.start_tip')}</p>
 
@@ -234,7 +235,8 @@
     font-family: var(--font-mono); font-size: 11px; font-weight: 700;
     color: var(--color-text-1);
   }
-  code {
+  /* Cible le <code> injecté via {@html} (le scoping Svelte ne le voit pas). */
+  .help-modal :global(code) {
     font-family: var(--font-mono); font-size: 11px;
     padding: 1px 5px; background: var(--color-bg-1);
     border-radius: 3px;

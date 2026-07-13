@@ -145,3 +145,22 @@ Le produit a été recentré sur la cryptomonnaie. **Supprimés du code** (ne PA
   par tout nœud recevant la `FinalityFault` après le bloc qui a changé l'état (le plan re-calculé est valide).
 - Vrai VRF/VDF, slashing d'inactivité, reorg actif piloté `ghost_head`, audit tiers : au roadmap.
 - **Économie §12** (`MIN_VALIDATOR_STAKE`, fraction de slash, allocation) : décisions d'Alexandre (🛑).
+
+## App v12 (2026-07-13) — wallet complet, minage pédagogique, Torus3D
+- **Deux chemins de stake** : `ledger_stake`/`ledger_unstake` (lib.rs) = **on-chain**
+  (stake_tx/unstake_tx signées + broadcast BroadcastTx via `broadcast_signed_tx`,
+  helper partagé avec ledger_transfer) — c'est le poids de consensus réel.
+  `stake_atn` = legacy miroir réputation, plus appelé par l'UI ; ne pas re-câbler l'UI dessus.
+- **Vérité des soldes UI** = `get_wallet_overview` (ledger : spendable/staked/unbonding
+  + entrées `(amount, unlock_height)` via `Ledger::unbonding_entries_of` + pending
+  stake/unstake du mempool). Ne PAS lire `get_my_reputation.atn_balance` pour le wallet.
+- **`get_public_key` renvoie l'adresse ML-DSA** (PQ-MIG-3B), pas la clé transport — vérifié.
+- **Torus3D.svelte** : WebGL brut sans dépendance. Piège Svelte 5 : les props lues dans
+  l'$effect de création DOIVENT être `untrack()`ées, sinon chaque changement de prop
+  reconstruit le monde GL ; le suivi réactif vit dans un `$effect.root` interne.
+- **QR/URI** : `qrcode-generator` (npm, offline) + `quanta:` URI (BIP-21-like) dans
+  `src/lib/quanta.ts` (parse/format + maths µQTA miroir du ledger). Interop
+  BlueWallet/Electrum = **conventions d'usage uniquement** ; cross-chain impossible,
+  note honnête in-app (`wallet.recv.interop`) — ne jamais promettre l'envoi vers Bitcoin.
+- **Nav** : vue `dashboard` = écran **Minage** (label i18n renommé, icône éclair).
+- i18n : toute nouvelle string → 6 langues dans `i18n.generated.ts` (EX_*), sections fin de dict.

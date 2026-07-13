@@ -8,7 +8,7 @@ paths: ["src/**/*.svelte", "src/**/*.ts", "src/**/*.css"]
 1. **Svelte 5 Runes** obligatoire : `$state()`, `$derived()`, `$effect()`, `$props()`
 2. **PAS de** `onMount`, `writable`, `derived` de Svelte 4
 3. **CSS vanilla** uniquement — PAS de Tailwind, PAS de CSS-in-JS
-4. **Navigation** : sidebar gauche — Wallet, Proches, Tableau de bord, Réseau, Explorateur, Profil (+ Réglages). PAS de sites/forums/recherche.
+4. **Navigation** : sidebar gauche — Wallet, Proches, Minage (vue `dashboard`), Réseau, Explorateur, Profil (+ Réglages). PAS de sites/forums/recherche.
 5. **i18n obligatoire** : tout texte UI passe par `t('clé')` ; 6 langues (EN défaut · FR · ES · RU · ZH · JA), dictionnaires complets (`i18n.svelte.ts` + `i18n.generated.ts`).
 6. **Crypto-only** : pas de PageBuilder, Browser, Forums, Subscriptions, likes — ces modules ont été supprimés. Ne pas les réintroduire.
 7. **Aucun fetch externe** : l'app ne fait JAMAIS de requête HTTP vers internet ; toutes les données via Tauri IPC.
