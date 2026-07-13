@@ -53,6 +53,9 @@ export const EX_EN = {
   "toast.mined": "forged by your node", "toast.sealedTpl": "Block #{n} sealed · {t} tx", "toast.sealedSub": "you were the elected leader", "toast.receivedFrom": "received from",
   "wallet.privacyToggle": "Hide amounts (reveal on hover)",
   "set.sounds": "Sounds", "set.soundsOn": "On", "set.soundsOff": "Off",
+  "scene.mining.aria": "The mining reactor — particle currents circulate the Torus; the flow surges when a reward lands and a crystal block is born at each seal. Drag to orbit.",
+  "scene.chain.aria": "The blockchain in 3D — recent blocks recede into history; sealed teal blocks are final, frosted ones can still reorganize. Drag to orbit.",
+  "scene.chain.sealed": "finalized", "scene.chain.open": "replaceable", "scene.chain.sealedTag": "final",
 } as const;
 
 type EKey = keyof typeof EX_EN;
@@ -93,6 +96,9 @@ export const EX_FR: Dict = {
   "toast.mined": "forgé par votre nœud", "toast.sealedTpl": "Bloc #{n} scellé · {t} tx", "toast.sealedSub": "vous étiez le leader élu", "toast.receivedFrom": "reçu de",
   "wallet.privacyToggle": "Masquer les montants (révélés au survol)",
   "set.sounds": "Sons", "set.soundsOn": "Activés", "set.soundsOff": "Coupés",
+  "scene.mining.aria": "Le réacteur de minage — des courants de particules circulent sur le Torus ; le flux s'emballe quand une récompense tombe et un bloc de cristal naît à chaque scellement. Glissez pour orbiter.",
+  "scene.chain.aria": "La blockchain en 3D — les blocs récents s'enfoncent dans l'histoire ; les blocs teal scellés sont définitifs, les givrés peuvent encore se réorganiser. Glissez pour orbiter.",
+  "scene.chain.sealed": "finalisés", "scene.chain.open": "remplaçables", "scene.chain.sealedTag": "définitif",
 };
 
 export const EX_ES: Dict = {
@@ -130,6 +136,9 @@ export const EX_ES: Dict = {
   "toast.mined": "forjado por tu nodo", "toast.sealedTpl": "Bloque #{n} sellado · {t} tx", "toast.sealedSub": "fuiste el líder elegido", "toast.receivedFrom": "recibido de",
   "wallet.privacyToggle": "Ocultar importes (se revelan al pasar el cursor)",
   "set.sounds": "Sonidos", "set.soundsOn": "Activados", "set.soundsOff": "Apagados",
+  "scene.mining.aria": "El reactor de minería — corrientes de partículas circulan por el Torus; el flujo se acelera cuando llega una recompensa y un bloque de cristal nace en cada sellado. Arrastra para orbitar.",
+  "scene.chain.aria": "La blockchain en 3D — los bloques recientes se hunden en la historia; los sellados en teal son definitivos, los esmerilados aún pueden reorganizarse. Arrastra para orbitar.",
+  "scene.chain.sealed": "finalizados", "scene.chain.open": "reemplazables", "scene.chain.sealedTag": "definitivo",
 };
 
 export const EX_RU: Dict = {
@@ -167,6 +176,9 @@ export const EX_RU: Dict = {
   "toast.mined": "выковано вашим узлом", "toast.sealedTpl": "Блок #{n} запечатан · {t} tx", "toast.sealedSub": "вы были избранным лидером", "toast.receivedFrom": "получено от",
   "wallet.privacyToggle": "Скрыть суммы (показываются при наведении)",
   "set.sounds": "Звуки", "set.soundsOn": "Вкл", "set.soundsOff": "Выкл",
+  "scene.mining.aria": "Реактор майнинга — потоки частиц циркулируют по Torus; поток ускоряется при награде, и кристальный блок рождается при каждом запечатывании. Перетаскивайте для вращения.",
+  "scene.chain.aria": "Блокчейн в 3D — недавние блоки уходят в историю; запечатанные бирюзовые окончательны, матовые ещё могут реорганизоваться. Перетаскивайте для вращения.",
+  "scene.chain.sealed": "финализированы", "scene.chain.open": "заменяемы", "scene.chain.sealedTag": "окончательный",
 };
 
 export const EX_ZH: Dict = {
@@ -204,6 +216,9 @@ export const EX_ZH: Dict = {
   "toast.mined": "由你的节点铸造", "toast.sealedTpl": "区块 #{n} 已封存 · {t} 笔交易", "toast.sealedSub": "你是当选的领导者", "toast.receivedFrom": "收到自",
   "wallet.privacyToggle": "隐藏金额（悬停显示）",
   "set.sounds": "音效", "set.soundsOn": "开", "set.soundsOff": "关",
+  "scene.mining.aria": "挖矿反应堆——粒子流沿 Torus 循环；奖励到账时水流加速，每次封块都会诞生一枚水晶方块。拖动以环绕查看。",
+  "scene.chain.aria": "3D 区块链——新区块渐渐沉入历史；青色已封存的不可更改，磨砂的仍可能重组。拖动以环绕查看。",
+  "scene.chain.sealed": "已最终化", "scene.chain.open": "可替换", "scene.chain.sealedTag": "最终",
 };
 
 export const EX_JA: Dict = {
@@ -241,4 +256,7 @@ export const EX_JA: Dict = {
   "toast.mined": "あなたのノードが鋳造", "toast.sealedTpl": "ブロック #{n} 封印 · {t} tx", "toast.sealedSub": "あなたが選ばれたリーダーでした", "toast.receivedFrom": "受信元",
   "wallet.privacyToggle": "金額を隠す（ホバーで表示）",
   "set.sounds": "サウンド", "set.soundsOn": "オン", "set.soundsOff": "オフ",
+  "scene.mining.aria": "マイニング・リアクター——粒子の流れが Torus を循環。報酬が届くと流れが加速し、封印のたびに水晶のブロックが生まれます。ドラッグで回転。",
+  "scene.chain.aria": "3D ブロックチェーン——新しいブロックが歴史へ沈んでいきます。封印済みのティール色は確定、すりガラスはまだ再編成されうる。ドラッグで回転。",
+  "scene.chain.sealed": "確定済み", "scene.chain.open": "置換可能", "scene.chain.sealedTag": "確定",
 };
