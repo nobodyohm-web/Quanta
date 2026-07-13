@@ -46,6 +46,8 @@ export const EX_EN = {
   "wallet.stake.bonded": "Bonded (consensus weight)", "wallet.stake.pending": "sealing…", "wallet.stake.validatorOk": "Validator — your stake weighs in consensus and finality", "wallet.stake.validatorHint1": "Stake at least", "wallet.stake.validatorHint2": "QUANTA to become a validator (seal blocks, vote finality).", "wallet.stake.unbondingTitle": "UNLOCKING", "wallet.stake.blocks": "blocks", "wallet.stake.unstakeLabel": "Unlock (QUANTA)", "wallet.stake.unstakeBtn": "Unstake", "wallet.stake.unstaking": "Unstaking…", "wallet.stake.warn": "Staked coins secure the network. Unstaking takes ~2 weeks (10,080 blocks) and remains slashable until complete: a proven double-vote destroys the stake. Never stake what you cannot leave locked.",
   "wallet.f.stakeOps": "Staking", "wallet.tx.stakeSub": "locked as consensus stake", "wallet.tx.unstakeSub": "unlocking — back after the delay", "wallet.tx.slashSub": "stake destroyed (proven equivocation)", "wallet.tx.burnSub": "destroyed forever (deflationary)", "wallet.tx.from": "from",
   "tx.Slash": "Slash", "time.today": "Today", "time.yesterday": "Yesterday",
+  "wallet.err.bitcoinAddress": "This looks like a Bitcoin address. QUANTA lives on its own network — coins sent to Bitcoin (BlueWallet, Electrum…) would be lost forever. Ask for the person's @username or their quanta: link instead.",
+  "help.start_li5": "<b>One network only</b> — QUANTA moves between Quanta wallets exclusively: never to Bitcoin/BlueWallet/Electrum. The QR codes and quanta: links merely follow the same familiar conventions.",
 } as const;
 
 type EKey = keyof typeof EX_EN;
@@ -79,6 +81,8 @@ export const EX_FR: Dict = {
   "wallet.stake.bonded": "Bondé (poids de consensus)", "wallet.stake.pending": "scellement…", "wallet.stake.validatorOk": "Validateur — votre enjeu pèse au consensus et à la finalité", "wallet.stake.validatorHint1": "Stakez au moins", "wallet.stake.validatorHint2": "QUANTA pour devenir validateur (sceller des blocs, voter la finalité).", "wallet.stake.unbondingTitle": "DÉVERROUILLAGE", "wallet.stake.blocks": "blocs", "wallet.stake.unstakeLabel": "Délier (QUANTA)", "wallet.stake.unstakeBtn": "Délier", "wallet.stake.unstaking": "Déliement…", "wallet.stake.warn": "Les pièces stakées sécurisent le réseau. Le déliement prend ~2 semaines (10 080 blocs) et reste punissable jusqu'au bout : un double-vote prouvé détruit l'enjeu. Ne stakez jamais ce que vous ne pouvez pas laisser verrouillé.",
   "wallet.f.stakeOps": "Staking", "wallet.tx.stakeSub": "verrouillé comme enjeu de consensus", "wallet.tx.unstakeSub": "en déverrouillage — revient après le délai", "wallet.tx.slashSub": "enjeu détruit (équivocation prouvée)", "wallet.tx.burnSub": "détruit pour toujours (déflationniste)", "wallet.tx.from": "de",
   "tx.Slash": "Slash", "time.today": "Aujourd'hui", "time.yesterday": "Hier",
+  "wallet.err.bitcoinAddress": "Ceci ressemble à une adresse Bitcoin. QUANTA vit sur son propre réseau — des pièces envoyées vers Bitcoin (BlueWallet, Electrum…) seraient perdues à jamais. Demandez plutôt le @pseudo de la personne ou son lien quanta:.",
+  "help.start_li5": "<b>Un seul réseau</b> — QUANTA ne circule qu'entre wallets Quanta : jamais vers Bitcoin/BlueWallet/Electrum. Les QR et liens quanta: en suivent simplement les conventions familières.",
 };
 
 export const EX_ES: Dict = {
@@ -109,6 +113,8 @@ export const EX_ES: Dict = {
   "wallet.stake.bonded": "En stake (peso de consenso)", "wallet.stake.pending": "sellando…", "wallet.stake.validatorOk": "Validador — tu stake pesa en el consenso y la finalidad", "wallet.stake.validatorHint1": "Haz stake de al menos", "wallet.stake.validatorHint2": "QUANTA para ser validador (sellar bloques, votar finalidad).", "wallet.stake.unbondingTitle": "DESBLOQUEO", "wallet.stake.blocks": "bloques", "wallet.stake.unstakeLabel": "Liberar (QUANTA)", "wallet.stake.unstakeBtn": "Liberar", "wallet.stake.unstaking": "Liberando…", "wallet.stake.warn": "Las monedas en stake aseguran la red. Liberarlas tarda ~2 semanas (10 080 bloques) y siguen siendo penalizables hasta el final: un doble voto probado destruye el stake. Nunca pongas en stake lo que no puedas dejar bloqueado.",
   "wallet.f.stakeOps": "Staking", "wallet.tx.stakeSub": "bloqueado como stake de consenso", "wallet.tx.unstakeSub": "desbloqueándose — vuelve tras el plazo", "wallet.tx.slashSub": "stake destruido (equivocación probada)", "wallet.tx.burnSub": "destruido para siempre (deflacionario)", "wallet.tx.from": "de",
   "tx.Slash": "Slash", "time.today": "Hoy", "time.yesterday": "Ayer",
+  "wallet.err.bitcoinAddress": "Esto parece una dirección Bitcoin. QUANTA vive en su propia red — monedas enviadas a Bitcoin (BlueWallet, Electrum…) se perderían para siempre. Pide mejor el @usuario de la persona o su enlace quanta:.",
+  "help.start_li5": "<b>Una sola red</b> — QUANTA solo circula entre carteras Quanta: nunca hacia Bitcoin/BlueWallet/Electrum. Los QR y enlaces quanta: solo siguen sus convenciones familiares.",
 };
 
 export const EX_RU: Dict = {
@@ -139,6 +145,8 @@ export const EX_RU: Dict = {
   "wallet.stake.bonded": "В стейке (вес консенсуса)", "wallet.stake.pending": "запечатывается…", "wallet.stake.validatorOk": "Валидатор — ваш стейк весит в консенсусе и финальности", "wallet.stake.validatorHint1": "Застейкайте минимум", "wallet.stake.validatorHint2": "QUANTA, чтобы стать валидатором (печатать блоки, голосовать за финальность).", "wallet.stake.unbondingTitle": "РАЗБЛОКИРОВКА", "wallet.stake.blocks": "блоков", "wallet.stake.unstakeLabel": "Освободить (QUANTA)", "wallet.stake.unstakeBtn": "Анстейк", "wallet.stake.unstaking": "Освобождение…", "wallet.stake.warn": "Монеты в стейке защищают сеть. Вывод занимает ~2 недели (10 080 блоков) и остаётся наказуемым до конца: доказанное двойное голосование уничтожает стейк. Никогда не стейкайте то, что не можете оставить заблокированным.",
   "wallet.f.stakeOps": "Стейкинг", "wallet.tx.stakeSub": "заблокировано как стейк консенсуса", "wallet.tx.unstakeSub": "разблокируется — вернётся после задержки", "wallet.tx.slashSub": "стейк уничтожен (доказанная эквивокация)", "wallet.tx.burnSub": "уничтожено навсегда (дефляционно)", "wallet.tx.from": "от",
   "tx.Slash": "Слэш", "time.today": "Сегодня", "time.yesterday": "Вчера",
+  "wallet.err.bitcoinAddress": "Это похоже на биткоин-адрес. QUANTA живёт в собственной сети — монеты, отправленные в Bitcoin (BlueWallet, Electrum…), будут потеряны навсегда. Попросите @имя человека или его ссылку quanta:.",
+  "help.start_li5": "<b>Только одна сеть</b> — QUANTA ходит исключительно между кошельками Quanta: никогда в Bitcoin/BlueWallet/Electrum. QR-коды и ссылки quanta: лишь следуют знакомым соглашениям.",
 };
 
 export const EX_ZH: Dict = {
@@ -169,6 +177,8 @@ export const EX_ZH: Dict = {
   "wallet.stake.bonded": "已质押（共识权重）", "wallet.stake.pending": "封存中…", "wallet.stake.validatorOk": "验证者——你的质押参与共识与最终性", "wallet.stake.validatorHint1": "质押至少", "wallet.stake.validatorHint2": "QUANTA 即可成为验证者（封存区块、投票最终性）。", "wallet.stake.unbondingTitle": "解锁中", "wallet.stake.blocks": "区块", "wallet.stake.unstakeLabel": "解押（QUANTA）", "wallet.stake.unstakeBtn": "解押", "wallet.stake.unstaking": "解押中…", "wallet.stake.warn": "质押的币在保护网络。解押约需 2 周（10 080 个区块），期间仍可被罚没：被证明的双重投票会销毁质押。永远不要质押你不能长期锁定的钱。",
   "wallet.f.stakeOps": "质押", "wallet.tx.stakeSub": "已锁定为共识质押", "wallet.tx.unstakeSub": "解锁中——延迟后返还", "wallet.tx.slashSub": "质押已销毁（证明的双重投票）", "wallet.tx.burnSub": "永久销毁（通缩）", "wallet.tx.from": "来自",
   "tx.Slash": "罚没", "time.today": "今天", "time.yesterday": "昨天",
+  "wallet.err.bitcoinAddress": "这看起来是比特币地址。QUANTA 运行在自己的网络上——发往比特币（BlueWallet、Electrum…）的币将永久丢失。请改为索要对方的 @用户名或 quanta: 链接。",
+  "help.start_li5": "<b>只有一个网络</b>——QUANTA 只在 Quanta 钱包之间流通：绝不通向 Bitcoin/BlueWallet/Electrum。二维码与 quanta: 链接只是沿用了熟悉的约定。",
 };
 
 export const EX_JA: Dict = {
@@ -199,4 +209,6 @@ export const EX_JA: Dict = {
   "wallet.stake.bonded": "ボンド済み（コンセンサスの重み）", "wallet.stake.pending": "封印中…", "wallet.stake.validatorOk": "バリデータ——あなたのステークがコンセンサスとファイナリティに寄与しています", "wallet.stake.validatorHint1": "少なくとも", "wallet.stake.validatorHint2": "QUANTA をステークするとバリデータになれます（ブロックの封印、ファイナリティ投票）。", "wallet.stake.unbondingTitle": "アンロック中", "wallet.stake.blocks": "ブロック", "wallet.stake.unstakeLabel": "アンステーク（QUANTA）", "wallet.stake.unstakeBtn": "アンステーク", "wallet.stake.unstaking": "アンステーク中…", "wallet.stake.warn": "ステークされたコインはネットワークを守ります。アンステークには約 2 週間（10 080 ブロック）かかり、完了までスラッシュ対象のままです：二重投票が証明されるとステークは破壊されます。ロックしたままにできないお金は決してステークしないでください。",
   "wallet.f.stakeOps": "ステーキング", "wallet.tx.stakeSub": "コンセンサスのステークとしてロック", "wallet.tx.unstakeSub": "アンロック中——待機後に戻ります", "wallet.tx.slashSub": "ステーク破壊（証明された二重投票）", "wallet.tx.burnSub": "永久に破壊（デフレ）", "wallet.tx.from": "送信元",
   "tx.Slash": "スラッシュ", "time.today": "今日", "time.yesterday": "昨日",
+  "wallet.err.bitcoinAddress": "これはビットコインのアドレスのようです。QUANTA は独自のネットワーク上にあります——Bitcoin（BlueWallet、Electrum…）へ送られたコインは永遠に失われます。相手の @ユーザー名か quanta: リンクを聞いてください。",
+  "help.start_li5": "<b>ネットワークはひとつだけ</b>——QUANTA は Quanta ウォレット間だけを移動します：Bitcoin/BlueWallet/Electrum へは決して送れません。QR と quanta: リンクは馴染みある流儀に倣っているだけです。",
 };

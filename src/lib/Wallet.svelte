@@ -117,7 +117,11 @@
     try {
       const parsed = parsePaymentUri(raw);
       if (!parsed) {
-        feedback = { ok: false, msg: t("wallet.err.badRecipient") };
+        // Le moment BlueWallet/Electrum : un novice colle une adresse Bitcoin.
+        // Expliquer clairement vaut mieux qu'une erreur générique — envoyer
+        // là-dessus détruirait les pièces (réseaux distincts).
+        const looksBitcoin = /^bitcoin:/i.test(raw) || /^(bc1|[13])[a-zA-Z0-9]{25,62}$/.test(raw);
+        feedback = { ok: false, msg: t(looksBitcoin ? "wallet.err.bitcoinAddress" : "wallet.err.badRecipient") };
         return;
       }
       // Un lien quanta:…?amount=… pré-remplit le montant si le champ est vide.

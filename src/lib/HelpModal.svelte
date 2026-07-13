@@ -56,6 +56,7 @@
           <li>{@html t('help.start_li2')}</li>
           <li>{@html t('help.start_li3')}</li>
           <li>{@html t('help.start_li4')}</li>
+          <li>{@html t('help.start_li5')}</li>
         </ol>
         <p class="help-tip">{t('help.start_tip')}</p>
 
