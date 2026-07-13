@@ -8,6 +8,7 @@
   import Explorer from "$lib/Explorer.svelte";
   import Contacts from "$lib/Contacts.svelte";
   import CommandPalette from "$lib/CommandPalette.svelte";
+  import QuantaMark from "$lib/brand/QuantaMark.svelte";
   import Toasts from "$lib/Toasts.svelte";
   import Welcome from "$lib/Welcome.svelte";
   import Aurora from "$lib/Aurora.svelte";
@@ -243,6 +244,7 @@
 {#if loading}
   <div class="load-screen">
     <div class="load-inner">
+      <div class="load-mark"><QuantaMark size={46} tone="aurora" /></div>
       <span class="load-logo">QUANTA</span>
       <span class="load-sub">{t('loading')}</span>
     </div>
@@ -352,7 +354,7 @@
       <div class="setup-hero">
         <Aurora radius={0}>
           <div class="setup-hero-inner">
-            <div class="coin-glass">Q</div>
+            <div class="coin-glass"><QuantaMark size={26} tone="white" /></div>
             <div class="setup-hero-txt">
               <div class="setup-wordmark">QUANTA</div>
               <div class="setup-tag">{step === "create" ? t('auth.create.tag') : t('auth.unlock.tag')}</div>
@@ -438,6 +440,15 @@
     background: var(--color-bg-0);
   }
   .load-inner { text-align: center; animation: fadeIn 0.15s ease-out; }
+  .load-mark {
+    display: flex; justify-content: center; margin-bottom: 14px;
+    animation: markBreathe 2.2s ease-in-out infinite;
+  }
+  @keyframes markBreathe {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.05); opacity: 0.85; }
+  }
+  @media (prefers-reduced-motion: reduce) { .load-mark { animation: none; } }
   .load-logo {
     display: block;
     font-size: 24px; font-weight: 700;

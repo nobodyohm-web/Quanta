@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import Aurora from "./Aurora.svelte";
+  import QuantaMark from "./brand/QuantaMark.svelte";
   import { t, type TKey } from "./i18n.svelte";
 
   let { activeView = 'dashboard', onNavigate, nodeMode = 'Actif' } = $props<{
@@ -36,7 +37,7 @@
 
 <nav class="sidebar">
   <div class="sidebar-logo">
-    <Aurora radius={7}><span class="logo-q">Q</span></Aurora>
+    <Aurora radius={7}><QuantaMark size={19} tone="white" /></Aurora>
     <span class="logo-text">QUANTA</span>
   </div>
 
@@ -87,5 +88,4 @@
     width: 28px; height: 28px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
   }
-  .logo-q { font-size: 15px; font-weight: 800; color: #fff; line-height: 1; }
 </style>

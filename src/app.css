@@ -62,7 +62,38 @@
 
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+
+  /* ── v13 « colorimétrie iconique » — le teal joyau comme SYSTÈME ──
+     Une seule couleur possède la marque ; voici sa gamme complète, du
+     souffle au minéral. L'indigo/violet n'existent que comme FUITE du
+     gradient Aurora (moments), jamais comme accents autonomes. */
+  --teal-50:  #eefbfa;
+  --teal-100: #d5f5f2;
+  --teal-200: #abe9e4;
+  --teal-300: #6fd6cf;
+  --teal-400: #2fc0b6;
+  --teal-500: #0BA5A0;   /* = --color-accent */
+  --teal-600: #08908E;
+  --teal-700: #087F8C;   /* = --color-accent-hover (deep) */
+  --teal-800: #0a5f66;
+  --teal-900: #0b4a50;
+
+  /* ── Mouvement — une seule grammaire d'easing pour toute l'app ── */
+  --ease-out:    cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-spring: cubic-bezier(0.21, 1.02, 0.55, 1);
+  --dur-fast: 0.15s;
+  --dur-med:  0.32s;
 }
+
+/* ── v13 — états universels ─────────────────────────────────────── */
+/* Le focus se VOIT (clavier d'abord), sans polluer les clics souris. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* La sélection de texte porte la marque. */
+::selection { background: var(--teal-200); color: var(--color-text-0); }
 
 /* ── Compat: --quanta-* aliases (Wallet.svelte référence ces noms ; ils
    n'étaient définis nulle part → styles cassés. On les mappe au thème clair). ── */
@@ -188,6 +219,14 @@ body::after {
 }
 .page-title { font-size: 22px; font-weight: 700; color: var(--color-text-0); }
 .page-sub { font-size: 13px; color: var(--color-text-2); margin-top: 4px; }
+
+/* ── Section label — micro-étiquette d'ancrage (panneaux, groupes) ── */
+.section-label {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--color-text-3);
+  margin-bottom: 10px;
+}
 
 /* ── Cards ── */
 .card {
