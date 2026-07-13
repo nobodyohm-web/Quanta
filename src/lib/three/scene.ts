@@ -161,6 +161,7 @@ export const PALETTE = {
   ink: new THREE.Color("#57544e"),
   teal: new THREE.Color("#0BA5A0"),
   tealBright: new THREE.Color("#14C8B8"),
+  sealedStone: new THREE.Color("#0B4A50"), // teal-900 — finalized block (carved, permanent)
   indigo: new THREE.Color("#3D6FE0"),
   violet: new THREE.Color("#7C3AED"),
 };
