@@ -1,12 +1,12 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import Blockchain3D from "./Blockchain3D.svelte";
+  import ChainScene from "./three/ChainScene.svelte";
   import Network3D from "./Network3D.svelte";
   import ChainHistory from "./ChainHistory.svelte";
   import { t } from "./i18n.svelte";
 
-  let chainView = $state<"history" | "2d" | "3d">("history");
+  let chainView = $state<"history" | "2d" | "3d">("3d");
 
   let peerCount = $state(0);
   let myPeerId = $state("");
@@ -30,13 +30,14 @@
   let holders = $state(0);
   let myBalance = $state(0);
   let blocks = $state<any[]>([]);
-  let newBlockFlash = $state(0);     // ms epoch du dernier bloc reçu → animation
+  let newBlockFlash = $state(0);
+  let finalityFloor = $state(0);     // ms epoch du dernier bloc reçu → animation
   let mintedDisplay = $state(0);     // compteur animé, monte en continu
   const myShare = $derived(supplyQta > 0 ? (myBalance / supplyQta) * 100 : 0);
 
   async function loadChain() {
     try {
-      const o = await invoke<any>("get_chain_overview", { limit: 14 });
+      const o = await invoke<any>("get_chain_overview", { limit: 22 });
       const prev = chainHeight;
       chainHeight = o.height ?? 0;
       supplyQta = o.total_supply_qta ?? 0;
@@ -49,6 +50,10 @@
       holders = o.holders ?? 0;
       blocks = o.blocks ?? [];
       if (prev && chainHeight > prev) newBlockFlash = Date.now();
+    } catch {}
+    try {
+      const f = await invoke<any>("get_finality_status");
+      finalityFloor = f?.finalized_floor ?? 0;
     } catch {}
   }
   let connectInput = $state("");
@@ -418,7 +423,7 @@
     {#if chainView === 'history'}
       <ChainHistory />
     {:else if chainView === '3d'}
-      <Blockchain3D blocks={blocks} pending={pendingTx} flashAt={newBlockFlash} />
+      <ChainScene blocks={blocks} floor={finalityFloor} flashAt={newBlockFlash} />
     {:else}
       <div class="chain-strip">
         <div class="chain-pending" title={t('net.chainPendingTip')}>

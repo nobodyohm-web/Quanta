@@ -27,7 +27,9 @@
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "qrcode-generator": "^2.0.4"
+    "@types/three": "^0.185.1",
+    "qrcode-generator": "^2.0.4",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

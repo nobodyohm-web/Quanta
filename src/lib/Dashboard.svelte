@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import Torus3D from "./Torus3D.svelte";
+  import MiningScene from "./three/MiningScene.svelte";
   import { t } from "./i18n.svelte";
 
   // ── Live node data ──────────────────────────────────────────────
@@ -12,7 +12,6 @@
   let peers = $state(0);
   let chainHeight = $state(0);
   let mode = $state("Actif");
-  let pulse = $state(0);
 
   // Offre prouvable
   let maxSupply = $state(100_000_000);
@@ -68,10 +67,7 @@
     try {
       const f = await invoke<Finality>("get_finality_status");
       fin = f;
-      if (f.height > chainHeight) {
-        if (chainHeight > 0) pulse++; // un bloc vient d'être scellé → onde sur le tore
-        chainHeight = f.height;
-      }
+      chainHeight = f.height;
     } catch {}
     if (uptime > 0) miningRate = earned / uptime;
   }
@@ -169,7 +165,7 @@
   <!-- ── Hero : le réseau vivant + votre rythme de forge ── -->
   <div class="card mine-hero">
     <div class="mh-torus">
-      <Torus3D height={230} {peers} {pulse} />
+      <MiningScene height={250} {peers} />
       <div class="mh-live">
         <span class="mh-live-dot"></span>
         {t('mine.hero.live')}
