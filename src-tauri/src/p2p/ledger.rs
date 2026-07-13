@@ -818,6 +818,19 @@ impl Ledger {
             .unwrap_or(0)
     }
 
+    /// Read view of this account's pending unlocks, sorted soonest-first:
+    /// `(amount µQTA, unlock_height)`. Powers the wallet's unbonding timeline;
+    /// pure read, no consensus effect.
+    pub fn unbonding_entries_of(&self, pk: &str) -> Vec<(u64, u64)> {
+        let mut v: Vec<(u64, u64)> = self
+            .unbonding
+            .get(pk)
+            .map(|l| l.iter().map(|e| (e.amount, e.unlock_height)).collect())
+            .unwrap_or_default();
+        v.sort_by_key(|&(_, h)| h);
+        v
+    }
+
     // ─── LIVE-3: accountable-safety slashing on the live ledger ──────────────
 
     /// LIVE-3 — the slash amount for an offender bonding `staked` µQTA, per the

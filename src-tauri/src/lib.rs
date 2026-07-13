@@ -718,19 +718,7 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     //   stay aligned with ours. AUDIT-TX-2: a previous bug only sent the
     //   transfer leg, leaving every other node with a 1% balance gap.
     for tx_obj in std::iter::once(&tx).chain(burn_tx.as_ref()) {
-        if let Ok(tx_json) = serde_json::to_string(tx_obj) {
-            let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
-            let timestamp = chrono::Utc::now().to_rfc3339();
-            let nonce = state.node.gossip.read().await.next_outgoing_nonce();
-            let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&transport_pk, nonce, &timestamp, &msg);
-            let sig = crypto.sign(&signable).unwrap_or_default();
-            if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
-                transport_pk.clone(), msg, nonce, timestamp, &sig,
-            ) {
-                state.node.gossip.write().await.mark_seen(&env.id);
-                let _ = state.node.gossip_tx.send(env);
-            }
-        }
+        broadcast_signed_tx(&state, &crypto, &transport_pk, tx_obj).await;
     }
     log::info!("◈ [Transfer] Broadcast {} QUANTA (+{:.6} burn) → {}",
         amount, burn_uqta as f64 / p2p::ledger::MICRO as f64, &to[..12]);
@@ -740,6 +728,172 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
         "tx": tx,
         "burn_amount": burn_uqta as f64 / micro,
         "net_amount": net_uqta as f64 / micro,
+    }))
+}
+
+/// Sign a `BroadcastTx` gossip envelope for `tx` with the transport key and
+/// queue it for the network. Shared by every user-authored tx command
+/// (transfer, burn leg, stake, unstake) so all legs propagate identically
+/// (AUDIT-TX-2 taught us what happens when one leg is forgotten).
+async fn broadcast_signed_tx(
+    state: &Arc<AppState>,
+    crypto: &CryptoEngine,
+    transport_pk: &str,
+    tx: &p2p::ledger_types::Transaction,
+) {
+    let Ok(tx_json) = serde_json::to_string(tx) else { return };
+    let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = state.node.gossip.read().await.next_outgoing_nonce();
+    let signable =
+        p2p::gossip::GossipRouter::signable_envelope_bytes(transport_pk, nonce, &timestamp, &msg);
+    let sig = crypto.sign(&signable).unwrap_or_default();
+    if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
+        transport_pk.to_string(), msg, nonce, timestamp, &sig,
+    ) {
+        state.node.gossip.write().await.mark_seen(&env.id);
+        let _ = state.node.gossip_tx.send(env);
+    }
+}
+
+/// ONCHAIN-STAKE-1 — real on-chain staking from the UI: builds the signed
+/// `Stake` tx (spendable → bonded **at seal**) and broadcasts it, so every node
+/// derives the same stake state from the chain. Consensus weight (leader
+/// election + finality votes) comes from exactly these txs — this is what
+/// makes the user a validator. The legacy `stake_atn` (reputation mirror only,
+/// no consensus effect) is superseded by this in the wallet UI.
+#[tauri::command]
+async fn ledger_stake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Result<serde_json::Value, String> {
+    if amount <= 0.0 || amount > 1_000_000.0 {
+        return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
+    }
+    let uqta = quanta_to_uqta(amount)?;
+    let crypto = state.crypto.lock().await;
+    let from = crypto
+        .pq_address_hex()
+        .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
+    let transport_pk = crypto.get_identity()?.public_key_hex;
+    let mut ledger = state.node.ledger.write().await;
+    let tx = ledger.stake_tx(&from, uqta, &crypto)?;
+    drop(ledger);
+    broadcast_signed_tx(&state, &crypto, &transport_pk, &tx).await;
+    log::info!("◈ [Stake] Broadcast {} QUANTA → bonded at next seal", amount);
+    Ok(serde_json::json!({ "tx": tx }))
+}
+
+/// ONCHAIN-STAKE-1 §3 — begin unlocking bonded stake. On seal the amount moves
+/// into an unbonding entry that matures at `height + UNBONDING_PERIOD_BLOCKS`
+/// (it stays slashable until then — Casper semantics, LIVE-3B). Broadcast like
+/// any user tx.
+#[tauri::command]
+async fn ledger_unstake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Result<serde_json::Value, String> {
+    if amount <= 0.0 || amount > 1_000_000.0 {
+        return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
+    }
+    let uqta = quanta_to_uqta(amount)?;
+    let crypto = state.crypto.lock().await;
+    let from = crypto
+        .pq_address_hex()
+        .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
+    let transport_pk = crypto.get_identity()?.public_key_hex;
+    let mut ledger = state.node.ledger.write().await;
+    let tx = ledger.unstake_tx(&from, uqta, &crypto)?;
+    drop(ledger);
+    broadcast_signed_tx(&state, &crypto, &transport_pk, &tx).await;
+    log::info!("◈ [Unstake] Broadcast {} QUANTA → unbonding at next seal", amount);
+    Ok(serde_json::json!({ "tx": tx }))
+}
+
+/// The wallet's single source of truth — everything the UI needs to show the
+/// three-way money split, straight from the **ledger** (chain state), not the
+/// reputation mirror: spendable, bonded stake, unbonding entries with their
+/// unlock heights, plus pending (unsealed) stake movements for instant feedback.
+/// All amounts converted µQTA → QUANTA for display.
+#[tauri::command]
+async fn get_wallet_overview(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let addr = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
+    let earned_uqta = {
+        let rep = state.node.reputation.read().await;
+        rep.get_user(&addr).map(|u| u.atn_earned).unwrap_or(0)
+    };
+    let ledger = state.node.ledger.read().await;
+    let micro = p2p::ledger::MICRO as f64;
+    let height = ledger.chain_height();
+    let spendable = ledger.balance_of(&addr);
+    let staked = ledger.staked_of(&addr);
+    let unbonding = ledger.unbonding_of(&addr);
+    let entries: Vec<serde_json::Value> = ledger
+        .unbonding_entries_of(&addr)
+        .into_iter()
+        .map(|(amount, unlock_height)| {
+            serde_json::json!({
+                "amount": amount as f64 / micro,
+                "unlock_height": unlock_height,
+                "blocks_remaining": unlock_height.saturating_sub(height),
+            })
+        })
+        .collect();
+    // Pending (mempool) movements from this account: visible instantly in the
+    // UI as "in preparation" even though they only take effect at seal.
+    use p2p::ledger_types::TxType;
+    let (mut pending_stake, mut pending_unstake) = (0u64, 0u64);
+    for tx in ledger.pending_txs() {
+        if tx.from == addr {
+            match tx.tx_type {
+                TxType::Stake => pending_stake += tx.amount,
+                TxType::Unstake => pending_unstake += tx.amount,
+                _ => {}
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "address": addr,
+        "height": height,
+        "spendable": spendable as f64 / micro,
+        "staked": staked as f64 / micro,
+        "unbonding": unbonding as f64 / micro,
+        "unbonding_entries": entries,
+        "pending_stake": pending_stake as f64 / micro,
+        "pending_unstake": pending_unstake as f64 / micro,
+        "earned": earned_uqta as f64 / micro,
+        "min_validator_stake": p2p::pos_consensus::MIN_VALIDATOR_STAKE as f64 / micro,
+        "unbonding_period_blocks": p2p::ledger::UNBONDING_PERIOD_BLOCKS,
+    }))
+}
+
+/// Finality-gadget status for the mining screen: how far the chain is into the
+/// current epoch, where the irreversibility floor sits, and the live validator
+/// set (count + total bonded weight + this node's bonded weight). Read-only,
+/// cheap, safe to poll.
+#[tauri::command]
+async fn get_finality_status(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    use sm::finality::EPOCH_LENGTH_BLOCKS;
+    let addr = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
+    let ledger = state.node.ledger.read().await;
+    let micro = p2p::ledger::MICRO as f64;
+    let height = ledger.chain_height();
+    let floor = ledger.finalized_floor_index();
+    let stakes = ledger.validator_stakes();
+    let total_staked: u64 = stakes.values().sum();
+    let eligible = stakes
+        .values()
+        .filter(|&&s| s >= p2p::pos_consensus::MIN_VALIDATOR_STAKE)
+        .count();
+    let my_stake = stakes.get(&addr).copied().unwrap_or(0);
+    let blocks_into_epoch = height % EPOCH_LENGTH_BLOCKS;
+    Ok(serde_json::json!({
+        "height": height,
+        "finalized_floor": floor,
+        "epoch": height / EPOCH_LENGTH_BLOCKS,
+        "epoch_length": EPOCH_LENGTH_BLOCKS,
+        "blocks_into_epoch": blocks_into_epoch,
+        "next_checkpoint": height - blocks_into_epoch + EPOCH_LENGTH_BLOCKS,
+        "validators": eligible,
+        "total_staked": total_staked as f64 / micro,
+        "my_stake": my_stake as f64 / micro,
+        "i_am_validator": my_stake >= p2p::pos_consensus::MIN_VALIDATOR_STAKE,
+        "quorum_num": 2,
+        "quorum_den": 3,
     }))
 }
 
@@ -854,6 +1008,7 @@ pub fn run() {
             get_my_reputation, transfer_atn, stake_atn, get_trust_leaderboard,
             get_energy_stats, get_consensus_stats, get_network_health,
             get_ledger_stats, get_chain_overview, get_chain_history, get_recent_txs, get_balance, ledger_transfer,
+            ledger_stake, ledger_unstake, get_wallet_overview, get_finality_status,
             verify_ledger,
             get_economy_stats,
             get_gossip_stats,

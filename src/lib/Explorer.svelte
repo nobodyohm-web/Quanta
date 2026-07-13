@@ -111,7 +111,7 @@
             {searched.keyShort}
           </button>
         </div>
-        <button style="background:none;border:none;cursor:pointer;color:var(--color-text-3);" onclick={() => searched = null}>
+        <button style="background:none;border:none;cursor:pointer;color:var(--color-text-3);" aria-label={t('help.close_aria')} onclick={() => searched = null}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3l10 10M13 3L3 13"/></svg>
         </button>
       </div>

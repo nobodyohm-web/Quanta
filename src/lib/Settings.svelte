@@ -456,7 +456,6 @@
   .ec-val { font-size: 18px; font-weight: 800; color: var(--color-text-0); font-family: var(--font-mono); }
   .ec-meta { font-size: 10px; color: var(--color-text-2); }
 
-  .econ-progress { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
   .ep-bar {
     height: 6px; border-radius: 3px;
     background: var(--color-bg-2); overflow: hidden;
