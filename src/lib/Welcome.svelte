@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import StrengthMeter from "./StrengthMeter.svelte";
   import Aurora from "./Aurora.svelte";
+  import QuantaMark from "./brand/QuantaMark.svelte";
   import LanguageSelect from "./LanguageSelect.svelte";
   import QuantumField from "./QuantumField.svelte";
   import { t } from "./i18n.svelte";
@@ -66,7 +67,7 @@
       <Aurora radius={0}>
         <div class="hero-inner">
           <div class="brand">
-            <div class="coin-glass">Q</div>
+            <div class="coin-glass"><QuantaMark size={28} tone="white" /></div>
             <span class="wordmark">QUANTA</span>
           </div>
           <h1 class="headline">{@html t("welcome.headline")}</h1>

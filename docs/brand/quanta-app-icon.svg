@@ -1,0 +1,33 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14C8B8"/>
+      <stop offset="0.45" stop-color="#0BA5A0"/>
+      <stop offset="0.8" stop-color="#3D6FE0"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="0.18" cy="0.12" r="0.65">
+      <stop offset="0" stop-color="#14C8B8" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#14C8B8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.88" cy="0.2" r="0.6">
+      <stop offset="0" stop-color="#7C3AED" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#7C3AED" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="229" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="229" fill="url(#glow1)"/>
+  <rect width="1024" height="1024" rx="229" fill="url(#glow2)"/>
+  <rect width="1024" height="1024" rx="229" fill="url(#sheen)"/>
+  <!-- The mark: ring r=320 centred 512,512, 60° gap to the SE; detached tail
+       on the 45° diagonal from radius 277 → 491. Stroke 117, round caps
+       (identical proportions to QuantaMark 48-unit geometry × 21.33). -->
+  <path d="M594.7 819.5 A320 320 0 1 1 819.5 594.7"
+        stroke="#ffffff" stroke-width="117" stroke-linecap="round"/>
+  <line x1="655.3" y1="655.3" x2="836.3" y2="836.3"
+        stroke="#ffffff" stroke-width="117" stroke-linecap="round"/>
+</svg>
