@@ -17,6 +17,14 @@ mod p2p;
 mod storage;
 mod commands_v3;
 
+/// Tauri-agnostic node boot path (DB, endpoint, background tasks), shared by the
+/// desktop app and the headless `quanta-node` daemon. See `node_runtime.rs`.
+pub mod node_runtime;
+
+/// JSON-RPC 2.0 over HTTP — the integration surface (wallets, explorers, exchange
+/// deposit monitoring). Served by the daemon. See `rpc.rs`.
+pub mod rpc;
+
 /// Deterministic, sans-IO state-machine core (Phase 0 simulation harness, task
 /// T0.1). Boundary types (`Event`/`Effect`) + determinism abstractions
 /// (`Clock`/`Rng`). See `QUANTA_T0_DST_HARNESS.md`. Public so simulation/fuzz
@@ -94,6 +102,28 @@ pub struct AppState {
     /// background tasks (e.g. chain-sync handlers) to emit progress events
     /// to the frontend without holding a handle through every call site.
     pub app_handle: tokio::sync::RwLock<Option<tauri::AppHandle>>,
+}
+
+impl AppState {
+    /// Construct a fresh node state. `app_handle` starts `None` — the desktop app
+    /// fills it during Tauri `.setup()`; the headless daemon leaves it `None` (and
+    /// every event emitter already guards on it), so the same core runs both ways.
+    pub fn new() -> Self {
+        Self {
+            crypto: Mutex::new(CryptoEngine::new()),
+            db: Mutex::new(None),
+            node: WillowNode::new(),
+            unlock_guard: UnlockGuard::default(),
+            display_name: tokio::sync::RwLock::new(None),
+            app_handle: tokio::sync::RwLock::new(None),
+        }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── Gossip stats ───────────────────────────────────────────────
@@ -1262,23 +1292,10 @@ pub fn run() {
     // `ring` coexiste dans le graphe → panique runtime. L'installer ici, une
     // fois, lève cette ambiguïté de façon déterministe. Idempotent : renvoie
     // `Err` si déjà installé (ex. par une lib) — sans conséquence.
-    if rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .is_err()
-    {
-        log::debug!("◈ [PQ] fournisseur rustls aws-lc-rs déjà installé");
-    } else {
-        log::info!("◈ [PQ] transport post-quantique armé — échange de clés X25519MLKEM768 (aws-lc-rs)");
-    }
+    // PQ-TRANSPORT-1: install aws-lc-rs (X25519MLKEM768) as the process default.
+    node_runtime::install_crypto_provider();
 
-    let app_state = Arc::new(AppState {
-        crypto: Mutex::new(CryptoEngine::new()),
-        db: Mutex::new(None),
-        node: WillowNode::new(),
-        unlock_guard: UnlockGuard::default(),
-        display_name: tokio::sync::RwLock::new(None),
-        app_handle: tokio::sync::RwLock::new(None),
-    });
+    let app_state = Arc::new(AppState::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1291,42 +1308,9 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 *state.app_handle.write().await = Some(handle);
-                // ── Init Database ────────────────────────────────────
-                let data_dir = dirs::data_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("quanta-protocol");
-                // Auto-migrate from legacy DB name
-                let legacy_path = data_dir.join("swe_titan.db");
-                let db_path = data_dir.join("quanta.db");
-                if legacy_path.exists() && !db_path.exists() {
-                    let _ = std::fs::rename(&legacy_path, &db_path);
-                    log::info!("◈ [Quanta] Migrated DB: swe_titan.db → quanta.db");
-                }
-                match storage::db::Database::new(&db_path).await {
-                    Ok(database) => {
-                        // Restore all persisted state
-                        p2p::state_persistence::restore_state(&state, &database).await;
-                        *state.db.lock().await = Some(database);
-                        log::info!("◈ [Quanta] libSQL initialized at {:?}", db_path);
-                    }
-                    Err(e) => log::error!("◈ [Quanta] DB init failed: {}", e),
-                }
-
-                // ── Init Iroh P2P endpoint ───────────────────────────
-                match state.node.init_endpoint().await {
-                    Ok(()) => log::info!("◈ [Quanta] Iroh QUIC endpoint active"),
-                    Err(e) => log::warn!("◈ [Quanta] P2P offline: {} (local mode)", e),
-                }
-
-                // ── Spawn background tasks ───────────────────────────
-                p2p::gossip_tasks::spawn_outgoing_drain(state.clone());
-                p2p::gossip_tasks::spawn_incoming_dispatch(state.clone());
-                p2p::gossip_tasks::spawn_hello_broadcast(state.clone());
-                p2p::gossip_tasks::spawn_ping_broadcast(state.clone());
-                p2p::gossip_tasks::spawn_peer_cleanup(state.clone());
-                p2p::gossip_tasks::spawn_auto_reconnect(state.clone());
-                p2p::mining_loop::spawn(state.clone());
-                p2p::state_persistence::spawn_persistence(state.clone());
+                // Shared boot path (DB + endpoint + all background tasks). The app
+                // mines; the daemon (bin/quanta-node) calls the same fn with mine=false.
+                node_runtime::bootstrap(&state, node_runtime::default_data_dir(), true).await;
             });
             Ok(())
         })
