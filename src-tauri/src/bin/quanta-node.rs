@@ -4,15 +4,17 @@
 //! GUI**, and serves a JSON-RPC endpoint for wallets, block explorers and exchange
 //! integrations (deposit monitoring, address validation, chain queries).
 //!
-//! It boots with an **ephemeral in-memory ML-DSA identity**: enough to sign gossip
-//! envelopes and participate in the network, but it is **not** a user wallet — no
-//! vault, no persisted key, and (mining off by default) it never credits itself. In
-//! other words: a safe watch / relay / integration node.
+//! Two identity modes:
+//! - **Ephemeral** (default): an in-memory ML-DSA identity — joins gossip and serves
+//!   the RPC, but holds no funds (a safe watch / relay / integration node).
+//! - **Persistent wallet** (`QUANTA_WALLET_PASSWORD` set): unlocks an existing wallet
+//!   or creates one in the data dir (Ed25519 + ML-DSA primary), so the node can mine
+//!   to a stable address, hold funds, and sign its own sends (`sendtoaddress`).
 //!
 //! ```text
 //! quanta-node [--data-dir <path>] [--rpc-addr <ip:port>] [--mine]
 //! ```
-//! `RUST_LOG` controls logging (e.g. `RUST_LOG=info`).
+//! `RUST_LOG` controls logging; `QUANTA_WALLET_PASSWORD` selects the wallet.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,23 +33,28 @@ async fn main() {
 
     let state = Arc::new(AppState::new());
 
-    // Ephemeral in-memory ML-DSA identity: lets the node sign gossip envelopes and
-    // join the network. NOT a wallet — no vault, no persistence — so it can never
-    // spend anyone's funds. (Only ML-DSA is needed on the gossip path per PQ-ENVELOPE-1.)
-    {
-        let mut crypto = state.crypto.lock().await;
-        if let Err(e) = crypto.generate_pq_identity() {
-            log::error!("◈ [quanta-node] identité éphémère impossible: {e}");
-        }
+    // `QUANTA_WALLET_PASSWORD` opens a PERSISTENT wallet (unlock existing / create
+    // new) so the node can hold funds, mine to a stable address and sign its own
+    // sends. Absent → an ephemeral in-memory identity: joins gossip, holds no funds.
+    let wallet_password = std::env::var("QUANTA_WALLET_PASSWORD").ok().filter(|s| !s.is_empty());
+
+    // DB first (identity persistence lives there), then the wallet, then the network
+    // (the mining loop, if enabled, needs the identity established before it starts).
+    node_runtime::open_db(&state, cfg.data_dir.clone()).await;
+    if let Err(e) = node_runtime::establish_wallet(&state, wallet_password.as_deref()).await {
+        log::error!("◈ [quanta-node] initialisation du wallet impossible: {e}");
+        std::process::exit(1);
     }
+    node_runtime::start_network(&state, cfg.mine).await;
 
-    node_runtime::bootstrap(&state, cfg.data_dir.clone(), cfg.mine).await;
-
+    let address = state.crypto.lock().await.pq_address_bech32().unwrap_or_default();
     log::info!(
-        "◈ [quanta-node] démarré — data-dir={:?} rpc=http://{} mine={}",
+        "◈ [quanta-node] démarré — data-dir={:?} rpc=http://{} mine={} wallet={} addr={}",
         cfg.data_dir,
         cfg.rpc_addr,
-        cfg.mine
+        cfg.mine,
+        if wallet_password.is_some() { "persistent" } else { "ephemeral" },
+        address
     );
 
     let shutdown = state.node.shutdown.clone();
@@ -122,5 +129,7 @@ fn print_help() {
     println!("  --mine              Enable block production (default: off — watch/relay node)");
     println!("  -h, --help          Show this help\n");
     println!("ENV:");
-    println!("  RUST_LOG            Log level (info, debug, …)");
+    println!("  RUST_LOG                 Log level (info, debug, …)");
+    println!("  QUANTA_WALLET_PASSWORD   If set, opens a persistent wallet (unlock/create);");
+    println!("                           otherwise the node runs with an ephemeral identity");
 }
