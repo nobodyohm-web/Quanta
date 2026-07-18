@@ -1203,6 +1203,24 @@ async fn get_economy_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<ser
 pub fn run() {
     env_logger::init();
 
+    // PQ-TRANSPORT-1 (2026-07-18) — installe `aws-lc-rs` comme fournisseur
+    // cryptographique rustls **par défaut du process**. C'est le seul fournisseur
+    // qui porte le groupe d'échange hybride post-quantique `X25519MLKEM768`
+    // (activé par la feature `prefer-post-quantum`). iroh configure son propre
+    // fournisseur explicitement, mais tout autre chemin TLS 1.3 (ex. HTTPS vers
+    // un relay) qui s'appuie sur le fournisseur « par défaut » serait ambigu si
+    // `ring` coexiste dans le graphe → panique runtime. L'installer ici, une
+    // fois, lève cette ambiguïté de façon déterministe. Idempotent : renvoie
+    // `Err` si déjà installé (ex. par une lib) — sans conséquence.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        log::debug!("◈ [PQ] fournisseur rustls aws-lc-rs déjà installé");
+    } else {
+        log::info!("◈ [PQ] transport post-quantique armé — échange de clés X25519MLKEM768 (aws-lc-rs)");
+    }
+
     let app_state = Arc::new(AppState {
         crypto: Mutex::new(CryptoEngine::new()),
         db: Mutex::new(None),
