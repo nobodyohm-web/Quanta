@@ -196,6 +196,7 @@ const METHODS: &[&str] = &[
     "getfinalityheight",
     "gettransaction",
     "listtransactions",
+    "sendrawtransaction",
     "listmethods",
 ];
 
@@ -338,6 +339,74 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             }))
         }
 
+        // Broadcast a PRE-SIGNED transaction (the withdrawal side of an exchange
+        // integration: the integrator builds + signs with their own custody, the
+        // node relays). Authority is the sender's ML-DSA signature — re-verified
+        // here by the exact same gate the network uses for a gossiped tx, so this
+        // RPC can never inject an unsigned or forged tx.
+        "sendrawtransaction" => {
+            use crate::p2p::ledger::VerifiedTx;
+            use crate::p2p::ledger_types::TxType;
+
+            let tx_val = params.get("tx").ok_or((-32602, "missing 'tx' param".to_string()))?;
+            let tx: crate::p2p::ledger::Transaction = if let Some(s) = tx_val.as_str() {
+                serde_json::from_str(s).map_err(|_| (-32602, "invalid tx json".to_string()))?
+            } else {
+                serde_json::from_value(tx_val.clone()).map_err(|_| (-32602, "invalid tx object".to_string()))?
+            };
+
+            // A Slash is block-only (its authority is an in-block fault proof, and
+            // `verify_tx` exempts it from the signature gate) — never admit one here.
+            if matches!(tx.tx_type, TxType::Slash) {
+                return Err((-32602, "slash tx not accepted via RPC (block-only)".into()));
+            }
+            // Synthetic senders (`NETWORK`, `ESCROW`) are block-internal only.
+            if tx.from == "NETWORK" || tx.from == "ESCROW" {
+                return Err((-32602, "synthetic sender not allowed".into()));
+            }
+
+            // Keep a copy for gossip; the token is consumed by the local apply.
+            let tx_gossip = tx.clone();
+
+            // THE signature gate — same `VerifiedTx::new` the dispatcher uses.
+            let vtx = VerifiedTx::new(tx).ok_or((-32003, "invalid transaction signature".to_string()))?;
+            let (from, to, amount, tx_type) = {
+                let t = vtx.tx();
+                (t.from.clone(), t.to.clone(), t.amount, t.tx_type.clone())
+            };
+
+            // Local admission — mirror `handle_broadcast_tx`: reconcile the CRDT
+            // mirror, then apply through the single signature-gated ledger entry
+            // point (idempotent, dedup by tx hash). Locks released before crypto.
+            if tx_type == TxType::Transfer {
+                let mut cons = state.node.consensus.write().await;
+                cons.ledger.debit(&from, &from, amount);
+                cons.ledger.credit(&from, &to, amount);
+            }
+            let applied = {
+                let mut ledger = state.node.ledger.write().await;
+                ledger.apply_verified_remote_tx(vtx)
+            };
+
+            // Relay to peers, wrapped in an envelope signed by THIS node's identity
+            // (transport auth); peers re-verify the tx's own signature on receipt.
+            {
+                let crypto = state.crypto.lock().await;
+                if let Some(sender_pk) = crypto.pq_identity_hex() {
+                    crate::broadcast_signed_tx(state, &crypto, &sender_pk, &tx_gossip).await;
+                }
+            }
+
+            Ok(json!({
+                "accepted": true,
+                "applied": applied,
+                "txid": tx_gossip.hash,
+                "from": from,
+                "to": to,
+                "amount_uqta": amount,
+            }))
+        }
+
         _ => Err((-32601, "method not found".into())),
     }
 }
@@ -383,5 +452,47 @@ mod tests {
         let bal = dispatch(&state, "getbalance", &json!({ "address": addr })).await.unwrap();
         assert_eq!(bal["spendable_uqta"], json!(0));
         assert_eq!(bal["staked_uqta"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn sendrawtransaction_accepts_signed_and_rejects_bad() {
+        use crate::p2p::ledger::{Ledger, MICRO};
+        use crate::security::CryptoEngine;
+
+        // Build a valid, signed Transfer tx with a throwaway funded ledger.
+        // Building a tx signs authority on both layers (Ed25519 co-factor + the
+        // ML-DSA primary that the account is actually bound to), so seed both.
+        let mut crypto = CryptoEngine::new();
+        let _ = crypto.generate_keypair();
+        crypto.generate_pq_identity().unwrap();
+        let from = crypto.pq_address_hex().unwrap();
+        let to = CryptoEngine::ml_dsa_address_hex(b"rpc-recipient-key");
+        let mut tmp = Ledger::new();
+        tmp.mine_tx(&from, 100 * MICRO, 0.0);
+        let (tx, _burn, _net) = tmp.transfer_with_burn(&from, &to, 10 * MICRO, &crypto).unwrap();
+        let tx_json = serde_json::to_string(&tx).unwrap();
+
+        let state = test_state().await;
+
+        // Valid signature → accepted (independent of this node's local balance).
+        let ok = dispatch(&state, "sendrawtransaction", &json!({ "tx": tx_json })).await.unwrap();
+        assert_eq!(ok["accepted"], json!(true));
+        assert_eq!(ok["txid"], json!(tx.hash));
+
+        // Tampered amount → signature no longer matches → rejected.
+        let mut bad: Value = serde_json::from_str(&tx_json).unwrap();
+        bad["amount"] = json!(tx.amount + 1);
+        let err = dispatch(&state, "sendrawtransaction", &json!({ "tx": bad.to_string() })).await;
+        assert_eq!(err.unwrap_err().0, -32003);
+
+        // A synthetic-sender tx (Mining, from = NETWORK) is refused outright.
+        let mint = tmp.mine_tx(&to, MICRO, 0.0);
+        let mint_json = serde_json::to_string(&mint).unwrap();
+        let err2 = dispatch(&state, "sendrawtransaction", &json!({ "tx": mint_json })).await;
+        assert_eq!(err2.unwrap_err().0, -32602);
+
+        // Missing param → error.
+        let err3 = dispatch(&state, "sendrawtransaction", &json!({})).await;
+        assert_eq!(err3.unwrap_err().0, -32602);
     }
 }
