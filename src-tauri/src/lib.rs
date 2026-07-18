@@ -160,17 +160,34 @@ async fn create_identity(
     if display_name.is_empty() { return Err("Le nom d'affichage est requis".into()); }
     if password.len() < 8 { return Err("Mot de passe trop court (min. 8)".into()); }
 
+    create_wallet(state.inner(), &display_name, &password).await
+}
+
+/// Create + persist a new wallet identity (Ed25519 + the **independent** ML-DSA
+/// primary — the PQ tx-authority key the ledger binds, seeded separately via OsRng
+/// so a quantum break of Ed25519 cannot yield it). Headless-callable: shared by the
+/// `create_identity` command and the `quanta-node` daemon's persistent wallet.
+pub(crate) async fn create_wallet(
+    state: &Arc<AppState>,
+    display_name: &str,
+    password: &str,
+) -> Result<security::pq_vault::QuantaIdentity, String> {
+    let display_name = display_name.trim().to_string();
+    if display_name.is_empty() {
+        return Err("Le nom d'affichage est requis".into());
+    }
+    if password.len() < 8 {
+        return Err("Mot de passe trop court (min. 8)".into());
+    }
     let mut engine = state.crypto.lock().await;
-    let (id, pk_bytes, enc_sk, nonce) = PQVault::create_identity(&mut engine, &display_name, &password)?;
-    // PQ-MIG-3 §3: establish + persist the **independent** ML-DSA primary — the
-    // post-quantum tx-authority key the ledger binds. Its 32-byte root seed is
-    // generated separately (OsRng, not derived from the Ed25519 seed) and stored
-    // encrypted alongside the identity, so a quantum break of Ed25519 cannot yield it.
-    let (pq_pk, pq_enc, pq_nonce) = PQVault::create_pq_identity(&mut engine, &password)?;
+    let (id, pk_bytes, enc_sk, nonce) = PQVault::create_identity(&mut engine, &display_name, password)?;
+    let (pq_pk, pq_enc, pq_nonce) = PQVault::create_pq_identity(&mut engine, password)?;
     let db = state.db.lock().await;
     let dbref = db.as_ref().ok_or("DB not ready")?;
     dbref.store_keypair(&pk_bytes, &enc_sk, &nonce, &display_name).await?;
-    dbref.save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce)).await?;
+    dbref
+        .save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce))
+        .await?;
     Ok(id)
 }
 
@@ -193,27 +210,40 @@ async fn unlock_identity(
     state: tauri::State<'_, Arc<AppState>>, password: String,
 ) -> Result<security::pq_vault::QuantaIdentity, String> {
     state.unlock_guard.check().await?;
+    match unlock_wallet(state.inner(), &password).await {
+        Ok(id) => {
+            state.unlock_guard.on_success().await;
+            Ok(id)
+        }
+        Err(e) => {
+            state.unlock_guard.on_failure().await;
+            Err(e)
+        }
+    }
+}
+
+/// Unlock the stored wallet identity (Ed25519 + restore/TOFU-establish the ML-DSA
+/// primary). Headless-callable: shared by the `unlock_identity` command (which adds
+/// the brute-force guard) and the daemon's persistent wallet (self-unlock).
+pub(crate) async fn unlock_wallet(
+    state: &Arc<AppState>,
+    password: &str,
+) -> Result<security::pq_vault::QuantaIdentity, String> {
     let db = state.db.lock().await;
     let dbref = db.as_ref().ok_or("DB not ready")?;
     let kp = dbref.get_active_keypair().await?.ok_or("No identity")?;
     let mut engine = state.crypto.lock().await;
-    let id = match PQVault::unlock_identity(
+    let id = PQVault::unlock_identity(
         &mut engine,
-        &kp.public_key, &kp.encrypted_secret_key, &kp.nonce,
-        &password,
+        &kp.public_key,
+        &kp.encrypted_secret_key,
+        &kp.nonce,
+        password,
         &kp.display_name,
         &kp.created_at,
-    ) {
-        Ok(id) => id,
-        Err(e) => {
-            state.unlock_guard.on_failure().await;
-            return Err(e);
-        }
-    };
-    // PQ-MIG-3 §3: restore the independent ML-DSA primary (the tx-authority key).
-    // A legacy identity created before PQ-MIG-3 has no stored bundle yet — establish
-    // and persist one now (TOFU at first unlock), so every unlocked wallet can sign
-    // post-quantum-authoritative transactions.
+    )?;
+    // PQ-MIG-3 §3: restore the independent ML-DSA primary. A legacy identity created
+    // before PQ-MIG-3 has no bundle yet — TOFU-establish one at first unlock.
     match dbref.load_state(PQ_IDENTITY_KEY).await? {
         Some(json) => {
             let v: serde_json::Value =
@@ -223,16 +253,15 @@ async fn unlock_identity(
                 .map_err(|_| "PQ identity invalide".to_string())?;
             let nonce: Vec<u8> = serde_json::from_value(v["nonce"].clone())
                 .map_err(|_| "PQ identity invalide".to_string())?;
-            PQVault::unlock_pq_identity(&mut engine, pq_pk, &enc_seed, &nonce, &password)?;
+            PQVault::unlock_pq_identity(&mut engine, pq_pk, &enc_seed, &nonce, password)?;
         }
         None => {
-            let (pq_pk, pq_enc, pq_nonce) = PQVault::create_pq_identity(&mut engine, &password)?;
+            let (pq_pk, pq_enc, pq_nonce) = PQVault::create_pq_identity(&mut engine, password)?;
             dbref
                 .save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce))
                 .await?;
         }
     }
-    state.unlock_guard.on_success().await;
     Ok(id)
 }
 

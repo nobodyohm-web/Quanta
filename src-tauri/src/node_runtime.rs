@@ -39,20 +39,14 @@ pub fn default_data_dir() -> PathBuf {
         .join("quanta-protocol")
 }
 
-/// Boot the node: open libSQL (restoring any persisted state), start the Iroh QUIC
-/// endpoint, and spawn all background tasks (gossip drain/dispatch, hello/ping,
-/// peer cleanup, auto-reconnect, persistence, and — when `mine` is set — the mining
-/// loop). Shared verbatim by the app and the daemon. Never panics: a failed DB or
-/// endpoint degrades to local/offline mode, exactly like the app.
-///
-/// `mine` gates block production: the desktop app passes `true`; a watch/relay
-/// daemon passes `false` (it syncs and serves queries without producing blocks).
-pub async fn bootstrap(state: &Arc<AppState>, data_dir: PathBuf, mine: bool) {
-    // ── Database ────────────────────────────────────────────────────────────
+/// Open libSQL (creating the data dir + migrating the legacy name) and restore any
+/// persisted state into `state`. Call before establishing an identity or starting
+/// the network. Never panics — a DB failure degrades to in-memory/local mode.
+pub async fn open_db(state: &Arc<AppState>, data_dir: PathBuf) {
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         log::warn!("◈ [Quanta] data dir {:?} non créé: {}", data_dir, e);
     }
-    // Auto-migrate from the legacy DB name (pre-rebrand), same as the app.
+    // Auto-migrate from the legacy DB name (pre-rebrand).
     let legacy_path = data_dir.join("swe_titan.db");
     let db_path = data_dir.join("quanta.db");
     if legacy_path.exists() && !db_path.exists() {
@@ -67,14 +61,17 @@ pub async fn bootstrap(state: &Arc<AppState>, data_dir: PathBuf, mine: bool) {
         }
         Err(e) => log::error!("◈ [Quanta] DB init failed: {}", e),
     }
+}
 
-    // ── Iroh P2P endpoint ───────────────────────────────────────────────────
+/// Start the Iroh QUIC endpoint and spawn every background task (gossip drain/
+/// dispatch, hello/ping liveness, peer cleanup, auto-reconnect, persistence, and —
+/// when `mine` is set — the mining loop). Call after [`open_db`] (and, for the
+/// daemon, after establishing an identity). Never panics.
+pub async fn start_network(state: &Arc<AppState>, mine: bool) {
     match state.node.init_endpoint().await {
         Ok(()) => log::info!("◈ [Quanta] Iroh QUIC endpoint active"),
         Err(e) => log::warn!("◈ [Quanta] P2P offline: {} (local mode)", e),
     }
-
-    // ── Background tasks ────────────────────────────────────────────────────
     p2p::gossip_tasks::spawn_outgoing_drain(state.clone());
     p2p::gossip_tasks::spawn_incoming_dispatch(state.clone());
     p2p::gossip_tasks::spawn_hello_broadcast(state.clone());
@@ -85,4 +82,40 @@ pub async fn bootstrap(state: &Arc<AppState>, data_dir: PathBuf, mine: bool) {
         p2p::mining_loop::spawn(state.clone());
     }
     p2p::state_persistence::spawn_persistence(state.clone());
+}
+
+/// Full boot for the desktop app: open the DB, then start the network. (The app
+/// establishes its wallet interactively via the UI, so no identity is set here —
+/// the mining loop idles until the user unlocks.) `mine` gates block production.
+pub async fn bootstrap(state: &Arc<AppState>, data_dir: PathBuf, mine: bool) {
+    open_db(state, data_dir).await;
+    start_network(state, mine).await;
+}
+
+/// Establish the node's signing identity.
+///
+/// - `Some(password)` → open a **persistent wallet** from the DB: unlock an existing
+///   one, or create a new one (Ed25519 + ML-DSA primary). The node can then hold
+///   funds, mine to a stable address, and sign its own sends. Requires [`open_db`]
+///   to have run first.
+/// - `None` → an **ephemeral in-memory** ML-DSA identity: the node participates in
+///   gossip but holds no funds (a watch / relay node).
+pub async fn establish_wallet(state: &Arc<AppState>, password: Option<&str>) -> Result<(), String> {
+    match password {
+        None => state.crypto.lock().await.generate_pq_identity().map(|_| ()),
+        Some(pw) => {
+            let has_wallet = {
+                let db = state.db.lock().await;
+                match db.as_ref() {
+                    Some(d) => d.get_active_keypair().await.ok().flatten().is_some(),
+                    None => return Err("DB not open (call open_db before establish_wallet)".into()),
+                }
+            };
+            if has_wallet {
+                crate::unlock_wallet(state, pw).await.map(|_| ())
+            } else {
+                crate::create_wallet(state, "quanta-node", pw).await.map(|_| ())
+            }
+        }
+    }
 }

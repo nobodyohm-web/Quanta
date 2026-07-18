@@ -197,6 +197,9 @@ const METHODS: &[&str] = &[
     "gettransaction",
     "listtransactions",
     "sendrawtransaction",
+    "getwalletinfo",
+    "getnewaddress",
+    "sendtoaddress",
     "listmethods",
 ];
 
@@ -407,6 +410,74 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             }))
         }
 
+        // ── Wallet RPC (only meaningful when the node runs a persistent wallet,
+        //    i.e. was started with QUANTA_WALLET_PASSWORD) ─────────────────────
+
+        "getwalletinfo" => {
+            let (has_wallet, address, hexs) = {
+                let c = state.crypto.lock().await;
+                (
+                    c.pq_identity_hex().is_some(),
+                    c.pq_address_bech32().unwrap_or_default(),
+                    c.pq_address_hex().unwrap_or_default(),
+                )
+            };
+            let ledger = state.node.ledger.read().await;
+            Ok(json!({
+                "has_wallet": has_wallet,
+                "address": address,
+                "spendable_uqta": ledger.balance_of(&hexs),
+                "staked_uqta": ledger.staked_of(&hexs),
+            }))
+        }
+
+        "getnewaddress" => {
+            let c = state.crypto.lock().await;
+            match c.pq_address_bech32() {
+                Some(a) => Ok(json!({ "address": a })),
+                None => Err((-32603, "node has no wallet identity".into())),
+            }
+        }
+
+        // Build + sign a transfer from the node's OWN wallet and broadcast it.
+        // Requires a persistent wallet (Ed25519 + ML-DSA); an ephemeral watch node
+        // returns an error rather than silently doing nothing.
+        "sendtoaddress" => {
+            let to_input = param_str(params, "address")?;
+            let amount = param_u64(params, "amount_uqta")?;
+            if amount == 0 {
+                return Err((-32602, "amount_uqta must be > 0".into()));
+            }
+            let to = hex::encode(
+                address::parse(&to_input).map_err(|_| (-32602, "invalid address".to_string()))?,
+            );
+            // Lock ordering: crypto → ledger → gossip (held throughout, like the
+            // desktop wallet's send). Both legs (transfer + 1% burn) are broadcast.
+            let crypto = state.crypto.lock().await;
+            let from = crypto
+                .pq_address_hex()
+                .ok_or((-32603, "node has no wallet identity".to_string()))?;
+            let sender_pk = crypto
+                .pq_identity_hex()
+                .ok_or((-32603, "node has no wallet identity".to_string()))?;
+            let (tx, burn_tx, burn_uqta) = {
+                let mut ledger = state.node.ledger.write().await;
+                ledger
+                    .transfer_with_burn(&from, &to, amount, &crypto)
+                    .map_err(|e| (-32000, e))?
+            };
+            for leg in std::iter::once(&tx).chain(burn_tx.as_ref()) {
+                crate::broadcast_signed_tx(state, &crypto, &sender_pk, leg).await;
+            }
+            Ok(json!({
+                "txid": tx.hash,
+                "from": from,
+                "to": to,
+                "amount_uqta": amount,
+                "burn_uqta": burn_uqta,
+            }))
+        }
+
         _ => Err((-32601, "method not found".into())),
     }
 }
@@ -494,5 +565,51 @@ mod tests {
         // Missing param → error.
         let err3 = dispatch(&state, "sendrawtransaction", &json!({})).await;
         assert_eq!(err3.unwrap_err().0, -32602);
+    }
+
+    #[tokio::test]
+    async fn wallet_rpc_info_getnewaddress_and_send() {
+        use crate::p2p::ledger::MICRO;
+        use crate::security::CryptoEngine;
+
+        let state = test_state().await;
+
+        // No wallet identity yet → info reports it, and the key-holding methods refuse.
+        let info = dispatch(&state, "getwalletinfo", &json!({})).await.unwrap();
+        assert_eq!(info["has_wallet"], json!(false));
+        assert_eq!(dispatch(&state, "getnewaddress", &json!({})).await.unwrap_err().0, -32603);
+        let no_id = dispatch(
+            &state,
+            "sendtoaddress",
+            &json!({ "address": CryptoEngine::ml_dsa_address_hex(b"x"), "amount_uqta": 1000 }),
+        )
+        .await;
+        assert_eq!(no_id.unwrap_err().0, -32603);
+
+        // Give the node a full wallet identity (Ed25519 + ML-DSA) and fund it.
+        let from_hex = {
+            let mut c = state.crypto.lock().await;
+            let _ = c.generate_keypair();
+            c.generate_pq_identity().unwrap();
+            c.pq_address_hex().unwrap()
+        };
+        {
+            state.node.ledger.write().await.mine_tx(&from_hex, 100 * MICRO, 0.0);
+        }
+
+        let info2 = dispatch(&state, "getwalletinfo", &json!({})).await.unwrap();
+        assert_eq!(info2["has_wallet"], json!(true));
+        assert_eq!(info2["spendable_uqta"], json!(100 * MICRO));
+
+        let newaddr = dispatch(&state, "getnewaddress", &json!({})).await.unwrap();
+        assert!(newaddr["address"].as_str().unwrap().starts_with("qta1"));
+
+        // Send from the node's wallet → a signed tx is produced and echoed.
+        let to = CryptoEngine::ml_dsa_address_hex(b"wallet-rpc-recipient");
+        let sent = dispatch(&state, "sendtoaddress", &json!({ "address": to, "amount_uqta": 10 * MICRO }))
+            .await
+            .unwrap();
+        assert!(!sent["txid"].as_str().unwrap().is_empty());
+        assert_eq!(sent["amount_uqta"], json!(10 * MICRO));
     }
 }
