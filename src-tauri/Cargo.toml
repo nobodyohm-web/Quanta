@@ -30,9 +30,36 @@ tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 
 # ─── P2P (Iroh / Willow / QUIC) ───
-iroh = "0.98"
+# PQ-TRANSPORT-1 (2026-07-18): la couche de transport négocie désormais un
+# échange de clés **hybride post-quantique** `X25519MLKEM768` (défense contre
+# « harvest-now-decrypt-later » sur le canal QUIC). Cela impose de basculer le
+# fournisseur cryptographique de rustls de `ring` vers `aws-lc-rs` (seul à
+# fournir ML-KEM-768), d'où `default-features = false` + `tls-aws-lc-rs` en
+# remplacement du `tls-ring` par défaut. Les autres features par défaut d'iroh
+# 0.98 (`metrics`, `fast-apple-datapath`, `portmapper`) sont conservées à
+# l'identique — aucun changement de comportement relay/discovery/gossip.
+# ⚠️ Limite connue : l'**identité de nœud** (NodeId) reste Ed25519 — Iroh
+# attend un consensus d'industrie sur la signature PQ des EndpointIds ; on
+# bascule le jour où c'est livré (dette upstream, cf. CLAUDE.md).
+iroh = { version = "0.98", default-features = false, features = [
+    "metrics",
+    "fast-apple-datapath",
+    "portmapper",
+    "tls-aws-lc-rs",
+] }
 iroh-blobs = "0.100"
 iroh-gossip = "0.98"
+
+# PQ-TRANSPORT-1 — rustls en dépendance **directe** uniquement pour activer la
+# feature `prefer-post-quantum`, qui fait préférer `X25519MLKEM768` dans la
+# poignée de main TLS 1.3 sous-jacente à QUIC. `default-features = false` :
+# l'unification de features de Cargo réunit ceci avec les features rustls
+# qu'iroh exige déjà (additif — on n'éteint rien), on ne fait qu'**ajouter** la
+# préférence PQ. Version alignée sur le rustls 0.23.x déjà verrouillé par iroh.
+rustls = { version = "0.23", default-features = false, features = [
+    "aws_lc_rs",
+    "prefer-post-quantum",
+] }
 
 # ─── Hashing (BLAKE3 — 10 Go/s verified streaming) ───
 blake3 = "1.8"
