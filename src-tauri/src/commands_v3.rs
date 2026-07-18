@@ -30,16 +30,6 @@ async fn sign_pq_hex(state: &Arc<AppState>, msg: &[u8]) -> Result<String, String
     Ok(hex::encode(sig))
 }
 
-/// L'identité **transport** (clé publique Ed25519) — signe les enveloppes gossip.
-async fn my_pk(state: &Arc<AppState>) -> Result<String, String> {
-    state
-        .crypto
-        .lock()
-        .await
-        .get_identity()
-        .map(|i| i.public_key_hex)
-}
-
 /// PQ-MIG-3B — l'identité de **valeur** (adresse ML-DSA) : c'est le wallet, la
 /// cible de `@pseudo`, la clé du solde. `to`/`from`/`owner_pk` partout.
 async fn my_address(state: &Arc<AppState>) -> Result<String, String> {
@@ -62,12 +52,14 @@ async fn my_pq_key(state: &Arc<AppState>) -> Result<String, String> {
 }
 
 /// Wrap + signe + envoie une enveloppe gossip (pipeline B/C/D).
+/// PQ-ENVELOPE-1 : l'enveloppe est signée ML-DSA-65 ; le `sender` est la clé
+/// publique ML-DSA primaire.
 async fn wrap_broadcast(state: &Arc<AppState>, msg: GossipMessage) -> Result<(), String> {
-    let pk = my_pk(state).await?;
+    let pk = my_pq_key(state).await?;
     let ts = chrono::Utc::now().to_rfc3339();
     let nonce = state.node.gossip.read().await.next_outgoing_nonce();
     let signable = GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
-    let sig = state.crypto.lock().await.sign(&signable)?;
+    let sig = state.crypto.lock().await.sign_pq(&signable)?;
     let env = GossipRouter::build_signed_envelope(pk, msg, nonce, ts, &sig)?;
     state.node.gossip.write().await.mark_seen(&env.id);
     let _ = state.node.gossip_tx.send(env);

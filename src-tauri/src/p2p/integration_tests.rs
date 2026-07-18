@@ -358,8 +358,10 @@ mod integration_tests {
     #[test]
     fn int3_gossip_envelope_full_round_trip() {
         let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
-        let pk = &id.public_key_hex;
+        crypto.generate_pq_identity().expect("ml-dsa primary");
+        // PQ-ENVELOPE-1: envelope sender + signature = ML-DSA-65 primary key.
+        let pk = crypto.pq_identity_hex().expect("ml-dsa primary");
+        let pk = &pk;
 
         let msg = GossipMessage::Ping { nonce: 42 };
         let timestamp = chrono::Utc::now().to_rfc3339();
@@ -368,8 +370,8 @@ mod integration_tests {
         // Step 1: Build signable bytes
         let signable = GossipRouter::signable_envelope_bytes(pk, nonce, &timestamp, &msg);
 
-        // Step 2: Sign
-        let sig = crypto.sign(&signable).expect("signing must succeed");
+        // Step 2: Sign (ML-DSA-65)
+        let sig = crypto.sign_pq(&signable).expect("signing must succeed");
 
         // Step 3: Build envelope
         let env = GossipRouter::build_signed_envelope(

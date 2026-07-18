@@ -525,8 +525,8 @@ impl Node {
         // PQ-MIG-3B: the **value** identity — the miner-reward target and the
         // proposer-election key — is this node's ML-DSA address (`from`/`to` are
         // addresses everywhere now, and `validator_stakes()` is keyed by
-        // address). The envelope carrying the block is still signed by the
-        // Ed25519 **transport** key (see `sign_envelope`), which is deferred.
+        // address). The envelope carrying the block is signed by the ML-DSA-65
+        // **primary key** (PQ-ENVELOPE-1, see `sign_envelope`).
         let pk = self.identity.as_ref()?.pq_address_hex()?;
         if !self.is_elected_proposer_at(now, &pk, validators) {
             return None;
@@ -587,16 +587,24 @@ impl Node {
     ///
     /// The envelope timestamp comes from the **injected** virtual clock (no
     /// system-clock read), the outgoing nonce is the core's own monotonic
-    /// counter, and the signature is deterministic Ed25519 — so the produced
-    /// bytes are fully reproducible from the seed. Returns `None` (consuming no
-    /// nonce) when there is no identity or any step fails.
+    /// counter, and the signature is deterministic ML-DSA-65 (PQ-ENVELOPE-1) —
+    /// so the produced bytes are fully reproducible from the seed. Returns `None`
+    /// (consuming no nonce) when there is no identity or any step fails.
     fn sign_envelope(&mut self, msg: GossipMessage) -> Option<Vec<u8>> {
         let nonce = self.out_nonce;
         let timestamp = millis_to_rfc3339(self.now_ms);
         let crypto = self.identity.as_ref()?;
-        let pk = crypto.get_identity().ok()?.public_key_hex;
+        // PQ-ENVELOPE-1: envelope sender + signature identity = ML-DSA-65 primary key.
+        let pk = crypto.pq_identity_hex()?;
         let signable = GossipRouter::signable_envelope_bytes(&pk, nonce, &timestamp, &msg);
-        let sig = crypto.sign(&signable).ok()?;
+        // C1: the `Node` core is instantiated only under sim/DST (cfg(test)),
+        // which needs byte-reproducible signatures ⇒ the deterministic ML-DSA
+        // signer. Production ML-DSA signing stays hedged (fault-attack
+        // resistance) and is never reached here.
+        #[cfg(test)]
+        let sig = crypto.sign_pq_det(&signable).ok()?;
+        #[cfg(not(test))]
+        let sig = crypto.sign_pq(&signable).ok()?;
         let env = GossipRouter::build_signed_envelope(pk, msg, nonce, timestamp, &sig).ok()?;
         let bytes = serde_json::to_vec(&env).ok()?;
         // Consume the nonce only once the message is fully built.
@@ -820,13 +828,13 @@ mod tests {
     #[test]
     fn broadcast_tx_is_applied_to_ledger_through_core() {
         let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        let _id = crypto.generate_keypair();
         crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3
         // PQ-MIG-3B: the **value** identity (`from`/balance key) is the ML-DSA
-        // address; the **transport** identity (gossip envelope sender) stays the
-        // Ed25519 key.
+        // address. PQ-ENVELOPE-1: the gossip envelope sender is the ML-DSA-65
+        // primary public key.
         let addr = crypto.pq_address_hex().expect("ml-dsa address");
-        let sender = id.public_key_hex.clone();
+        let sender = crypto.pq_identity_hex().expect("ml-dsa primary");
         let recipient = "r".repeat(64);
 
         // Origin builds a SIGNED transfer (sender funded so it's valid).
@@ -843,7 +851,7 @@ mod tests {
         let timestamp = "2026-03-01T12:00:00+00:00".to_string();
         let nonce = 0_u64;
         let signable = GossipRouter::signable_envelope_bytes(&sender, nonce, &timestamp, &msg);
-        let sig = crypto.sign(&signable).unwrap();
+        let sig = crypto.sign_pq_det(&signable).unwrap();
         let env = GossipRouter::build_signed_envelope(
             sender.clone(),
             msg,
@@ -933,12 +941,14 @@ mod tests {
     /// A signed gossip envelope wrapping `msg` from `crypto`'s identity,
     /// timestamped at `now_ms` (envelope nonce 0).
     fn signed_envelope(crypto: &CryptoEngine, msg: GossipMessage, now_ms: u64) -> Vec<u8> {
-        let pk = crypto.get_identity().unwrap().public_key_hex;
+        // PQ-ENVELOPE-1: sender + signature = ML-DSA-65 primary key (deterministic
+        // signer keeps DST envelopes byte-reproducible, C1).
+        let pk = crypto.pq_identity_hex().unwrap();
         let ts = chrono::DateTime::from_timestamp_millis(now_ms as i64)
             .unwrap()
             .to_rfc3339();
         let signable = GossipRouter::signable_envelope_bytes(&pk, 0, &ts, &msg);
-        let sig = crypto.sign(&signable).unwrap();
+        let sig = crypto.sign_pq_det(&signable).unwrap();
         let env = GossipRouter::build_signed_envelope(pk, msg, 0, ts, &sig).unwrap();
         serde_json::to_vec(&env).unwrap()
     }
@@ -984,8 +994,8 @@ mod tests {
         assert!(matches!(env.payload, GossipMessage::Pong { nonce: 1234 }));
         assert_eq!(
             env.sender,
-            seeded_identity(1).get_identity().unwrap().public_key_hex,
-            "the Pong must be signed by us, the responder"
+            seeded_identity(1).pq_identity_hex().unwrap(),
+            "the Pong must be signed by us (ML-DSA-65 primary key, PQ-ENVELOPE-1)"
         );
     }
 

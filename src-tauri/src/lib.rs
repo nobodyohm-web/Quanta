@@ -954,12 +954,14 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     let uqta = quanta_to_uqta(amount)?;
     let crypto = state.crypto.lock().await;
     // PQ-MIG-3B: the account identity (`from`, balance key, and the CRDT/reputation
-    // mirror key) is the ML-DSA **address**; the gossip envelope sender stays the
-    // Ed25519 **transport** key (deferred). `to` is already an address (64-hex).
+    // mirror key) is the ML-DSA **address**. PQ-ENVELOPE-1: the gossip envelope
+    // sender is the ML-DSA **primary public key**. `to` is already an address (64-hex).
     let from = crypto
         .pq_address_hex()
         .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
-    let transport_pk = crypto.get_identity()?.public_key_hex;
+    let sender_pk = crypto
+        .pq_identity_hex()
+        .ok_or("Identité ML-DSA absente")?;
     let mut ledger = state.node.ledger.write().await;
     let (tx, burn_tx, burn_uqta) = ledger.transfer_with_burn(&from, &to, uqta, &crypto)?;
     let net_uqta = uqta - burn_uqta;
@@ -981,7 +983,7 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     //   stay aligned with ours. AUDIT-TX-2: a previous bug only sent the
     //   transfer leg, leaving every other node with a 1% balance gap.
     for tx_obj in std::iter::once(&tx).chain(burn_tx.as_ref()) {
-        broadcast_signed_tx(&state, &crypto, &transport_pk, tx_obj).await;
+        broadcast_signed_tx(&state, &crypto, &sender_pk, tx_obj).await;
     }
     log::info!("◈ [Transfer] Broadcast {} QUANTA (+{:.6} burn) → {}",
         amount, burn_uqta as f64 / p2p::ledger::MICRO as f64, &to[..12]);
@@ -994,14 +996,15 @@ async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amo
     }))
 }
 
-/// Sign a `BroadcastTx` gossip envelope for `tx` with the transport key and
-/// queue it for the network. Shared by every user-authored tx command
-/// (transfer, burn leg, stake, unstake) so all legs propagate identically
-/// (AUDIT-TX-2 taught us what happens when one leg is forgotten).
+/// Sign a `BroadcastTx` gossip envelope for `tx` with the ML-DSA-65 envelope
+/// identity (PQ-ENVELOPE-1) and queue it for the network. Shared by every
+/// user-authored tx command (transfer, burn leg, stake, unstake) so all legs
+/// propagate identically (AUDIT-TX-2 taught us what happens when one leg is
+/// forgotten).
 async fn broadcast_signed_tx(
     state: &Arc<AppState>,
     crypto: &CryptoEngine,
-    transport_pk: &str,
+    sender_pk: &str,
     tx: &p2p::ledger_types::Transaction,
 ) {
     let Ok(tx_json) = serde_json::to_string(tx) else { return };
@@ -1009,10 +1012,10 @@ async fn broadcast_signed_tx(
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = state.node.gossip.read().await.next_outgoing_nonce();
     let signable =
-        p2p::gossip::GossipRouter::signable_envelope_bytes(transport_pk, nonce, &timestamp, &msg);
-    let sig = crypto.sign(&signable).unwrap_or_default();
+        p2p::gossip::GossipRouter::signable_envelope_bytes(sender_pk, nonce, &timestamp, &msg);
+    let sig = crypto.sign_pq(&signable).unwrap_or_default();
     if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(
-        transport_pk.to_string(), msg, nonce, timestamp, &sig,
+        sender_pk.to_string(), msg, nonce, timestamp, &sig,
     ) {
         state.node.gossip.write().await.mark_seen(&env.id);
         let _ = state.node.gossip_tx.send(env);
@@ -1035,11 +1038,11 @@ async fn ledger_stake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Re
     let from = crypto
         .pq_address_hex()
         .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
-    let transport_pk = crypto.get_identity()?.public_key_hex;
+    let sender_pk = crypto.pq_identity_hex().ok_or("Identité ML-DSA absente")?;
     let mut ledger = state.node.ledger.write().await;
     let tx = ledger.stake_tx(&from, uqta, &crypto)?;
     drop(ledger);
-    broadcast_signed_tx(&state, &crypto, &transport_pk, &tx).await;
+    broadcast_signed_tx(&state, &crypto, &sender_pk, &tx).await;
     log::info!("◈ [Stake] Broadcast {} QUANTA → bonded at next seal", amount);
     Ok(serde_json::json!({ "tx": tx }))
 }
@@ -1058,11 +1061,11 @@ async fn ledger_unstake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> 
     let from = crypto
         .pq_address_hex()
         .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
-    let transport_pk = crypto.get_identity()?.public_key_hex;
+    let sender_pk = crypto.pq_identity_hex().ok_or("Identité ML-DSA absente")?;
     let mut ledger = state.node.ledger.write().await;
     let tx = ledger.unstake_tx(&from, uqta, &crypto)?;
     drop(ledger);
-    broadcast_signed_tx(&state, &crypto, &transport_pk, &tx).await;
+    broadcast_signed_tx(&state, &crypto, &sender_pk, &tx).await;
     log::info!("◈ [Unstake] Broadcast {} QUANTA → unbonding at next seal", amount);
     Ok(serde_json::json!({ "tx": tx }))
 }
