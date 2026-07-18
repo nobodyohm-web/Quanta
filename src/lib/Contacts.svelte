@@ -116,29 +116,25 @@
   <!-- Mon adresse à partager -->
   <div class="card" style="margin-bottom:12px;">
     <div class="card-title">{t('ct.cardTitle')}</div>
-    <p style="font-size:13px;color:var(--color-text-2);margin-bottom:14px;">
-      {@html t('ct.cardDesc')}
-    </p>
+    <p class="cc-desc">{@html t('ct.cardDesc')}</p>
     <div class="cc-grid">
       <div class="cc-item">
-        <div class="cc-k">{t('ct.pseudo')}</div>
+        <div class="stat-label">{t('ct.pseudo')}</div>
         <div class="cc-v mono">{myUsername ? "@" + myUsername : "—"}</div>
         <button class="copy-btn" onclick={() => copy("pseudo")} disabled={!myUsername}>
           {copied === "pseudo" ? t('ct.copied') : t('ct.copy')}
         </button>
       </div>
       <div class="cc-item">
-        <div class="cc-k">{t('ct.connCode')}</div>
-        <div class="cc-v mono" style="letter-spacing:0.08em;">{myCode || "—"}</div>
+        <div class="stat-label">{t('ct.connCode')}</div>
+        <div class="cc-v cc-code mono">{myCode || "—"}</div>
         <button class="copy-btn" onclick={() => copy("code")} disabled={!myCode}>
           {copied === "code" ? t('ct.copied') : t('ct.copy')}
         </button>
       </div>
     </div>
     {#if !myUsername}
-      <div style="font-size:12px;color:var(--color-amber);margin-top:12px;">
-        {t('ct.reserveFirst')}
-      </div>
+      <div class="cc-note">{t('ct.reserveFirst')}</div>
     {/if}
   </div>
 
@@ -146,21 +142,21 @@
   <div class="card" style="margin-bottom:12px;">
     <div class="card-title">{t('ct.addTitle')}</div>
     <div class="add-grid">
-      <div class="form-group" style="margin:0;">
+      <div class="form-group">
         <div class="form-label">{t('ct.theirPseudo')}</div>
         <input class="input" placeholder="@maman" bind:value={addPseudo} />
       </div>
-      <div class="form-group" style="margin:0;">
+      <div class="form-group">
         <div class="form-label">{t('ct.theirCode')}</div>
         <input class="input mono" placeholder="K7P2-QM9X" bind:value={addCode}
           onkeydown={(e) => e.key === 'Enter' && addContact()} />
       </div>
-      <button class="btn btn-primary" style="align-self:end;" onclick={addContact} disabled={adding}>
+      <button class="btn btn-primary" onclick={addContact} disabled={adding}>
         {adding ? t('ct.verifying') : t('ct.link')}
       </button>
     </div>
-    {#if addErr}<div style="font-size:12px;color:var(--color-red);margin-top:10px;">{addErr}</div>{/if}
-    {#if addOk}<div style="font-size:12px;color:var(--color-green);margin-top:10px;">{addOk}</div>{/if}
+    {#if addErr}<div class="form-msg err">{addErr}</div>{/if}
+    {#if addOk}<div class="form-msg ok">{addOk}</div>{/if}
   </div>
 
   <!-- Mes proches -->
@@ -170,25 +166,27 @@
       <EmptyState minHeight={150}>{t('ct.empty')}</EmptyState>
     {:else}
       {#each contacts as c (c.pk)}
-        <div class="ct-row">
+        <div class="ct-row" class:open={sendFor === c.pk}>
           <Identicon pubkey={c.pk} size={36} />
-          <div style="flex:1;min-width:0;">
-            <div style="font-weight:700;color:var(--color-accent);">@{c.username}</div>
-            <div class="mono" style="font-size:11px;color:var(--color-text-3);">{c.code}</div>
+          <div class="ct-id">
+            <div class="ct-name">@{c.username}</div>
+            <div class="ct-code mono">{c.code}</div>
           </div>
-          <button class="btn btn-primary btn-sm" onclick={() => openSend(c.pk)}>{t('ct.send')}</button>
-          <button class="btn btn-ghost btn-sm" onclick={() => removeContact(c.pk)} title={t('ct.remove')} aria-label={t('ct.remove')}>×</button>
+          <div class="ct-actions">
+            <button class="btn btn-primary btn-sm" onclick={() => openSend(c.pk)}>{t('ct.send')}</button>
+            <button class="ct-remove" onclick={() => removeContact(c.pk)} title={t('ct.remove')} aria-label={t('ct.remove')}>×</button>
+          </div>
         </div>
         {#if sendFor === c.pk}
           <div class="ct-send">
-            <input class="input" type="number" min="0.01" step="0.01" placeholder={t('ct.amountPlaceholder')}
+            <input class="input mono" type="number" min="0.01" step="0.01" placeholder={t('ct.amountPlaceholder')}
               bind:value={sendAmount} onkeydown={(e) => e.key === 'Enter' && sendTo(c)} />
             <button class="btn btn-primary" onclick={() => sendTo(c)} disabled={sendBusy}>
               {#if sendBusy}{t('ct.sending')}{:else}{t('ct.sendToPre')}@{c.username}{/if}
             </button>
           </div>
           {#if sendMsg}
-            <div style="font-size:12px;margin:6px 0 10px;color:{sendMsg.ok ? 'var(--color-green)' : 'var(--color-red)'};">{sendMsg.text}</div>
+            <div class="ct-msg" class:ok={sendMsg.ok} class:err={!sendMsg.ok}>{sendMsg.text}</div>
           {/if}
         {/if}
       {/each}
@@ -197,23 +195,70 @@
 </div>
 
 <style>
+  /* ── Partage — deux tuiles calmes dans la carte blanche ── */
   .cc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .cc-item {
     background: var(--color-bg-2); border: 1px solid var(--color-border);
-    border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
+    border-radius: 12px; padding: 14px 16px;
+    display: flex; flex-direction: column;
   }
-  .cc-k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--color-text-3); font-weight: 600; }
   .cc-v { font-size: 20px; font-weight: 700; color: var(--color-text-0); }
-  .cc-item .copy-btn { align-self: flex-start; }
+  .cc-code { letter-spacing: 0.08em; }
+  .cc-item .copy-btn { align-self: flex-start; margin-top: 10px; }
+  .cc-desc { font-size: 13px; color: var(--color-text-2); line-height: 1.55; margin-bottom: 14px; }
+  .cc-note { font-size: 12px; color: var(--color-amber); margin-top: 12px; }
 
+  /* ── Ajouter ── */
   .add-grid { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
+  .add-grid .form-group { margin: 0; }
+  .form-msg { font-size: 12px; margin-top: 10px; }
+  .form-msg.err { color: var(--color-red); }
+  .form-msg.ok { color: var(--color-green); }
 
-  .ct-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--color-border); }
+  /* ── Liste — lignes aérées, actions discrètes au survol ── */
+  .ct-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--color-border);
+  }
   .ct-row:last-child { border-bottom: none; }
-  .ct-send { display: flex; gap: 8px; padding: 4px 0 6px 48px; }
+  .ct-row.open { border-bottom-color: transparent; }
+  .ct-id { flex: 1; min-width: 0; }
+  .ct-name { font-size: 14px; font-weight: 700; color: var(--color-accent); }
+  .ct-code {
+    font-size: 11px; color: var(--color-text-3);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ct-actions {
+    display: flex; align-items: center; gap: 8px;
+    opacity: 0; transition: opacity var(--dur-fast) var(--ease-out);
+  }
+  .ct-row:hover .ct-actions,
+  .ct-row:focus-within .ct-actions,
+  .ct-row.open .ct-actions { opacity: 1; }
+  @media (hover: none) { .ct-actions { opacity: 1; } }
+  .ct-remove {
+    width: 28px; height: 28px; border: none; border-radius: 8px;
+    background: transparent; color: var(--color-text-3);
+    font-size: 16px; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .ct-remove:hover { background: rgba(229,72,77,0.08); color: var(--color-red); }
+
+  /* ── Envoi inline — puits discret rattaché à la ligne ── */
+  .ct-send {
+    display: flex; align-items: center; gap: 8px;
+    margin: 2px 0 10px 48px; padding: 10px;
+    background: var(--color-bg-1); border: 1px solid var(--color-border);
+    border-radius: 12px;
+  }
   .ct-send .input { flex: 1; }
+  .ct-msg { font-size: 12px; margin: 0 0 10px 48px; }
+  .ct-msg.ok { color: var(--color-green); }
+  .ct-msg.err { color: var(--color-red); }
 
   @media (max-width: 720px) {
     .cc-grid, .add-grid { grid-template-columns: 1fr; }
+    .ct-send, .ct-msg { margin-left: 0; }
   }
 </style>

@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import Aurora from "./Aurora.svelte";
   import Identicon from "./Identicon.svelte";
   import Torus3D from "./Torus3D.svelte";
   import Qr from "./Qr.svelte";
@@ -360,8 +359,8 @@
 
 <div class="page">
 
-  <!-- ── Hero : le solde, la vérité de la chaîne ── -->
-  <div class="w-hero">
+  <!-- ── Hero : le solde, la vérité de la chaîne — le MOMENT de l'écran ── -->
+  <div class="card card-hero w-hero">
     {#if loading}
       <div class="skeleton sk-bal"></div>
       <div class="skeleton sk-unit"></div>
@@ -422,7 +421,7 @@
 
   <!-- ── Panel Envoyer ── -->
   {#if panel === "send"}
-    <div class="w-panel">
+    <div class="card w-panel">
       {#if !preview}
         <div class="section-label">{t('wallet.send.title')}</div>
         <div class="w-form">
@@ -450,7 +449,7 @@
           <div class="st-row"><span class="st-k">{t('wallet.send.recipientGets')}</span><span class="st-v mono recv">{fmtQ(preview.net)} QTA</span></div>
           <div class="st-row"><span class="st-k">{t('wallet.send.burned')} <span class="st-pill">{t('wallet.send.deflationary')}</span></span><span class="st-v mono burn">−{fmtQ(preview.burn)} QTA</span></div>
           <div class="st-row st-total"><span class="st-k">{t('wallet.send.balanceAfter')}</span><span class="st-v mono">{fmtQ(preview.balanceAfter)} QTA</span></div>
-          <button class="st-confirm" onclick={confirmSend} disabled={sendBusy}>
+          <button class="btn btn-primary st-confirm" onclick={confirmSend} disabled={sendBusy}>
             {sendBusy ? t('wallet.send.signing') : t('wallet.send.confirm')}
           </button>
           <button class="st-cancel" onclick={cancelPreview} disabled={sendBusy}>{t('wallet.send.cancel')}</button>
@@ -462,28 +461,26 @@
 
   <!-- ── Panel Recevoir — QR + lien de paiement, le geste universel ── -->
   {#if panel === "receive"}
-    <div class="w-panel">
-      <Aurora radius={18}>
-        <div class="rc-card">
-          {#if myUsername}
-            <div class="rc-top">
-              <Identicon pubkey={myPk} size={42} />
-              <div class="rc-pseudo">@{myUsername}</div>
-            </div>
-          {/if}
-          {#if paymentUri}
-            <Qr data={paymentUri} size={188} />
-          {/if}
-          <div class="rc-hint">{@html t('wallet.recv.scanHint')}</div>
-          {#if myUsername && connectionCode}
-            <button class="rc-code" onclick={copyCode} title={t('wallet.recv.copyCodeTitle')}>
-              <span class="rc-code-lab">{t('wallet.recv.codeLabel')}</span>
-              <span class="mono">{connectionCode}</span>
-              <span class="rc-code-act">{codeCopied ? t('wallet.recv.copiedLower') : t('wallet.recv.copyLower')}</span>
-            </button>
-          {/if}
-        </div>
-      </Aurora>
+    <div class="card w-panel">
+      <div class="rc-card">
+        {#if myUsername}
+          <div class="rc-top">
+            <Identicon pubkey={myPk} size={42} />
+            <div class="rc-pseudo">@{myUsername}</div>
+          </div>
+        {/if}
+        {#if paymentUri}
+          <Qr data={paymentUri} size={188} />
+        {/if}
+        <div class="rc-hint">{@html t('wallet.recv.scanHint')}</div>
+        {#if myUsername && connectionCode}
+          <button class="rc-code" onclick={copyCode} title={t('wallet.recv.copyCodeTitle')}>
+            <span class="rc-code-lab">{t('wallet.recv.codeLabel')}</span>
+            <span class="mono">{connectionCode}</span>
+            <span class="rc-code-act">{codeCopied ? t('wallet.recv.copiedLower') : t('wallet.recv.copyLower')}</span>
+          </button>
+        {/if}
+      </div>
 
       <div class="w-field" style="margin-top:16px;">
         <label for="w-req-amt">{t('wallet.recv.requestAmount')}</label>
@@ -494,7 +491,7 @@
       <div class="section-label" style="margin-top:16px;">{t('wallet.recv.uriLabel')}</div>
       <div class="w-pk-box">
         <code class="w-pk mono">{paymentUri || t('loading')}</code>
-        <button class="w-copy" onclick={copyUri} disabled={!paymentUri}>
+        <button class="copy-btn w-copy" onclick={copyUri} disabled={!paymentUri}>
           {uriCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
         </button>
       </div>
@@ -502,7 +499,7 @@
       {#if myUsername}
         <div class="w-pk-box" style="margin-top:8px;">
           <code class="w-pk mono" style="font-size:16px;font-weight:700;color:var(--color-accent);">@{myUsername}</code>
-          <button class="w-copy" onclick={copyUsername}>
+          <button class="copy-btn w-copy" onclick={copyUsername}>
             {unameCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
           </button>
         </div>
@@ -512,7 +509,7 @@
         <summary style="font-size:12px;color:var(--color-text-2);cursor:pointer;">{t('wallet.recv.showPublicKey')}</summary>
         <div class="w-pk-box" style="margin-top:8px;">
           <code class="w-pk mono">{myPk || t('loading')}</code>
-          <button class="w-copy" onclick={copyPk} disabled={!myPk}>
+          <button class="copy-btn w-copy" onclick={copyPk} disabled={!myPk}>
             {pkCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
           </button>
         </div>
@@ -524,7 +521,7 @@
 
   <!-- ── Panel Staking — l'enjeu on-chain, celui qui compte au consensus ── -->
   {#if panel === "stake"}
-    <div class="w-panel">
+    <div class="card w-panel">
       <div class="section-label">{t('wallet.stake.title')}</div>
 
       <div class="w-staked-row">
@@ -600,22 +597,22 @@
       <div class="w-info-list"><div class="skeleton sk-row"></div><div class="skeleton sk-row"></div></div>
     {:else}
       <div class="w-grid">
-        <div class="w-cell c-green">
+        <div class="card w-cell">
           <div class="w-cell-k">{t('wallet.available')}</div>
           <div class="w-cell-v mono" class:amt-private={privacy}>{(ov?.spendable ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.availableSub')}</div>
         </div>
-        <div class="w-cell c-violet">
+        <div class="card w-cell c-teal">
           <div class="w-cell-k">{t('wallet.inStaking')}</div>
           <div class="w-cell-v mono" class:amt-private={privacy}>{(ov?.staked ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.inStakingSub')}</div>
         </div>
-        <div class="w-cell c-amber">
+        <div class="card w-cell c-amber">
           <div class="w-cell-k">{t('wallet.unbonding')}</div>
           <div class="w-cell-v mono" class:amt-private={privacy}>{(ov?.unbonding ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.unbondingSub')}</div>
         </div>
-        <div class="w-cell c-teal">
+        <div class="card w-cell c-green">
           <div class="w-cell-k">{t('wallet.forged')}</div>
           <div class="w-cell-v mono" class:amt-private={privacy}>+{(ov?.earned ?? 0).toFixed(2)}</div>
           <div class="w-cell-s">{t('wallet.forgedSub')}</div>
@@ -636,13 +633,14 @@
   <div class="w-section">
     <div class="section-label">{t('wallet.activity')}</div>
 
-    <div class="w-filters" role="tablist" aria-label={t('wallet.activity')}>
-      <button class="w-pill" class:w-pill-on={filter === "all"} onclick={() => setFilter("all")} role="tab" aria-selected={filter === "all"}>{t('wallet.f.all')}</button>
-      <button class="w-pill" class:w-pill-on={filter === "out"} onclick={() => setFilter("out")} role="tab" aria-selected={filter === "out"}>{t('wallet.f.out')}</button>
-      <button class="w-pill" class:w-pill-on={filter === "in"} onclick={() => setFilter("in")} role="tab" aria-selected={filter === "in"}>{t('wallet.f.in')}</button>
-      <button class="w-pill" class:w-pill-on={filter === "mining"} onclick={() => setFilter("mining")} role="tab" aria-selected={filter === "mining"}>{t('wallet.f.mining')}</button>
-      <button class="w-pill" class:w-pill-on={filter === "stakeOps"} onclick={() => setFilter("stakeOps")} role="tab" aria-selected={filter === "stakeOps"}>{t('wallet.f.stakeOps')}</button>
-      <button class="w-pill" class:w-pill-on={filter === "burn"} onclick={() => setFilter("burn")} role="tab" aria-selected={filter === "burn"}>{t('wallet.f.burn')}</button>
+    <div class="card">
+    <div class="filter-tabs w-filters" role="tablist" aria-label={t('wallet.activity')}>
+      <button class="filter-tab" class:active={filter === "all"} onclick={() => setFilter("all")} role="tab" aria-selected={filter === "all"}>{t('wallet.f.all')}</button>
+      <button class="filter-tab" class:active={filter === "out"} onclick={() => setFilter("out")} role="tab" aria-selected={filter === "out"}>{t('wallet.f.out')}</button>
+      <button class="filter-tab" class:active={filter === "in"} onclick={() => setFilter("in")} role="tab" aria-selected={filter === "in"}>{t('wallet.f.in')}</button>
+      <button class="filter-tab" class:active={filter === "mining"} onclick={() => setFilter("mining")} role="tab" aria-selected={filter === "mining"}>{t('wallet.f.mining')}</button>
+      <button class="filter-tab" class:active={filter === "stakeOps"} onclick={() => setFilter("stakeOps")} role="tab" aria-selected={filter === "stakeOps"}>{t('wallet.f.stakeOps')}</button>
+      <button class="filter-tab" class:active={filter === "burn"} onclick={() => setFilter("burn")} role="tab" aria-selected={filter === "burn"}>{t('wallet.f.burn')}</button>
     </div>
 
     <div class="w-tx-list">
@@ -660,8 +658,11 @@
         {#each pageItems as row (row.kind === "tx" ? row.tx.id : row.key)}
           {#if row.kind === "mine"}
             <div class="w-tx-row">
+              <div class="tx-icon w-ic-mine" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3L5 13h5l-1 8 8-10h-5l1-8z"/></svg>
+              </div>
               <div class="w-tx-left">
-                <span class="w-tx-label">⚡ {t('wallet.mining')} · {row.label}</span>
+                <span class="w-tx-label">{t('wallet.mining')} · {row.label}</span>
                 <span class="w-tx-sub">{row.count} {row.count > 1 ? t('wallet.rewards') : t('wallet.reward')} · {t('wallet.auto')}</span>
               </div>
               <div class="w-tx-right">
@@ -676,6 +677,27 @@
             {@const isSlash = tx.tx_type === "Slash"}
             {@const isUnstake = tx.tx_type === "Unstake"}
             <div class="w-tx-row">
+              <div class="tx-icon"
+                class:w-ic-slash={isSlash}
+                class:w-ic-stake={!isSlash && (tx.tx_type === "Stake" || isUnstake)}
+                class:w-ic-burn={tx.tx_type === "Burn"}
+                class:w-ic-in={tx.tx_type === "Transfer" && inc}
+                class:w-ic-out={!isSlash && !isUnstake && tx.tx_type !== "Stake" && tx.tx_type !== "Burn" && !(tx.tx_type === "Transfer" && inc)}
+                aria-hidden="true">
+                {#if isSlash}
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4L3 19h18L12 4z"/><path d="M12 11v3M12 16.5h.01"/></svg>
+                {:else if tx.tx_type === "Stake"}
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>
+                {:else if isUnstake}
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.6-1.7"/></svg>
+                {:else if tx.tx_type === "Burn"}
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4c2.5 3-4 5-4 9a4 4 0 008 0c0-4-6.5-6-4-9z"/></svg>
+                {:else if inc}
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7L7 17M7 9v8h8"/></svg>
+                {:else}
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg>
+                {/if}
+              </div>
               <div class="w-tx-left">
                 <span class="w-tx-label" class:tx-slash={isSlash}>{txLabel(tx.tx_type)}</span>
                 <span class="w-tx-sub mono">{txSub(tx)}</span>
@@ -700,14 +722,14 @@
 
         {#if totalPages > 1}
           <div class="w-pager">
-            <button class="w-pager-btn"
+            <button class="btn btn-ghost btn-sm"
               onclick={() => page = Math.max(0, safePage - 1)}
               disabled={safePage === 0}
               aria-label={t('wallet.prevAria')}>
               {t('wallet.prev')}
             </button>
             <span class="w-pager-info mono">{safePage + 1} / {totalPages}</span>
-            <button class="w-pager-btn"
+            <button class="btn btn-ghost btn-sm"
               onclick={() => page = Math.min(totalPages - 1, safePage + 1)}
               disabled={safePage >= totalPages - 1}
               aria-label={t('wallet.nextAria')}>
@@ -717,22 +739,24 @@
         {/if}
       {/if}
     </div>
+    </div>
   </div>
 
 </div>
 
 <style>
-  /* Hero */
+  /* ── Hero — LE moment de l'écran : carte blanche, rail Aurora (card-hero) ── */
   .w-hero {
     display: flex; flex-direction: column; align-items: center;
-    padding: 8px var(--space-5) var(--space-8); gap: var(--space-1);
+    padding: 16px 24px 28px; gap: var(--space-1);
+    margin-bottom: 12px;
   }
   .w-balance {
     font-size: 48px; font-weight: 700; letter-spacing: -0.03em; line-height: 1;
     color: var(--color-text-0);
   }
   .w-unit {
-    font-size: 14px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
     color: var(--color-text-2); margin-top: var(--space-1);
   }
   .w-meta {
@@ -740,7 +764,7 @@
     font-size: 13px; color: var(--color-text-2); margin-top: var(--space-3);
   }
   .w-sep { opacity: 0.5; }
-  .w-pos { color: var(--quanta-accent); }
+  .w-pos { color: var(--cyan); font-weight: 600; }
   .w-coin3d { width: 100%; max-width: 340px; margin-bottom: 4px; }
   .w-bal-row { display: flex; align-items: center; gap: 10px; }
   .w-eye {
@@ -755,66 +779,78 @@
   .amt-private { filter: blur(10px); transition: filter 0.2s ease; }
   .amt-private:hover { filter: none; }
 
+  /* Skeletons — base (shimmer discret sur gris chaud) + tailles */
+  .skeleton {
+    background: linear-gradient(90deg, var(--color-bg-2) 25%, var(--color-bg-3) 50%, var(--color-bg-2) 75%);
+    background-size: 200% 100%;
+    animation: sk-shimmer 1.4s ease infinite;
+  }
+  @keyframes sk-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
   .sk-bal  { width: 180px; height: 54px; border-radius: var(--radius-sm); }
   .sk-unit { width: 48px; height: 18px; border-radius: 4px; margin-top: 8px; }
   .sk-row  { width: 100%; height: 44px; border-radius: var(--radius-sm); margin-bottom: 6px; }
 
-  /* Actions */
+  /* Actions — trois tuiles blanches flottantes ; l'état actif porte le teal */
   .w-actions {
-    display: flex; gap: var(--space-2);
-    padding: 0 var(--space-5); margin-bottom: var(--space-6);
+    display: flex; gap: 10px; margin-bottom: 12px;
   }
   .w-btn {
     flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;
     padding: var(--space-3) var(--space-2); min-height: 44px;
-    background: var(--quanta-bg-elevated);
-    border: 1px solid var(--quanta-border); border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--color-border); border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
     color: var(--color-text-1);
-    font-family: inherit; font-size: 12px; font-weight: 500;
+    font-family: inherit; font-size: 12px; font-weight: 600;
     cursor: pointer;
-    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease,
+      color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out),
+      box-shadow var(--dur-fast) ease;
   }
-  .w-btn:hover { background: var(--color-bg-2); border-color: var(--quanta-border-h); color: var(--color-text-0); }
-  .w-active   { border-color: var(--quanta-accent) !important; color: var(--color-text-0) !important; }
+  .w-btn:hover { border-color: var(--color-border-hover); color: var(--color-text-0); transform: translateY(-1px); box-shadow: var(--shadow); }
+  .w-btn.w-active { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); transform: none; box-shadow: var(--shadow-sm); }
 
   /* Feedback */
   .w-fb {
-    margin: 0 var(--space-5) var(--space-4);
-    padding: 10px 14px; border-radius: var(--radius-sm);
+    margin: 0 0 12px;
+    padding: 10px 14px; border-radius: 10px;
     font-size: 13px; animation: fadeIn 0.15s ease-out;
   }
-  .w-fb-ok  { background: var(--quanta-accent-dim); color: var(--quanta-accent); border: 1px solid rgba(11,165,160,0.2); }
-  .w-fb-err { background: rgba(255,68,68,0.06); color: var(--quanta-negative); border: 1px solid rgba(255,68,68,0.15); }
+  .w-fb-ok  { background: var(--cyan-dim); color: var(--teal-700); border: 1px solid var(--cyan-mid); }
+  .w-fb-err { background: rgba(229,72,77,0.06); color: var(--color-red); border: 1px solid rgba(229,72,77,0.18); }
 
-  /* Panels */
-  .w-panel {
-    margin: 0 var(--space-5) var(--space-6);
-    padding: var(--space-5);
-    background: var(--color-bg-1); border: 1px solid var(--quanta-border);
-    border-radius: var(--radius); animation: fadeIn 0.15s ease-out;
-  }
+  /* Panels — cartes blanches globales (.card), seul l'agencement reste local */
+  .w-panel { margin-bottom: 12px; animation: fadeIn 0.15s ease-out; }
   .w-panel .section-label { margin-bottom: var(--space-4); }
   .w-field-hint { font-size: 11px; color: var(--color-text-3); margin-top: 4px; line-height: 1.45; }
 
-  /* Carte Aurora (Recevoir) — le "moment" partageable, QR au centre. */
+  /* Recevoir — moment de marque sanctionné : hairline Aurora + lavis très
+     léger sur carte claire (jamais de dégradé plein), QR au centre. */
   .rc-card {
     display: flex; flex-direction: column; align-items: center; text-align: center;
-    padding: 24px 22px; gap: 14px; color: #fff;
+    padding: 24px 22px; gap: 14px;
+    border: 1px solid transparent; border-radius: var(--radius-lg);
+    background:
+      linear-gradient(150deg, rgba(20,200,184,0.06), rgba(255,255,255,0) 45%, rgba(124,58,237,0.05)) padding-box,
+      linear-gradient(var(--surface), var(--surface)) padding-box,
+      var(--aurora-grad) border-box;
   }
   .rc-top { display: flex; align-items: center; gap: 12px; }
-  .rc-card :global(.identicon) { border: 2px solid rgba(255,255,255,0.7); box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
-  .rc-pseudo { font-size: 22px; font-weight: 800; letter-spacing: 0.01em; }
+  .rc-card :global(.identicon) { border: 2px solid var(--color-border); box-shadow: var(--shadow-sm); }
+  .rc-pseudo { font-size: 22px; font-weight: 800; letter-spacing: 0.01em; color: var(--color-text-0); }
   .rc-code {
     display: inline-flex; align-items: center; gap: 10px;
-    background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.4);
-    color: #fff; border-radius: 999px; padding: 7px 15px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--color-border-hover);
+    color: var(--color-text-0); border-radius: 999px; padding: 7px 15px; cursor: pointer;
+    box-shadow: var(--shadow-sm);
     font-size: 14px; font-weight: 700; letter-spacing: 0.12em;
-    backdrop-filter: blur(6px); transition: background 0.15s ease;
+    transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease;
   }
-  .rc-code:hover { background: rgba(255,255,255,0.26); }
-  .rc-code-lab { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; opacity: 0.8; }
-  .rc-code-act { font-size: 11px; font-weight: 600; opacity: 0.85; text-transform: lowercase; letter-spacing: 0; }
-  .rc-hint { font-size: 12.5px; line-height: 1.5; opacity: 0.95; max-width: 320px; }
+  .rc-code:hover { border-color: var(--cyan); color: var(--teal-700); }
+  .rc-code-lab { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--color-text-3); }
+  .rc-code-act { font-size: 11px; font-weight: 600; color: var(--color-text-2); text-transform: lowercase; letter-spacing: 0; }
+  .rc-hint { font-size: 12.5px; line-height: 1.5; color: var(--color-text-2); max-width: 320px; }
 
   /* Interop — la note honnête (standards, pas de fausse promesse). */
   .w-interop {
@@ -842,22 +878,15 @@
   .st-total .st-k, .st-total .st-v { font-weight: 700; font-size: 15px; color: var(--color-text-0); }
   .st-pill {
     font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-    padding: 2px 7px; border-radius: 999px;
-    background: var(--color-accent-dim); color: var(--color-accent-hover);
+    padding: 2px 7px; border-radius: 8px;
+    background: var(--cyan-dim); color: var(--teal-700);
   }
-  .st-confirm {
-    margin-top: 16px; width: 100%; padding: 14px; border: 0; cursor: pointer;
-    border-radius: 999px; color: #fff; font-size: 14px; font-weight: 700;
-    background: linear-gradient(120deg, #0BA5A0, #3D6FE0);
-    box-shadow: 0 8px 24px rgba(11,165,160,0.28);
-    transition: transform 0.12s ease, box-shadow 0.15s ease;
-  }
-  .st-confirm:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 30px rgba(11,165,160,0.34); }
-  .st-confirm:active:not(:disabled) { transform: translateY(0) scale(0.99); }
-  .st-confirm:disabled { opacity: 0.6; cursor: default; }
+  /* Confirmer = .btn-primary global (teal plein) ; seul l'agencement est local. */
+  .st-confirm { margin-top: 16px; width: 100%; }
   .st-cancel {
     margin-top: 8px; width: 100%; padding: 10px; cursor: pointer;
     background: none; border: 0; color: var(--color-text-2); font-size: 13px;
+    font-family: inherit;
   }
   .st-cancel:hover:not(:disabled) { color: var(--color-text-0); }
   .st-note {
@@ -866,15 +895,11 @@
   }
   @media (prefers-reduced-motion: reduce) { .s-tray { animation: none; } }
 
-  /* Vue d'ensemble — cartes colorées */
-  .w-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  /* Vue d'ensemble — cartes blanches globales (.card) ; la couleur ne vit
+     que dans le MONTANT (teal = bondé, ambre = déverrouillage, vert = forgé) */
+  .w-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
   @media (min-width: 660px) { .w-grid { grid-template-columns: repeat(4, 1fr); } }
-  .w-cell {
-    background: var(--color-bg-1); border: 1px solid var(--color-border);
-    border-radius: 12px; padding: 14px 16px;
-    transition: border-color 0.15s ease, transform 0.15s ease;
-  }
-  .w-cell:hover { border-color: var(--color-border-hover); transform: translateY(-1px); }
+  .w-cell { padding: 16px 18px; }
   .w-cell-k {
     font-size: 11px; color: var(--color-text-3); text-transform: uppercase;
     letter-spacing: 0.04em; font-weight: 600; margin-bottom: 8px;
@@ -886,14 +911,9 @@
     margin-top: 12px; font-size: 11.5px; color: var(--color-text-3);
   }
   .w-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-  .w-cell.c-green  { background: rgba(16,163,74,0.06);  border-color: rgba(16,163,74,0.28); }
-  .w-cell.c-green  .w-cell-v { color: var(--color-green); }
-  .w-cell.c-violet { background: rgba(124,58,237,0.06); border-color: rgba(124,58,237,0.28); }
-  .w-cell.c-violet .w-cell-v { color: #7c3aed; }
-  .w-cell.c-teal   { background: rgba(11,165,160,0.07); border-color: rgba(11,165,160,0.30); }
-  .w-cell.c-teal   .w-cell-v { color: var(--color-accent); }
-  .w-cell.c-amber  { background: rgba(232,129,12,0.06); border-color: rgba(232,129,12,0.28); }
-  .w-cell.c-amber  .w-cell-v { color: var(--color-amber); }
+  .w-cell.c-teal  .w-cell-v { color: var(--cyan); }
+  .w-cell.c-amber .w-cell-v { color: var(--color-amber); }
+  .w-cell.c-green .w-cell-v { color: var(--color-green); }
 
   .w-form  { display: flex; flex-direction: column; gap: var(--space-4); }
   .w-field { display: flex; flex-direction: column; gap: 6px; }
@@ -905,29 +925,23 @@
     border-radius: var(--radius-sm); margin-top: var(--space-3);
   }
   .w-pk { flex: 1; font-size: 12px; line-height: 1.7; color: var(--color-text-0); word-break: break-all; }
-  .w-copy {
-    flex-shrink: 0; padding: 8px 16px; min-height: 44px;
-    background: transparent; border: 1px solid var(--quanta-border);
-    border-radius: var(--radius-sm); color: var(--color-text-0);
-    font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
-    transition: background 0.15s ease, border-color 0.15s ease;
-  }
-  .w-copy:hover    { background: var(--color-bg-3); border-color: var(--quanta-border-h); }
+  /* Copier = .copy-btn global ; seuls la taille tactile et l'état disabled sont locaux. */
+  .w-copy { flex-shrink: 0; padding: 8px 14px; font-size: 12.5px; }
   .w-copy:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  /* Staking */
+  /* Staking — sobre : le teal marque le bondé, l'ambre le déverrouillage */
   .w-staked-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: var(--space-3) 0; border-bottom: 1px solid var(--quanta-border);
+    padding: var(--space-3) 0; border-bottom: 1px solid var(--color-border);
     font-size: 14px; color: var(--color-text-1);
   }
-  .w-staked-row .mono { color: var(--color-text-0); font-weight: 500; }
+  .w-staked-row .mono { color: var(--cyan); font-weight: 600; }
   .stk-pending { font-size: 11px; color: var(--color-amber); margin-left: 6px; font-weight: 600; }
   .stk-validator {
     margin-top: 10px; font-size: 12px; color: var(--color-text-2);
     padding: 8px 12px; background: var(--color-bg-2); border-radius: 8px; line-height: 1.5;
   }
-  .stk-validator.ok { color: var(--color-green); font-weight: 600; background: rgba(22,163,74,0.07); }
+  .stk-validator.ok { color: var(--teal-700); font-weight: 600; background: var(--cyan-dim); }
   .stk-unbond-list { display: flex; flex-direction: column; }
   .stk-unbond-row {
     display: flex; justify-content: space-between; align-items: center;
@@ -935,7 +949,7 @@
     font-size: 13px;
   }
   .stk-unbond-row:last-child { border-bottom: none; }
-  .stk-eta { font-size: 12px; color: var(--color-text-2); }
+  .stk-eta { font-size: 12px; color: var(--color-amber); }
   .stk-forms {
     display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4);
     margin-top: var(--space-5);
@@ -956,73 +970,46 @@
     font-size: 11px; font-weight: 700;
   }
 
-  /* Sections */
-  .w-section { padding: 0 var(--space-5); margin-bottom: var(--space-8); }
+  /* Sections — le canevas respire entre les cartes */
+  .w-section { margin: 20px 0 12px; }
 
-  /* Transactions */
+  /* Transactions — lignes aérées sur carte blanche, hairlines internes */
   .w-tx-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 0; border-bottom: 1px solid var(--quanta-border);
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 0; border-bottom: 1px solid var(--color-border);
   }
   .w-tx-row:last-child { border-bottom: none; }
-  .w-tx-left  { display: flex; flex-direction: column; gap: 2px; }
-  .w-tx-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  .w-tx-left  { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .w-tx-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; margin-left: auto; }
   .w-tx-label { font-size: 14px; font-weight: 500; color: var(--color-text-0); }
   .w-tx-sub   { font-size: 12px; color: var(--color-text-2); }
   .w-tx-time  { font-size: 12px; color: var(--color-text-2); }
   .w-tx-amt   { font-size: 14px; font-weight: 600; }
-  .tx-in      { color: var(--quanta-accent); }
-  .tx-out     { color: var(--color-text-1); }
+  .tx-in      { color: var(--cyan); }
+  .tx-out     { color: var(--color-text-0); }
   .tx-neutral { color: var(--color-text-2); }
   .tx-slash   { color: var(--color-red); }
 
-  /* Filtres */
-  .w-filters {
-    display: flex; flex-wrap: wrap; gap: 6px;
-    margin-bottom: var(--space-4);
-  }
-  .w-pill {
-    padding: 6px 12px;
-    background: var(--color-bg-1);
-    border: 1px solid var(--quanta-border);
-    border-radius: 999px;
-    color: var(--color-text-1);
-    font-family: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 200ms ease, border-color 200ms ease, color 200ms ease;
-  }
-  .w-pill:hover { background: var(--color-bg-2); color: var(--color-text-0); }
-  .w-pill-on { background: var(--color-bg-3); border-color: var(--quanta-border-h); color: var(--color-text-0); }
+  /* Icônes de ligne — teal entrant, encre sortant, rouge sobre pour Slash */
+  .w-ic-in    { background: var(--cyan-dim); color: var(--cyan); }
+  .w-ic-out   { background: var(--color-bg-3); color: var(--color-text-1); }
+  .w-ic-mine  { background: var(--cyan-dim); color: var(--cyan); }
+  .w-ic-stake { background: var(--cyan-dim); color: var(--teal-700); }
+  .w-ic-burn  { background: rgba(232,129,12,0.10); color: var(--color-amber); }
+  .w-ic-slash { background: rgba(229,72,77,0.08); color: var(--color-red); }
+
+  /* Filtres — vocabulaire global .filter-tabs/.filter-tab ; seul le wrap est local */
+  .w-filters { flex-wrap: wrap; margin-bottom: var(--space-3); }
 
   .w-tx-burn { font-size: 11px; color: var(--color-text-2); font-weight: 400; }
 
-  /* Pagination */
+  /* Pagination — boutons .btn-ghost globaux ; seul l'agencement est local */
   .w-pager {
     display: flex; align-items: center; justify-content: center;
     gap: var(--space-4);
-    padding: var(--space-5) 0 var(--space-2);
-    border-top: 1px solid var(--quanta-border);
+    padding: var(--space-4) 0 0;
+    border-top: 1px solid var(--color-border);
     margin-top: var(--space-2);
   }
-  .w-pager-btn {
-    padding: 8px 14px; min-height: 36px;
-    background: transparent;
-    border: 1px solid var(--quanta-border);
-    border-radius: var(--radius-sm);
-    color: var(--color-text-1);
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 200ms ease, color 200ms ease, border-color 200ms ease;
-  }
-  .w-pager-btn:hover:not(:disabled) {
-    background: var(--color-bg-2);
-    border-color: var(--quanta-border-h);
-    color: var(--color-text-0);
-  }
-  .w-pager-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .w-pager-info { font-size: 13px; color: var(--color-text-1); min-width: 48px; text-align: center; }
 </style>

@@ -173,28 +173,25 @@
     <span class="tag {modeColors[mode] ?? 'tag-dim'}">{badgeLabel[mode] ?? mode}</span>
   </div>
 
-  <!-- Identity card -->
-  <div class="card" style="margin-bottom:12px;display:flex;gap:24px;align-items:flex-start;">
+  <!-- Identité — LE moment de marque (@pseudo + adresse ML-DSA) -->
+  <div class="card card-hero id-hero">
     <Identicon pubkey={pk} size={80} />
-    <div style="flex:1;">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-        <span style="font-size:18px;font-weight:700;color:{username ? 'var(--color-accent)' : 'var(--color-text-2)'};">{username ? '@' + username : t('pf.noUsername')}</span>
-        <span class="tag {modeColors[mode] ?? 'tag-dim'}">{badgeLabel[mode] ?? mode}</span>
-      </div>
-      <div style="margin-bottom:12px;">
-        <div class="stat-label" style="margin-bottom:5px;">{t('pf.publicKey')}</div>
+    <div class="id-info">
+      <div class="id-handle" class:unnamed={!username}>{username ? '@' + username : t('pf.noUsername')}</div>
+      <div class="id-addr">
+        <div class="stat-label">{t('pf.publicKey')}</div>
         <button class="copy-btn" onclick={copyPk}>
           {#if copied}✓ {t('pf.copied')}{:else}{shortPk(pk)}{/if}
         </button>
       </div>
-      <div style="display:flex;gap:20px;flex-wrap:wrap;">
+      <div class="id-meta">
         <div>
-          <div style="font-size:11px;color:var(--color-text-3);">{t('pf.seniority')}</div>
-          <div class="mono" style="font-size:14px;font-weight:600;margin-top:2px;color:var(--color-text-2);">{formatJoined(joined)}</div>
+          <div class="stat-label">{t('pf.seniority')}</div>
+          <div class="mono id-meta-v dim">{formatJoined(joined)}</div>
         </div>
         <div>
-          <div style="font-size:11px;color:var(--color-text-3);">{t('pf.uptime')}</div>
-          <div class="mono" style="font-size:14px;font-weight:600;margin-top:2px;">{formatUptime(uptime)}</div>
+          <div class="stat-label">{t('pf.uptime')}</div>
+          <div class="mono id-meta-v">{formatUptime(uptime)}</div>
         </div>
       </div>
     </div>
@@ -202,9 +199,9 @@
 
   <!-- Public stats -->
   <div class="card" style="margin-bottom:12px;">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--color-text-3)" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c-2 2-3 4-3 6s1 4 3 6M8 2c2 2 3 4 3 6s-1 4-3 6"/></svg>
-      <div style="font-size:13px;font-weight:600;color:var(--color-text-2);letter-spacing:0.04em;">{t('pf.whatOthersSee')}</div>
+    <div class="card-title ct-row">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--color-text-3)" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c-2 2-3 4-3 6s1 4 3 6M8 2c2 2 3 4 3 6s-1 4-3 6"/></svg>
+      <span>{t('pf.whatOthersSee')}</span>
     </div>
     <div class="grid-3">
       <div>
@@ -265,7 +262,7 @@
   </div>
 
   <!-- Sécurité & Récupération -->
-  <div class="card sec-card" style="margin-bottom:12px;">
+  <div class="card" style="margin-bottom:12px;">
     <div class="sec-head">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="var(--color-accent)" stroke-width="1.5"><path d="M8 1.5l5.5 2.2V8c0 3.3-2.3 5.6-5.5 6.5C4.8 13.6 2.5 11.3 2.5 8V3.7L8 1.5z"/><path d="M5.8 8l1.6 1.6L10.4 6.6"/></svg>
       <div class="sec-title">{t('pf.secTitle')}</div>
@@ -279,7 +276,7 @@
 
     <!-- Code de connexion -->
     <div class="sec-block">
-      <div class="sec-k">{t('pf.connectionCode')}</div>
+      <div class="section-label">{t('pf.connectionCode')}</div>
       <div class="sec-row">
         <code class="mono sec-code">{myCode || '—'}</code>
         <button class="copy-btn" onclick={() => { navigator.clipboard?.writeText(myCode); }}>{t('pf.copy')}</button>
@@ -289,7 +286,7 @@
 
     <!-- Phrase de récupération -->
     <div class="sec-block">
-      <div class="sec-k">{t('pf.recoveryPhrase')}</div>
+      <div class="section-label">{t('pf.recoveryPhrase')}</div>
       {#if !recoveryOpen}
         <div class="sec-row">
           <span class="sec-hint" style="flex:1;">{t('pf.recoveryPhraseHint')}</span>
@@ -320,7 +317,7 @@
 
     <!-- Facteurs de récupération d'urgence (autonomie totale) -->
     <div class="sec-block" style="border-bottom:none;padding-bottom:0;">
-      <div class="sec-k">{t('pf.emergencyRecovery')}</div>
+      <div class="section-label">{t('pf.emergencyRecovery')}</div>
       <div class="sec-hint" style="margin-bottom:10px;">
         {t('pf.emergencyRecoveryHint')}
       </div>
@@ -376,9 +373,9 @@
 
   <!-- Private section -->
   <div class="card" style="opacity:0.65;">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--color-text-3)" stroke-width="1.5"><rect x="3" y="7" width="10" height="8" rx="1.5"/><path d="M5 7V5a3 3 0 016 0v2"/></svg>
-      <div style="font-size:13px;font-weight:600;color:var(--color-text-2);letter-spacing:0.04em;">{t('pf.privateInfo')}</div>
+    <div class="card-title ct-row">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--color-text-3)" stroke-width="1.5"><rect x="3" y="7" width="10" height="8" rx="1.5"/><path d="M5 7V5a3 3 0 016 0v2"/></svg>
+      <span>{t('pf.privateInfo')}</span>
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
       <div style="width:40px;height:40px;border-radius:8px;background:var(--color-bg-3);display:flex;align-items:center;justify-content:center;">
@@ -398,12 +395,31 @@
 </div>
 
 <style>
-  .sec-card { border: 1px solid var(--color-border); }
+  /* ── Hero identité — le moment de marque (@pseudo, rail Aurora via .card-hero) ── */
+  .id-hero {
+    margin-bottom: 12px;
+    display: flex; gap: 24px; align-items: center;
+    padding: 26px 28px;
+  }
+  .id-info { flex: 1; min-width: 0; }
+  .id-handle {
+    font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+    color: var(--color-accent); margin-bottom: 12px;
+  }
+  .id-handle.unnamed { color: var(--color-text-2); }
+  .id-addr { margin-bottom: 14px; }
+  .id-meta { display: flex; gap: 28px; flex-wrap: wrap; }
+  .id-meta-v { font-size: 14px; font-weight: 600; margin-top: 2px; }
+
+  /* Titre de carte avec icône (variante de .card-title) */
+  .ct-row { display: flex; align-items: center; gap: 7px; }
+  .ct-row svg { flex-shrink: 0; }
+
+  /* ── Sécurité ── */
   .sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
   .sec-title { font-size: 14px; font-weight: 700; color: var(--color-text-0); }
   .sec-intro { font-size: 13px; color: var(--color-text-2); margin-bottom: 16px; line-height: 1.6; }
   .sec-block { padding: 14px 0; border-bottom: 1px solid var(--color-border); }
-  .sec-k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--color-text-3); font-weight: 600; margin-bottom: 8px; }
   .sec-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .sec-row .input { flex: 1; min-width: 140px; }
   .sec-hint { font-size: 12px; color: var(--color-text-2); }
@@ -417,7 +433,7 @@
   .sec-ok { font-size: 12px; color: var(--color-green); font-weight: 600; margin-top: 8px; }
   .sec-factor { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
   .sec-factor-ic {
-    width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+    width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     background: var(--color-accent-dim); color: var(--color-accent); font-size: 16px;
   }

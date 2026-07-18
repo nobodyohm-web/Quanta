@@ -21,15 +21,16 @@
   .lang-select { display: flex; flex-wrap: wrap; gap: 6px; }
   .lang-select button {
     font: inherit; font-size: 12px; font-weight: 600;
-    padding: 6px 12px; border-radius: 999px; cursor: pointer;
-    transition: all 0.15s ease;
+    padding: 6px 12px; border-radius: 8px; cursor: pointer;
+    transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
   }
-  /* solid (sur fond clair) */
+  /* solid (sur fond clair) — puce input-like */
   .solid button {
-    background: var(--color-bg-1); border: 1px solid var(--color-border);
-    color: var(--color-text-1);
+    background: var(--surface); border: 1px solid var(--color-border);
+    color: var(--color-text-1); box-shadow: var(--shadow-sm);
   }
-  .solid button:hover:not(.active) { border-color: var(--color-border-hover); }
+  .solid button:hover:not(.active) { border-color: var(--color-border-hover); background: var(--color-bg-1); }
+  .solid button:focus-visible { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-dim); outline: none; }
   .solid button.active {
     background: var(--color-accent); border-color: var(--color-accent); color: #fff;
   }

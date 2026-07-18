@@ -85,16 +85,16 @@
     position: fixed; inset: 0; z-index: 100;
     display: flex; align-items: flex-start; justify-content: center;
     padding-top: 20vh;
-    background: rgba(0, 0, 0, 0.65);
+    background: rgba(0, 0, 0, 0.32);
     backdrop-filter: blur(4px);
     animation: fadeIn 0.1s ease-out;
   }
   .cmd-box {
-    width: 520px; background: var(--color-bg-1);
-    border: 1px solid var(--color-border-hover);
+    width: 520px; background: var(--surface);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
     overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 122, 255, 0.08);
+    box-shadow: var(--shadow-lg);
   }
   .cmd-input {
     width: 100%; padding: 14px 18px;

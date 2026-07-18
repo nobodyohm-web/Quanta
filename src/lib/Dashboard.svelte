@@ -163,7 +163,7 @@
   </div>
 
   <!-- ── Hero : le réseau vivant + votre rythme de forge ── -->
-  <div class="card mine-hero">
+  <div class="card card-hero mine-hero">
     <div class="mh-torus">
       <MiningScene height={250} {peers} />
       <div class="mh-live">
