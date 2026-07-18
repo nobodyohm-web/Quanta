@@ -39,7 +39,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// all previously-valid history are UNCHANGED (purely-bonded slashes serialize
 /// byte-identically), so v3↔v4 nodes only diverge once an unbonding-consuming
 /// slash is sealed.
-pub const TORUS_PROTOCOL_VERSION: u8 = 4;
+///
+/// GENESIS-V4 / PROPOSER-1 / PQ-ENVELOPE-1: bumped **4 → 5** — the v4 hard-fork.
+/// Three coupled protocol changes: (a) a **fresh launch genesis** (new frozen
+/// hash, zero premine); (b) **PROPOSER-1** — a received non-genesis block whose
+/// proposer is not a bonded validator (as of the parent) is rejected, once anyone
+/// has staked (deterministic, clock-free); (c) **PQ-ENVELOPE-1** — gossip
+/// envelopes are signed with ML-DSA-65, not Ed25519. A v4 node neither builds nor
+/// validates any of these, so v4↔v5 nodes are incompatible from block 0.
+pub const TORUS_PROTOCOL_VERSION: u8 = 5;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
@@ -50,10 +58,10 @@ pub type MsgId = String;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipEnvelope {
     pub id: MsgId,
-    /// Clé publique Ed25519 de l'émetteur
+    /// Clé publique ML-DSA-65 de l'émetteur (PQ-ENVELOPE-1)
     pub sender: String,
     pub payload: GossipMessage,
-    /// Signature Ed25519 du payload sérialisé
+    /// Signature ML-DSA-65 des bytes canoniques de l'enveloppe (PQ-ENVELOPE-1)
     pub signature: String,
     /// Horodatage RFC3339 (fenêtre ±90s pour anti-replay)
     pub timestamp: String,
@@ -94,8 +102,8 @@ pub enum GossipMessage {
         /// NET-15: Optional display name for the frontend.
         /// Trimmed to MAX_DISPLAY_NAME_LEN by the dispatcher; carrying a longer
         /// string is treated as adversarial input and clamped without rejection.
-        /// The Hello envelope is already Ed25519-signed, so an attacker can't
-        /// inject a name without the wallet's private key — backward compat is
+        /// The Hello envelope is already ML-DSA-65-signed (PQ-ENVELOPE-1), so an
+        /// attacker can't inject a name without the wallet's private key — backward compat is
         /// guaranteed by `#[serde(default)]`.
         #[serde(default)]
         display_name: Option<String>,
@@ -162,8 +170,8 @@ pub enum GossipMessage {
     /// and, once a ⅔ certificate forms, the finality rule
     /// ([`crate::sm::finality_rule::FinalityState`], GADGET-3). The gadget's
     /// verdict stays a **pure function of the votes + on-chain stake** — this
-    /// variant only carries the vote across the wire; the envelope's Ed25519
-    /// signature is transport authentication (unchanged), the vote's own ML-DSA-65
+    /// variant only carries the vote across the wire; the envelope's ML-DSA-65
+    /// signature (PQ-ENVELOPE-1) is transport authentication, the vote's own ML-DSA-65
     /// signature is the finality authority.
     FinalityVote {
         vote_json: String,
@@ -426,7 +434,7 @@ impl GossipRouter {
     /// STRUCT-1: The caller must sign the bytes produced by `signable_envelope_bytes()`
     /// which covers sender + nonce + timestamp + payload.
     ///
-    /// The `sig_bytes` MUST be the Ed25519 signature of `signable_envelope_bytes(sender, nonce, &timestamp, &payload)`.
+    /// The `sig_bytes` MUST be the ML-DSA-65 signature (PQ-ENVELOPE-1) of `signable_envelope_bytes(sender, nonce, &timestamp, &payload)`.
     pub fn wrap_outgoing(
         sender: String,
         payload: GossipMessage,

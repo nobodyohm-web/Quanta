@@ -58,20 +58,21 @@ pub fn spawn(state: Arc<AppState>) {
 async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tick_start = Instant::now();
 
-    // PQ-MIG-3B: this node has two distinct identities.
-    //  • `pk`   — Ed25519 **transport** key: signs the outgoing gossip envelopes
-    //    (deferred; transport stays Ed25519).
+    // PQ-MIG-3B / PQ-ENVELOPE-1: this node has two distinct identities.
+    //  • `pk`   — ML-DSA-65 **primary public key**: the gossip envelope
+    //    authentication identity (signs the outgoing envelopes, PQ-ENVELOPE-1).
     //  • `addr` — ML-DSA **address** (value identity): the mining-reward target,
     //    the CRDT credit key, the PoS proposer/seal identity (the validator set
     //    is address-keyed via `validator_stakes()`), and — since REPUT-ID-1 —
     //    the **reputation actor** identity (uptime/energy keyed by address, the
-    //    economic actor, not the ephemeral transport key).
+    //    economic actor).
     let (pk, addr) = {
         let crypto = state.crypto.lock().await;
-        let pk = crypto
-            .get_identity()
-            .map(|id| id.public_key_hex)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        let pk = crypto.pq_identity_hex().ok_or_else(
+            || -> Box<dyn std::error::Error + Send + Sync> {
+                "no ML-DSA primary identity".into()
+            },
+        )?;
         let addr = crypto.pq_address_hex().ok_or_else(
             || -> Box<dyn std::error::Error + Send + Sync> {
                 "no ML-DSA primary identity (cannot derive value address)".into()
@@ -379,7 +380,7 @@ async fn sign_and_wrap(
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = state.node.gossip.read().await.next_outgoing_nonce();
     let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(pk, nonce, &timestamp, &msg);
-    let sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
+    let sig = state.crypto.lock().await.sign_pq(&signable).unwrap_or_default();
     p2p::gossip::GossipRouter::build_signed_envelope(
         pk.to_string(), msg, nonce, timestamp, &sig,
     ).ok()

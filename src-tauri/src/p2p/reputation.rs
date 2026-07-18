@@ -93,6 +93,19 @@ pub fn emission_for_tick(total_mined_micro: u64) -> u64 {
 
 /// V2 trust score basé uniquement sur énergie + uptime + stake (pas d'actions sociales).
 /// `atn_staked` est en µQTA — converti en QUANTA pour le score.
+/// W4 (Rust rule #6) — apply a dimensionless ratio ∈ [0,1] (a physical Shapley
+/// share or anti-sybil multiplier) to a µQTA `amount` WITHOUT the amount ever
+/// passing through f64. The ratio is converted to `SHARE_SCALE` fixed-point; the
+/// µQTA then only undergoes integer u128 mul/div, so no float rounding touches a
+/// balance. Floor semantics — a node never mints more than its exact share.
+/// No overflow: `amount ≤ MAX_SUPPLY_MICRO (~1e14) × SHARE_SCALE (1e9) = 1e23`,
+/// well under `u128::MAX (~3.4e38)`.
+fn scale_amount(amount: u64, ratio: f64) -> u64 {
+    const SHARE_SCALE: u128 = 1_000_000_000; // 1e9 fixed-point
+    let ratio_fp = (ratio.clamp(0.0, 1.0) * SHARE_SCALE as f64) as u128;
+    ((amount as u128 * ratio_fp) / SHARE_SCALE) as u64
+}
+
 fn compute_trust_score(user: &UserReputation) -> f64 {
     let uptime_factor = (user.uptime_minutes as f64 / 60.0).min(1000.0);
     let energy_factor = (user.energy_kwh * 100.0).min(500.0);
@@ -171,12 +184,19 @@ impl ReputationEngine {
             all_contribs.insert(pk.to_string(), my_contrib);
             let shares = shapley::compute_all_shares(&all_contribs);
             let share = shares.get(pk).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-            (share * emission_this_tick as f64) as u64
+            // W4 (Rust rule #6): the Shapley `share` is a dimensionless physical
+            // ratio ∈ [0,1] — f64 is fine for IT — but the µQTA emission must NEVER
+            // pass through f64 (no float rounding on a balance). Convert the ratio
+            // to fixed-point and allocate in u128 integer math. No overflow:
+            // emission ≤ MAX_SUPPLY (~1e14) × SHARE_SCALE (1e9) = 1e23 ≪ u128::MAX.
+            scale_amount(emission_this_tick, share)
         };
 
         let poc = SybilGuard::poc_score(user);
         let multiplier = SybilGuard::mining_multiplier(poc).clamp(0.0, 1.0);
-        let qta: u64 = (my_share as f64 * multiplier) as u64;
+        // W4: same fixed-point path for the anti-sybil multiplier — the µQTA reward
+        // is derived by integer math only.
+        let qta: u64 = scale_amount(my_share, multiplier);
 
         user.atn_balance = user.atn_balance.saturating_add(qta);
         user.atn_earned = user.atn_earned.saturating_add(qta);

@@ -349,39 +349,26 @@ impl Default for NonceTracker {
 
 // ─── B1: Envelope signature verification ────────────────────────────────────
 
-/// Verify the Ed25519 signature of a gossip envelope.
+/// Verify the ML-DSA-65 signature of a gossip envelope (PQ-ENVELOPE-1).
 ///
 /// STRUCT-1: The signature covers sender + nonce + timestamp + payload
-/// (the canonical bytes produced by `signable_envelope_bytes()`).
-/// For backward compatibility, if verification fails on the full bytes,
-/// we fall back to verifying just the payload bytes (legacy format).
+/// (the canonical bytes produced by `signable_envelope_bytes()`). The `sender`
+/// is the emitter's ML-DSA-65 public key hex; the signature is verified against
+/// it with the project's single ML-DSA verifier. This is a clean v5 break — no
+/// Ed25519 path and no legacy payload-only fallback remain.
 fn verify_envelope_signature(env: &GossipEnvelope) -> Result<(), String> {
-    // 1. Decode sender public key
-    let pk_bytes = hex::decode(&env.sender).map_err(|_| "invalid sender public key hex")?;
-
-    // 2. Decode signature
+    // 1. Decode signature
     let sig_bytes = hex::decode(&env.signature).map_err(|_| "invalid signature hex")?;
 
-    // 3. STRUCT-1: Reconstruct the FULL canonical signable bytes
+    // 2. STRUCT-1: Reconstruct the FULL canonical signable bytes
     let full_signable =
         GossipRouter::signable_envelope_bytes(&env.sender, env.nonce, &env.timestamp, &env.payload);
 
-    // 4. Verify Ed25519 signature against full canonical bytes
-    match CryptoEngine::verify(&pk_bytes, &full_signable, &sig_bytes) {
-        Ok(true) => return Ok(()),
-        Ok(false) => {} // Fall through to legacy check
-        Err(_) => {}    // Fall through to legacy check
-    }
-
-    // 5. Backward compat: try verifying against payload-only bytes (legacy
-    //    envelopes)
-    #[allow(deprecated)]
-    let legacy_bytes = serde_json::to_vec(&env.payload)
-        .map_err(|e| format!("payload serialization error: {}", e))?;
-    match CryptoEngine::verify(&pk_bytes, &legacy_bytes, &sig_bytes) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("signature verification failed".into()),
-        Err(e) => Err(format!("signature error: {}", e)),
+    // 3. PQ-ENVELOPE-1: Verify ML-DSA-65 signature against full canonical bytes.
+    if CryptoEngine::verify_pq(&env.sender, &full_signable, &sig_bytes) {
+        Ok(())
+    } else {
+        Err("signature verification failed".into())
     }
 }
 
@@ -813,7 +800,7 @@ pub fn try_process_raw_gossip(data: &[u8]) -> Result<(), String> {
 /// deterministic core runs on inbound bytes via `Event::MessageReceived`.
 ///
 /// Same stateless checks as the production receive path (size → JSON decode →
-/// freshness → Ed25519 signature) but freshness is evaluated against the
+/// freshness → ML-DSA-65 signature, PQ-ENVELOPE-1) but freshness is evaluated against the
 /// injected `now_secs` rather than the system clock, so the core is replayable
 /// (Constitution §3: no clock reads in the core). Returns the parsed,
 /// signature-verified envelope on success — raw bytes are never trusted until
@@ -1563,12 +1550,12 @@ async fn request_chain_range(state: &Arc<AppState>, from: u64, to: u64) {
 /// via iroh-gossip). STRUCT-1: Uses signable_envelope_bytes() so signature
 /// covers full envelope.
 async fn broadcast(state: &Arc<AppState>, msg: GossipMessage) {
+    // PQ-ENVELOPE-1: envelope sender + signature identity = ML-DSA-65 primary key.
     let pk = state
         .crypto
         .lock()
         .await
-        .get_identity()
-        .map(|i| i.public_key_hex)
+        .pq_identity_hex()
         .unwrap_or_default();
     if pk.is_empty() {
         return;
@@ -1582,7 +1569,7 @@ async fn broadcast(state: &Arc<AppState>, msg: GossipMessage) {
         .crypto
         .lock()
         .await
-        .sign(&signable)
+        .sign_pq(&signable)
         .unwrap_or_default();
 
     let env = match GossipRouter::build_signed_envelope(pk, msg, nonce, timestamp, &sig) {
@@ -1627,15 +1614,15 @@ mod tests {
     async fn presig_bad_signature_writes_no_per_sender_state() {
         let state = test_app_state();
         let mut signer = CryptoEngine::new();
-        let _ = signer.generate_keypair();
+        signer.generate_pq_identity().expect("ml-dsa primary");
         let spoofed = "f".repeat(64); // a pubkey the attacker does NOT own
         let msg = GossipMessage::Ping { nonce: 7 };
         let ts = chrono::Utc::now().to_rfc3339();
         let nonce = 1_u64;
-        // Sign with the REAL key but claim sender == spoofed ⇒ the signature
-        // cannot verify against the spoofed pubkey.
+        // Sign with the REAL ML-DSA key but claim sender == spoofed ⇒ the
+        // signature cannot verify against the spoofed pubkey.
         let signable = GossipRouter::signable_envelope_bytes(&spoofed, nonce, &ts, &msg);
-        let sig = signer.sign(&signable).unwrap();
+        let sig = signer.sign_pq(&signable).unwrap();
         let env =
             GossipRouter::build_signed_envelope(spoofed.clone(), msg, nonce, ts, &sig).unwrap();
         let raw = serde_json::to_vec(&env).unwrap();
@@ -1660,13 +1647,13 @@ mod tests {
     async fn presig_valid_signature_is_admitted_and_tracked() {
         let state = test_app_state();
         let mut signer = CryptoEngine::new();
-        let id = signer.generate_keypair();
-        let pk = id.public_key_hex.clone();
+        signer.generate_pq_identity().expect("ml-dsa primary");
+        let pk = signer.pq_identity_hex().expect("ml-dsa primary");
         let msg = GossipMessage::Ping { nonce: 7 };
         let ts = chrono::Utc::now().to_rfc3339();
         let nonce = 1_u64;
         let signable = GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
-        let sig = signer.sign(&signable).unwrap();
+        let sig = signer.sign_pq(&signable).unwrap();
         let env = GossipRouter::build_signed_envelope(pk.clone(), msg, nonce, ts, &sig).unwrap();
         let raw = serde_json::to_vec(&env).unwrap();
 
@@ -1738,16 +1725,17 @@ mod tests {
     #[test]
     fn test_verify_envelope_valid_signature() {
         let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        crypto.generate_pq_identity().expect("ml-dsa primary");
+        let pk = crypto.pq_identity_hex().expect("ml-dsa primary");
         let msg = GossipMessage::Ping { nonce: 42 };
-        // STRUCT-1: Sign full envelope bytes
+        // STRUCT-1: Sign full envelope bytes (PQ-ENVELOPE-1: ML-DSA-65)
         let timestamp = chrono::Utc::now().to_rfc3339();
         let nonce = 0_u64;
         let signable =
-            GossipRouter::signable_envelope_bytes(&id.public_key_hex, nonce, &timestamp, &msg);
-        let sig = crypto.sign(&signable).unwrap();
+            GossipRouter::signable_envelope_bytes(&pk, nonce, &timestamp, &msg);
+        let sig = crypto.sign_pq(&signable).unwrap();
         let env = GossipRouter::build_signed_envelope(
-            id.public_key_hex.clone(),
+            pk.clone(),
             msg,
             nonce,
             timestamp,
@@ -1783,24 +1771,25 @@ mod tests {
     fn test_verify_envelope_tampered_payload() {
         // Sign one message, but put a different payload in the envelope
         let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        crypto.generate_pq_identity().expect("ml-dsa primary");
+        let pk = crypto.pq_identity_hex().expect("ml-dsa primary");
 
         let msg_signed = GossipMessage::Ping { nonce: 1 };
-        // STRUCT-1: Sign the full envelope with the original payload
+        // STRUCT-1: Sign the full envelope with the original payload (ML-DSA-65)
         let timestamp = chrono::Utc::now().to_rfc3339();
         let nonce = 0_u64;
         let signable = GossipRouter::signable_envelope_bytes(
-            &id.public_key_hex,
+            &pk,
             nonce,
             &timestamp,
             &msg_signed,
         );
-        let sig = crypto.sign(&signable).unwrap();
+        let sig = crypto.sign_pq(&signable).unwrap();
 
         // Tamper: put a different message in the envelope
         let msg_tampered = GossipMessage::Ping { nonce: 9999 };
         let mut env = GossipRouter::build_signed_envelope(
-            id.public_key_hex.clone(),
+            pk.clone(),
             msg_tampered,
             nonce,
             timestamp,
@@ -1823,15 +1812,16 @@ mod tests {
         // two injected "now"s: inside the ±90 s window it passes, far outside it
         // is rejected as stale — same bytes, time is the only variable.
         let mut crypto = CryptoEngine::new();
-        let id = crypto.generate_keypair();
+        crypto.generate_pq_identity().expect("ml-dsa primary");
+        let pk = crypto.pq_identity_hex().expect("ml-dsa primary");
         let msg = GossipMessage::Ping { nonce: 7 };
         let timestamp = "2026-03-01T12:00:00+00:00".to_string();
         let nonce = 0_u64;
         let signable =
-            GossipRouter::signable_envelope_bytes(&id.public_key_hex, nonce, &timestamp, &msg);
-        let sig = crypto.sign(&signable).unwrap();
+            GossipRouter::signable_envelope_bytes(&pk, nonce, &timestamp, &msg);
+        let sig = crypto.sign_pq(&signable).unwrap();
         let env = GossipRouter::build_signed_envelope(
-            id.public_key_hex.clone(),
+            pk.clone(),
             msg,
             nonce,
             timestamp.clone(),

@@ -169,7 +169,14 @@ impl Ledger {
     /// ([`Self::block_hash_hex`]) over the genesis allocation, so it commits to the
     /// initial state and two nodes building the same genesis derive the same hash
     /// byte-for-byte (C1).
-    const GENESIS_TIMESTAMP: &str = "2026-01-01T00:00:00+00:00";
+    // GENESIS-V4 (2026-07-18): fresh launch genesis. The v3 chain was throwaway
+    // test data (early blocks carried no value); v4 restarts on a clean, zero-
+    // premine genesis. Changing this timestamp changes the content-bound frozen
+    // genesis hash → the v4 chain is deterministically distinct and incompatible
+    // with any earlier chain (paired with the TORUS_PROTOCOL_VERSION 4→5 bump and
+    // the snapshot genesis-guard in state_persistence). Still a PURE function of
+    // its content (C1): two nodes build the identical v4 genesis byte-for-byte.
+    const GENESIS_TIMESTAMP: &str = "2026-07-18T00:00:00+00:00";
 
     /// Default ledger: an **EMPTY** genesis — `genesis_with_allocation(&[])`.
     /// PQ-MIG-5: the default chain carries **zéro premine** (offre 0 au bloc 0,
@@ -2093,7 +2100,11 @@ impl Ledger {
         // verdict on every node.
         let onchain_before = self.onchain_spendable_before(tip);
         let bindings_before = self.pq_bindings_before(tip);
-        Self::validate_block_against_prev(block, tip, &onchain_before, &bindings_before)?;
+        // PROPOSER-1: `self` sits at the parent (tip) on the linear path (and on
+        // the reorg trial clone), so the live `validator_stakes()` IS the bonded
+        // set as of the parent — O(1), no replay needed.
+        let bonded_before = self.validator_stakes();
+        Self::validate_block_against_prev(block, tip, &onchain_before, &bindings_before, &bonded_before)?;
         self.validate_block_emission(block)
     }
 
@@ -2232,6 +2243,54 @@ impl Ledger {
         bal
     }
 
+    /// PROPOSER-1 (GENESIS-V4) — the **bonded-stake map as of `prev`**, a pure
+    /// function of the chain prefix `chain[.. = prev.index]`. Mirrors
+    /// [`Self::apply_block_stake_effects`] for the per-account bonded weight
+    /// (`staked`) exactly — `Stake` bonds, `Unstake` unbonds, `Slash` destroys the
+    /// bonded portion — so `staked_before(tip) == validator_stakes()` (locked by
+    /// the `staked_before_matches_live_cache` test). Maturation touches only the
+    /// unbonding pool, never bonded weight, so it is irrelevant here.
+    ///
+    /// Used to verify a block's proposer against the validator set **as of its
+    /// parent**, identically on every node and every admission path (linear /
+    /// reorg / sync). The linear + trial-clone paths sit at the parent already, so
+    /// they use the O(1) live [`Self::validator_stakes`]; this O(chain) replay is
+    /// only needed on the rare 1-block fork tie-break, where `self` is one block
+    /// ahead of the parent.
+    fn staked_before(&self, prev: &Block) -> HashMap<String, u64> {
+        let mut staked: HashMap<String, u64> = HashMap::new();
+        for block in self.chain.iter().filter(|b| b.index <= prev.index) {
+            for tx in &block.transactions {
+                match tx.tx_type {
+                    TxType::Stake => {
+                        *staked.entry(tx.from.clone()).or_insert(0) += tx.amount;
+                    }
+                    TxType::Unstake => {
+                        let bonded = staked.entry(tx.from.clone()).or_insert(0);
+                        *bonded = bonded.saturating_sub(tx.amount);
+                        if *bonded == 0 {
+                            staked.remove(&tx.from);
+                        }
+                    }
+                    TxType::Slash => {
+                        let consumed_unbonding: u64 =
+                            tx.slash_unbonding.iter().flatten().map(|e| e.amount).sum();
+                        let bonded_take = tx.amount.saturating_sub(consumed_unbonding);
+                        if bonded_take > 0 {
+                            let bonded = staked.entry(tx.from.clone()).or_insert(0);
+                            *bonded = bonded.saturating_sub(bonded_take);
+                        }
+                        if staked.get(&tx.from).copied().unwrap_or(0) == 0 {
+                            staked.remove(&tx.from);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        staked
+    }
+
     /// PQ-MIG-3 §1 — the chain-derived ML-DSA **binding registry** as of `prev`:
     /// the first-seen `from → pq_public_key` over every sealed, real-sender, signed
     /// tx up to and including `prev`. A **pure function of the chain** (like
@@ -2312,6 +2371,7 @@ impl Ledger {
         prev: &Block,
         onchain_before: &HashMap<String, i128>,
         bindings_before: &HashMap<String, String>,
+        bonded_before: &HashMap<String, u64>,
     ) -> Result<(), String> {
         if block.prev_hash != prev.hash {
             return Err(format!(
@@ -2319,6 +2379,45 @@ impl Ledger {
                 short(&block.prev_hash, 16),
                 short(&prev.hash, 16)
             ));
+        }
+        // PROPOSER-1 (GENESIS-V4) — deterministic proposer check. The reported
+        // CRITICAL was that the PoS election was checked only on the SEAL side
+        // (`mining_loop`), never on receive: a modified node could seal any slot
+        // with any address — staked or not — and the network accepted it. Here we
+        // reject, on every admission path (this is the SHARED validator: linear
+        // integration, 1-block fork tie-break, deep reorg trial clone, and sync),
+        // any non-genesis block whose proposer is not a **bonded validator as of
+        // the parent** (`bonded_before`, stake ≥ MIN_VALIDATOR_STAKE).
+        //
+        // Why bonded-membership and not "is the elected leader/fallback": without a
+        // trusted clock we cannot time-gate the fallback tiers, so the deterministic
+        // rule is the time-ungated UNION of {primary ∪ fallbacks ∪ any-eligible} =
+        // "any bonded validator". That is a SUPERSET of every proposer
+        // `is_valid_proposer` (the seal side) can ever return, so an honestly-sealed
+        // block always passes (seal/receive never disagree), it is clock-free (no
+        // drift forks — C1), and it fully closes the hole: an unstaked/arbitrary
+        // address is rejected. Out-of-turn proposing by a *bonded* validator is
+        // contained by fork-choice (LMD-GHOST + lexicographic tie-break) and, for
+        // equivocation, by the finality slashing gadget.
+        //
+        // Bootstrap: before anyone has staked, `bonded_before` has no eligible
+        // entry → sealing is permissionless (mirrors `mining_loop`'s bootstrap
+        // branch), so the fresh v4 chain can start from an empty genesis.
+        if block.index > 0 {
+            let has_eligible = bonded_before
+                .values()
+                .any(|&s| s >= crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE);
+            if has_eligible {
+                let proposer_stake =
+                    bonded_before.get(&block.miner).copied().unwrap_or(0);
+                if proposer_stake < crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE {
+                    return Err(format!(
+                        "bloc rejeté : proposeur {} non bondé — seul un validateur avec enjeu ≥ {} µQTA peut proposer (PROPOSER-1)",
+                        short(&block.miner, 12),
+                        crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE
+                    ));
+                }
+            }
         }
         // EMIT-1 §4.2 (Option A — one reward per block): at most ONE `Mining`
         // tx, and if present it must be the coinbase `NETWORK → block.miner`.
@@ -2635,7 +2734,14 @@ impl Ledger {
                 // path uses, proving the check lives on both paths, not one.
                 let onchain_before = self.onchain_spendable_before(&prev_for_remote);
                 let bindings_before = self.pq_bindings_before(&prev_for_remote);
-                Self::validate_block_against_prev(&block, &prev_for_remote, &onchain_before, &bindings_before)?;
+                // PROPOSER-1: on the 1-block fork tie-break `self` is one block
+                // ahead of the parent (its tip is the block being replaced), so the
+                // bonded set as of the parent must be replayed (`staked_before`),
+                // NOT read from the live cache. Rare path (only on a fork), so the
+                // O(chain) replay is fine; `staked_before(prev) == validator_stakes()`
+                // at the parent is locked by test, so both paths agree.
+                let bonded_before = self.staked_before(&prev_for_remote);
+                Self::validate_block_against_prev(&block, &prev_for_remote, &onchain_before, &bindings_before, &bonded_before)?;
                 // LIVE-3: a fork winner's slashes are re-verified too (same guard as
                 // the linear path). Slashes essentially never appear in a competing
                 // height-1 fork — the honest leader includes them on the canonical
@@ -3429,21 +3535,96 @@ mod tests {
             Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
             "genèse allouée : deux constructions ⇒ même hash (C1)"
         );
-        // Vecteurs figés (PQ-MIG-5 §1) — calculés via le hachage de bloc existant.
+        // Vecteurs figés — GENESIS-V4 (timestamp 2026-07-18), recalculés via le
+        // hachage de bloc existant. Le changement délibéré de la genèse met à jour
+        // ces vecteurs gelés (c'est leur rôle : verrouiller la genèse contre toute
+        // dérive silencieuse ; une refonte volontaire les réinitialise).
         assert_eq!(
             Ledger::new().chain[0].hash,
-            "37bb89571c9055b61e73fecf7526d2c91c8aba7027f4434e0cdf29c78ea889a1",
-            "hash de genèse vide figé"
+            "ee58235deda396dbb7c84ac2e86829c990fa5562e89b4edcb80caf19ac2a1dff",
+            "hash de genèse vide figé (v4)"
         );
         assert_eq!(
             Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
-            "d13f62215438fe74640f57981a9f5aab62990f77916a18a9cf5d4fd09528666e",
-            "hash de genèse DEV figé"
+            "875cb2b2a8912b76db46af04eae064b06e5a2ea5183a9ed030b4bee14a925160",
+            "hash de genèse DEV figé (v4)"
         );
         assert_ne!(
             Ledger::new().chain[0].hash,
             Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
             "le hash lie le contenu : vide ≠ alloué"
+        );
+    }
+
+    /// **PROPOSER-1 (GENESIS-V4) — the CRITICAL is closed on receive.** Once a
+    /// validator is bonded, a block whose proposer is NOT a bonded validator is
+    /// rejected on the receive path (`integrate_remote_block`), while a block
+    /// proposed by a bonded validator is accepted. This is the fix for
+    /// "any address could seal any slot and the network accepted it".
+    #[test]
+    fn proposer1_rejects_unbonded_proposer_once_staked() {
+        use crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
+        // DEV genesis already bonds G0 (10 QTA) and G1 (5 QTA) — both ≥ MIN.
+        let base = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+        assert!(
+            base.validator_stakes().values().any(|&s| s >= MIN_VALIDATOR_STAKE),
+            "précondition : au moins un validateur bondé"
+        );
+
+        // (a) a block proposed by a NON-validator address is REJECTED.
+        let attacker = "z".repeat(64);
+        let mut evil_src = base.clone();
+        let evil = evil_src.seal_block_at(&attacker, 0.0, "2026-07-19T00:00:00Z".into());
+        assert_eq!(evil.miner, attacker, "le bloc malveillant se scelle sous l'attaquant");
+        let mut a = base.clone();
+        assert!(
+            a.integrate_remote_block(evil).is_err(),
+            "PROPOSER-1 : un proposeur non bondé est rejeté à la réception"
+        );
+        assert_eq!(a.chain_height(), 1, "chaîne non étendue par le proposeur non bondé");
+
+        // (b) a block proposed by a bonded genesis validator is ACCEPTED.
+        let mut good_src = base.clone();
+        let good = good_src.seal_block_at(Ledger::GENESIS_ADDR_0, 0.0, "2026-07-19T00:00:00Z".into());
+        let mut b = base.clone();
+        assert!(
+            b.integrate_remote_block(good).is_ok(),
+            "un proposeur validateur bondé est accepté"
+        );
+        assert_eq!(b.chain_height(), 2, "la chaîne est étendue par le validateur");
+    }
+
+    /// **PROPOSER-1 bootstrap — permissionless before anyone stakes.** On the fresh
+    /// empty v4 genesis (zero validators) any proposer may seal, so the chain can
+    /// start; the check only bites once `has_eligible` becomes true.
+    #[test]
+    fn proposer1_bootstrap_allows_any_proposer() {
+        let base = Ledger::new(); // empty v4 genesis, zero bonded validators
+        assert!(base.validator_stakes().is_empty(), "aucun validateur au démarrage");
+        let anyone = "b".repeat(64);
+        let mut src = base.clone();
+        let blk = src.seal_block_at(&anyone, 0.0, "2026-07-19T00:00:00Z".into());
+        let mut a = base.clone();
+        assert!(
+            a.integrate_remote_block(blk).is_ok(),
+            "bootstrap : proposeur permissionless accepté tant que personne n'a staké"
+        );
+        assert_eq!(a.chain_height(), 2);
+    }
+
+    /// **PROPOSER-1 determinism lock.** `staked_before(tip)` (the pure chain replay
+    /// used on the rare fork tie-break) MUST equal the live `validator_stakes()`
+    /// (used on the O(1) linear/clone paths), so every admission path computes the
+    /// identical bonded set as of the parent — no node ever disagrees on a
+    /// proposer's eligibility.
+    #[test]
+    fn staked_before_matches_live_cache() {
+        let l = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
+        let tip = l.chain.last().unwrap().clone();
+        assert_eq!(
+            l.staked_before(&tip),
+            l.validator_stakes(),
+            "staked_before(tip) == validator_stakes() (les deux sources de PROPOSER-1 concordent)"
         );
     }
 
@@ -5268,9 +5449,11 @@ mod tests {
         let prev = l.block_at(l.chain_height() - 1).unwrap().clone();
         let onchain = l.onchain_spendable_before(&prev);
         let bindings = l.pq_bindings_before(&prev);
+        // PROPOSER-1: same bonded set a real peer would use (l sits at the parent).
+        let bonded = l.validator_stakes();
         let block = l.seal_block_at(miner, 0.0, ts.to_string());
         assert!(
-            Ledger::validate_block_against_prev(&block, &prev, &onchain, &bindings).is_ok(),
+            Ledger::validate_block_against_prev(&block, &prev, &onchain, &bindings, &bonded).is_ok(),
             "COVER-2 §3: a self-sealed block must always pass validation (block #{})",
             block.index
         );
@@ -5733,8 +5916,9 @@ mod tests {
             energy_kwh: 0.0,
         };
         let onchain = ledger.onchain_spendable_before(&tip);
+        let bonded = ledger.validator_stakes();
         assert!(
-            Ledger::validate_block_against_prev(&evil_block, &tip, &onchain, &bindings).is_err(),
+            Ledger::validate_block_against_prev(&evil_block, &tip, &onchain, &bindings, &bonded).is_err(),
             "a block carrying the unbound-key tx is rejected by validation"
         );
     }

@@ -36,11 +36,13 @@ mod security_tests {
     }
 
     fn make_fresh_envelope(crypto: &CryptoEngine, pk: &str, msg: GossipMessage) -> GossipEnvelope {
-        // STRUCT-1: Sign the full canonical bytes (sender + nonce + timestamp + payload)
+        // STRUCT-1 + PQ-ENVELOPE-1: Sign the full canonical bytes (sender + nonce
+        // + timestamp + payload) with ML-DSA-65. `pk` must be the ML-DSA primary
+        // public key hex (== crypto.pq_identity_hex()).
         let timestamp = chrono::Utc::now().to_rfc3339();
         let nonce = 0_u64;
         let signable = GossipRouter::signable_envelope_bytes(pk, nonce, &timestamp, &msg);
-        let sig = crypto.sign(&signable).unwrap();
+        let sig = crypto.sign_pq(&signable).unwrap();
         GossipRouter::build_signed_envelope(pk.to_string(), msg, nonce, timestamp, &sig).unwrap()
     }
 
@@ -115,10 +117,11 @@ mod security_tests {
     fn s2_valid_signature_accepted() {
         let mut crypto = CryptoEngine::new();
         crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
-        let id = crypto.generate_keypair();
+        let _id = crypto.generate_keypair();
+        let pk = crypto.pq_identity_hex().expect("ml-dsa primary");
 
         let msg = GossipMessage::Ping { nonce: 7 };
-        let env = make_fresh_envelope(&crypto, &id.public_key_hex, msg);
+        let env = make_fresh_envelope(&crypto, &pk, msg);
 
         let result = dispatcher::try_process_raw_gossip(
             &serde_json::to_vec(&env).unwrap()
@@ -194,20 +197,22 @@ mod security_tests {
     fn s4_stale_message_rejected() {
         let mut crypto = CryptoEngine::new();
         crypto.generate_pq_identity().expect("ml-dsa primary"); // PQ-MIG-3: bind authority key
-        let id = crypto.generate_keypair();
+        let _id = crypto.generate_keypair();
+        let pk = crypto.pq_identity_hex().expect("ml-dsa primary");
 
         let msg = GossipMessage::Ping { nonce: 1 };
-        // STRUCT-1: sign with the old timestamp so signature is valid for that ts
+        // STRUCT-1 + PQ-ENVELOPE-1: sign with the old timestamp so signature is
+        // valid for that ts (ML-DSA-65) — rejection must come from freshness.
         let old_ts = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
         let signable = GossipRouter::signable_envelope_bytes(
-            &id.public_key_hex, 0, &old_ts, &msg
+            &pk, 0, &old_ts, &msg
         );
-        let sig = crypto.sign(&signable).unwrap();
+        let sig = crypto.sign_pq(&signable).unwrap();
 
         // Create envelope with timestamp 10 minutes ago (beyond ±5 min window)
         let env = GossipEnvelope {
             id: "stale_id".into(),
-            sender: id.public_key_hex.clone(),
+            sender: pk.clone(),
             payload: msg,
             signature: hex::encode(&sig),
             timestamp: old_ts,

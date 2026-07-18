@@ -687,10 +687,10 @@ fn seeded_identity(seed: u64) -> CryptoEngine {
 
 /// PQ-MIG-3B: the **value** identity of an engine — its ML-DSA *address*
 /// (`BLAKE3(ADDR_DOMAIN ‖ pq_pubkey)`), the key under which balance, stake,
-/// reward, validator weight and `from`/`to` are recorded. Distinct from
-/// `public_key_hex`, the Ed25519 **transport** identity that only signs gossip
-/// envelopes (`signed_msg_bytes`). The simulator's PeerId labels (`node-A`) are
-/// a third, independent namespace.
+/// reward, validator weight and `from`/`to` are recorded. Distinct from the
+/// ML-DSA-65 **primary public key** that signs gossip envelopes (PQ-ENVELOPE-1,
+/// `signed_msg_bytes`) and from `public_key_hex` (the Ed25519 transport key).
+/// The simulator's PeerId labels (`node-A`) are yet another independent namespace.
 fn addr_of(crypto: &CryptoEngine) -> String {
     crypto.pq_address_hex().expect("ml-dsa address")
 }
@@ -698,12 +698,14 @@ fn addr_of(crypto: &CryptoEngine) -> String {
 /// Build a signed gossip envelope wrapping `msg` from `crypto`'s identity,
 /// timestamped at `now_ms` (envelope nonce 0) — used to inject requests.
 fn signed_msg_bytes(crypto: &CryptoEngine, msg: GossipMessage, now_ms: u64) -> Vec<u8> {
-    let pk = crypto.get_identity().unwrap().public_key_hex;
+    // PQ-ENVELOPE-1: sender + signature = ML-DSA-65 primary key (deterministic
+    // signer keeps DST envelopes byte-reproducible, C1).
+    let pk = crypto.pq_identity_hex().unwrap();
     let ts = chrono::DateTime::from_timestamp_millis(now_ms as i64)
         .unwrap()
         .to_rfc3339();
     let signable = GossipRouter::signable_envelope_bytes(&pk, 0, &ts, &msg);
-    let sig = crypto.sign(&signable).unwrap();
+    let sig = crypto.sign_pq_det(&signable).unwrap();
     let env = GossipRouter::build_signed_envelope(pk, msg, 0, ts, &sig).unwrap();
     serde_json::to_vec(&env).unwrap()
 }

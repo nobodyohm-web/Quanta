@@ -162,9 +162,10 @@ pub fn spawn_ping_broadcast(state: Arc<AppState>) {
 /// matching Pong handler can compute RTT. Also bumps `pings_sent` on every
 /// currently-known peer so the loss-rate denominator stays accurate.
 async fn broadcast_ping_once(state: &AppState, nonce: u64) -> Result<(), String> {
-    let pk = state.crypto.lock().await.get_identity()
-        .map(|i| i.public_key_hex)
-        .map_err(|e| e.to_string())?;
+    // PQ-ENVELOPE-1: the envelope sender + signature identity is the ML-DSA-65
+    // primary public key (post-quantum), no longer the Ed25519 transport key.
+    let pk = state.crypto.lock().await.pq_identity_hex()
+        .ok_or_else(|| "no ML-DSA primary identity".to_string())?;
 
     let msg = crate::p2p::gossip::GossipMessage::Ping { nonce };
 
@@ -173,7 +174,7 @@ async fn broadcast_ping_once(state: &AppState, nonce: u64) -> Result<(), String>
     let signable = crate::p2p::gossip::GossipRouter::signable_envelope_bytes(
         &pk, env_nonce, &timestamp, &msg
     );
-    let sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
+    let sig = state.crypto.lock().await.sign_pq(&signable).unwrap_or_default();
     if let Ok(env) = crate::p2p::gossip::GossipRouter::build_signed_envelope(
         pk, msg, env_nonce, timestamp, &sig
     ) {
@@ -214,12 +215,14 @@ pub async fn trigger_hello_now(state: &AppState) {
 
 /// Build and send one Hello envelope. Extracted for reuse.
 async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
-    // `pk` = Ed25519 **transport** key (keys `peer_info`, signs the envelope).
+    // PQ-ENVELOPE-1: `pk` = ML-DSA-65 primary public key — the envelope
+    // authentication identity (signs the envelope, keys `peer_info`, and is the
+    // Hello `node_id` label; connections still use the Iroh endpoint_id, untouched).
     // `addr` = ML-DSA **address** — the reputation actor identity (REPUT-ID-1),
     // under which the mining loop accrues this node's uptime.
     let (pk, addr) = {
         let crypto = state.crypto.lock().await;
-        let pk = crypto.get_identity().map(|i| i.public_key_hex).map_err(|e| e.to_string())?;
+        let pk = crypto.pq_identity_hex().ok_or_else(|| "no ML-DSA primary identity".to_string())?;
         let addr = crypto.pq_address_hex().unwrap_or_default();
         (pk, addr)
     };
@@ -273,7 +276,7 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = state.node.gossip.read().await.next_outgoing_nonce();
     let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(&pk, nonce, &timestamp, &msg);
-    let sig = state.crypto.lock().await.sign(&signable).unwrap_or_default();
+    let sig = state.crypto.lock().await.sign_pq(&signable).unwrap_or_default();
     if let Ok(env) = p2p::gossip::GossipRouter::build_signed_envelope(pk, msg, nonce, timestamp, &sig) {
         state.node.gossip.write().await.mark_seen(&env.id);
         let _ = state.node.gossip_tx.send(env);
