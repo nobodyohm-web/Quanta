@@ -121,16 +121,19 @@ function card(k, v, sub) {
 
 async function refreshStats() {
   try {
-    const info = await rpc("getinfo");
+    const [info, fin] = await Promise.all([rpc("getinfo"), rpc("getfinalityinfo").catch(() => null)]);
     $("net").innerHTML = `network <b>${esc(info.network)}</b> · v${esc(info.version)} · protocol ${info.protocol_version}`;
     const minted = Number(info.minted_uqta), cap = Number(info.max_supply_uqta);
     const pct = cap > 0 ? Math.min(100, (minted / cap) * 100) : 0;
-    $("cards").innerHTML =
+    let cards =
       card("Height", fmtN(info.height), `finalized ${fmtN(info.finalized_height)}`) +
       card("Supply", fmtQ(info.minted_uqta), `of ${fmtN(cap / 1e6)} QUANTA cap` +
         `<div class="bar"><i style="width:${pct.toFixed(4)}%"></i></div>`) +
       card("Blocks", fmtN(info.blocks), `${fmtN(info.total_txs)} txs`) +
       card("Holders", fmtN(info.holders), `${fmtN(info.peers)} peers`);
+    if (fin) cards += card("Finality", "epoch " + fmtN(fin.epoch),
+      `${fmtN(fin.validators)} validators · ${fmtQ(fin.total_staked_uqta)} QTA staked`);
+    $("cards").innerHTML = cards;
     $("foot").textContent = `Node ${info.node_id.slice(0, 16)}… · ${info.online ? "online" : "offline"} · alpha, unaudited · QUANTA has no market price.`;
   } catch (e) {
     $("net").textContent = "node unreachable";
