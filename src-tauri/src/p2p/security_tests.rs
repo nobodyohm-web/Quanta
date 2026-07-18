@@ -446,52 +446,105 @@ mod security_tests {
     // ─── S14: Peer ban after threshold reports ──────────────────────────────
 
     #[test]
-    fn s14_peer_banned_after_threshold_reports() {
+    fn s14_peer_banned_after_threshold_distinct_reporters() {
         let mut tracker = dispatcher::NonceTracker::new();
         let evil = "evil_peer";
 
         assert!(!tracker.is_banned(evil), "fresh peer is not banned");
 
-        // Premier report : compteur à 1, pas encore de ban.
-        let count = tracker.record_report(evil);
+        // Premier reporter distinct : compteur à 1, pas encore de ban.
+        let count = tracker.record_report(evil, "reporter_a");
         assert_eq!(count, 1);
-        assert!(!tracker.is_banned(evil), "1 report ne déclenche pas de ban");
+        assert!(!tracker.is_banned(evil), "1 reporter ne déclenche pas de ban");
 
-        // Deuxième : compteur à 2, toujours pas.
-        let count = tracker.record_report(evil);
+        // Deuxième reporter distinct : compteur à 2, toujours pas.
+        let count = tracker.record_report(evil, "reporter_b");
         assert_eq!(count, 2);
-        assert!(!tracker.is_banned(evil), "2 reports non plus");
+        assert!(!tracker.is_banned(evil), "2 reporters non plus");
 
-        // Troisième : seuil atteint → ban posé.
-        let count = tracker.record_report(evil);
+        // Troisième reporter distinct : seuil atteint → ban posé.
+        let count = tracker.record_report(evil, "reporter_c");
         assert_eq!(count, dispatcher::REPORT_BAN_THRESHOLD);
-        assert!(tracker.is_banned(evil), "3 reports déclenche le ban");
+        assert!(tracker.is_banned(evil), "3 reporters distincts déclenchent le ban");
 
         // Un autre peer non rapporté reste libre.
         assert!(!tracker.is_banned("innocent_peer"), "le ban est par-peer, pas global");
     }
 
+    /// SEC-REPORT-1 (régression du vecteur critique) : un SEUL reporter
+    /// authentifié ne peut PAS bannir une victime, même en multipliant les
+    /// reports (ex. `ReportReason::Other` variable → payloads distincts qui
+    /// passent le dédup content-only). La sécurité tient sur des reporters
+    /// DISTINCTS, pas sur le nombre de messages.
+    #[test]
+    fn s14_single_reporter_cannot_ban_victim() {
+        let mut tracker = dispatcher::NonceTracker::new();
+        let victim = "honest_victim";
+
+        // 10 reports du même reporter → compteur reste à 1, jamais de ban.
+        for _ in 0..10 {
+            let count = tracker.record_report(victim, "lone_attacker");
+            assert_eq!(count, 1, "un reporter unique ne compte que pour 1");
+        }
+        assert!(
+            !tracker.is_banned(victim),
+            "un seul pair ne peut pas bannir une victime arbitraire"
+        );
+
+        // Il faut REPORT_BAN_THRESHOLD reporters réellement distincts.
+        tracker.record_report(victim, "attacker_2");
+        tracker.record_report(victim, "attacker_3");
+        assert!(
+            tracker.is_banned(victim),
+            "3 reporters distincts (dont le premier) atteignent le seuil"
+        );
+    }
+
+    /// SEC-REPORT-1 : un pair ne peut pas se signaler lui-même pour gonfler un
+    /// compteur (self-report ignoré).
+    #[test]
+    fn s14_self_report_is_ignored() {
+        let mut tracker = dispatcher::NonceTracker::new();
+        let count = tracker.record_report("peer_x", "peer_x");
+        assert_eq!(count, 0, "un self-report ne compte pas");
+        assert!(!tracker.is_banned("peer_x"));
+    }
+
     #[test]
     fn s14_ban_does_not_leak_across_peers() {
         let mut tracker = dispatcher::NonceTracker::new();
-        for _ in 0..3 { tracker.record_report("attacker_a"); }
+        for r in ["a1", "a2", "a3"] { tracker.record_report("attacker_a", r); }
         assert!(tracker.is_banned("attacker_a"));
 
         // Reports sur un autre peer comptent indépendamment.
-        tracker.record_report("attacker_b");
+        tracker.record_report("attacker_b", "a1");
         assert!(!tracker.is_banned("attacker_b"));
     }
 
     #[test]
     fn s14_banned_peers_set_reflects_state() {
         let mut tracker = dispatcher::NonceTracker::new();
-        for _ in 0..3 { tracker.record_report("p1"); }
-        for _ in 0..3 { tracker.record_report("p2"); }
+        for r in ["r1", "r2", "r3"] { tracker.record_report("p1", r); }
+        for r in ["r1", "r2", "r3"] { tracker.record_report("p2", r); }
 
         let banned = tracker.banned_peers();
         assert_eq!(banned.len(), 2);
         assert!(banned.contains("p1"));
         assert!(banned.contains("p2"));
+    }
+
+    /// SEC-COUNTRY-1 : la normalisation d'un code pays fournit un token
+    /// ISO-shaped borné, quelles que soient les bytes envoyés par le pair.
+    #[test]
+    fn sec_country_code_is_sanitized() {
+        use dispatcher::sanitize_country_code;
+        assert_eq!(sanitize_country_code("fr"), "FR");
+        assert_eq!(sanitize_country_code("France"), "FRA"); // tronqué à 3
+        assert_eq!(sanitize_country_code(""), "??");
+        assert_eq!(sanitize_country_code("🇫🇷😈💀"), "??"); // non-ASCII rejeté
+        assert_eq!(sanitize_country_code("US-EAST-1-injection"), "USE");
+        // Longueur toujours bornée à 3, jamais la string brute de l'attaquant.
+        assert!(sanitize_country_code(&"A".repeat(10_000)).len() <= 3);
     }
 
     // ─── S15: Oversized envelope rejected before parse ──────────────────────

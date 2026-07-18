@@ -52,10 +52,24 @@ const MAX_TRACKED_SENDERS: usize = 100_000;
 /// (constraint: strictly greater than the freshness window).
 const NONCE_ENTRY_TTL_SECS: u64 = 120;
 
-/// Number of independent reports against a peer that triggers a ban.
+/// Number of **distinct reporters** against a peer that triggers a ban.
+/// SEC-REPORT-1: the count is over unique reporter public keys, not raw
+/// messages — a single authenticated peer can no longer manufacture a ban by
+/// sending N reports (it now takes N independent stakeholders).
 pub const REPORT_BAN_THRESHOLD: u32 = 3;
 /// Ban duration in seconds (1 hour). After this the peer gets a fresh slate.
 pub const REPORT_BAN_TTL_SECS: u64 = 3600;
+/// SEC-REPORT-2: absolute cap on the number of distinct *reported* peers we
+/// track at once. `ReportPeer` carries an attacker-chosen `peer_id`, so without
+/// a bound a peer could seed unboundedly many fictitious targets (each never
+/// connecting, so `is_banned` never lazily evicts them) and grow memory without
+/// limit. When the cap is hit we prune expired bans and the weakest
+/// (fewest-reporter, sub-threshold) entries. §4 policy: exact value is a choice.
+const MAX_TRACKED_REPORTS: usize = 10_000;
+/// SEC-COUNTRY-1: absolute cap on distinct country codes tracked for the energy
+/// oracle. The code is peer-supplied via `Hello`; sanitised to an ISO-shaped
+/// short token and bounded here so a peer can't grow the map with novel codes.
+const MAX_COUNTRY_CODES: usize = 64;
 
 /// Maximum size of a single raw gossip envelope before parsing (10 MB).
 /// Anything larger is dropped at the very entry of `dispatch_incoming`,
@@ -73,9 +87,12 @@ pub struct NonceTracker {
     last_nonces: HashMap<String, u64>,
     /// Rate limiter: (window_start_epoch, msg_count_in_window) per peer
     rate_counters: HashMap<String, (u64, u32)>,
-    /// Reports per peer_id received via gossip `ReportPeer`.
-    /// Cleared when a ban TTL expires, so a peer gets a fresh slate.
-    report_counts: HashMap<String, u32>,
+    /// SEC-REPORT-1: distinct **reporter** public keys seen against each
+    /// reported peer_id (via gossip `ReportPeer`). A ban needs
+    /// `REPORT_BAN_THRESHOLD` *independent* reporters, so a single authenticated
+    /// peer replaying reports (even with a varying `ReportReason::Other`) can no
+    /// longer censor a victim. Cleared when a ban TTL expires (fresh slate).
+    report_counts: HashMap<String, HashSet<String>>,
     /// peer_id → unix epoch second at which the ban expires.
     /// Use a `HashSet` view via `is_banned()`; the timestamps gate the
     /// membership.
@@ -90,6 +107,26 @@ fn now_epoch_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// SEC-COUNTRY-1: normalise a peer-supplied country string to an ISO-shaped
+/// token before it is ever used as a map key. Keeps only ASCII letters,
+/// uppercases them, and truncates to 3 chars (ISO-3166 alpha-2/3). An empty or
+/// junk value collapses to `"??"`. This both prevents attacker-chosen long keys
+/// from bloating memory and caps the *shape* of the key space so `Hello` can't
+/// smuggle arbitrary strings into the energy-oracle map.
+pub fn sanitize_country_code(raw: &str) -> String {
+    let code: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .take(3)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if code.is_empty() {
+        "??".to_string()
+    } else {
+        code
+    }
 }
 
 impl NonceTracker {
@@ -204,18 +241,77 @@ impl NonceTracker {
         within
     }
 
-    /// Record a report against `peer_id`. When the count reaches
-    /// `REPORT_BAN_THRESHOLD`, install a ban that expires after
-    /// `REPORT_BAN_TTL_SECS`. Returns the new report count.
-    pub fn record_report(&mut self, peer_id: &str) -> u32 {
-        let count = self.report_counts.entry(peer_id.to_string()).or_insert(0);
-        *count += 1;
-        let new_count = *count;
+    /// Record a report against `peer_id` from `reporter_pk` (the authenticated
+    /// sender of the `ReportPeer` envelope). When the number of **distinct
+    /// reporters** reaches `REPORT_BAN_THRESHOLD`, install a ban that expires
+    /// after `REPORT_BAN_TTL_SECS`. Returns the current distinct-reporter count.
+    ///
+    /// SEC-REPORT-1: counting distinct reporters (not raw messages) closes the
+    /// single-peer censorship vector — one authenticated key can add at most one
+    /// to any target's count, regardless of how many (or how varied) its reports
+    /// are. A peer reporting itself is ignored (nonsensical, and can't self-ban).
+    pub fn record_report(&mut self, peer_id: &str, reporter_pk: &str) -> u32 {
+        if peer_id == reporter_pk {
+            // A peer cannot report itself into (or pad) a ban.
+            return self
+                .report_counts
+                .get(peer_id)
+                .map(|s| s.len() as u32)
+                .unwrap_or(0);
+        }
+        let reporters = self
+            .report_counts
+            .entry(peer_id.to_string())
+            .or_default();
+        reporters.insert(reporter_pk.to_string());
+        let new_count = reporters.len() as u32;
         if new_count >= REPORT_BAN_THRESHOLD {
             self.bans
                 .insert(peer_id.to_string(), now_epoch_secs() + REPORT_BAN_TTL_SECS);
         }
+        // SEC-REPORT-2: keep the report/ban maps bounded against a flood of
+        // fictitious targets.
+        self.prune_reports_and_bans();
         new_count
+    }
+
+    /// SEC-REPORT-2: bound `report_counts` and `bans`. Cheap on the normal path
+    /// (under the cap it returns immediately); the O(n) sweep only runs when the
+    /// cap is exceeded. First drops expired bans and their report sets, then —
+    /// if still over cap — evicts the weakest sub-threshold targets (fewest
+    /// distinct reporters) which are the cheapest for an attacker to seed.
+    fn prune_reports_and_bans(&mut self) {
+        if self.report_counts.len() <= MAX_TRACKED_REPORTS {
+            return;
+        }
+        let now = now_epoch_secs();
+        // ① Drop expired bans (and let those targets earn a fresh slate).
+        let expired: Vec<String> = self
+            .bans
+            .iter()
+            .filter(|(_, &until)| now >= until)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in expired {
+            self.bans.remove(&k);
+            self.report_counts.remove(&k);
+        }
+        // ② Still over cap → evict weakest sub-threshold targets. Never evict a
+        // target that has reached the ban threshold (that would erase evidence).
+        while self.report_counts.len() > MAX_TRACKED_REPORTS {
+            let victim = self
+                .report_counts
+                .iter()
+                .filter(|(_, r)| (r.len() as u32) < REPORT_BAN_THRESHOLD)
+                .min_by_key(|(_, r)| r.len())
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(k) => {
+                    self.report_counts.remove(&k);
+                }
+                None => break, // everything left is at threshold — stop
+            }
+        }
     }
 
     /// Returns `true` if `peer_id` is currently banned. Auto-evicts expired
@@ -810,13 +906,17 @@ async fn handle_hello(
     // B3 + STRUCT-6: Update peer_info with liveness + contribution data.
     // NET-15: Also persist the sanitised display_name (None unsets it, which
     // means the peer dropped its nickname).
+    // SEC-COUNTRY-1: normalise the peer-supplied country to an ISO-shaped token
+    // before it is stored anywhere (per-peer field *and* the oracle map).
+    let country_code = sanitize_country_code(country);
+
     {
         let mut info = state.node.peer_info.write().await;
         let entry = info
             .entry(sender_pk.to_string())
-            .or_insert_with(|| crate::p2p::PeerInfo::new(clamped_watts, country.to_string()));
+            .or_insert_with(|| crate::p2p::PeerInfo::new(clamped_watts, country_code.clone()));
         entry.watts = clamped_watts;
-        entry.country = country.to_string();
+        entry.country = country_code.clone();
         entry.tasks_completed = tasks_completed;
         entry.blocks_verified = blocks_verified;
         entry.uptime_minutes = uptime_minutes;
@@ -824,14 +924,15 @@ async fn handle_hello(
         entry.touch();
     }
 
-    // Enregistrer le pays du pair pour l'oracle énergie
-    *state
-        .node
-        .peer_country_reports
-        .write()
-        .await
-        .entry(country.to_string())
-        .or_insert(0) += 1;
+    // Enregistrer le pays du pair pour l'oracle énergie. SEC-COUNTRY-1: bounded
+    // key space — refuse to grow the map past MAX_COUNTRY_CODES with novel
+    // codes; existing codes still count normally.
+    {
+        let mut reports = state.node.peer_country_reports.write().await;
+        if reports.contains_key(&country_code) || reports.len() < MAX_COUNTRY_CODES {
+            *reports.entry(country_code).or_insert(0) += 1;
+        }
+    }
 
     // NET-6: Chain sync — fan out RequestChain messages when there is a big gap.
     // For small gaps (<= one segment), keep the single-request path.
@@ -1041,12 +1142,16 @@ async fn handle_ping(state: &Arc<AppState>, sender_pk: &str, nonce: u64) {
     broadcast(state, GossipMessage::Pong { nonce }).await;
 }
 
-/// ReportPeer → log + accumulate report count. Three independent reports lead
-/// to a 1-hour ban (handled inside `NonceTracker::record_report`).
+/// ReportPeer → log + accumulate the report under the reporting peer's key.
+/// A ban requires `REPORT_BAN_THRESHOLD` **distinct reporters** (SEC-REPORT-1),
+/// handled inside `NonceTracker::record_report`.
 ///
-/// Note: this isn't perfect — a coordinated cluster of 3 attackers can ban any
-/// honest peer. Mitigations (proof-of-stake voting, weighted reports) are out
-/// of scope; the threshold is set conservatively to limit collateral damage.
+/// A single authenticated peer can therefore no longer ban an honest victim by
+/// itself: it counts for at most one reporter no matter how many reports (or
+/// how varied their `ReportReason`) it sends. Banning still requires an
+/// independent quorum; a coordinated cluster of `REPORT_BAN_THRESHOLD` real
+/// peers remains the (intended) minimum. `sender_pk` is the envelope signer,
+/// already authenticated by the upstream signature gate.
 async fn handle_report_peer(
     state: &Arc<AppState>,
     sender_pk: &str,
@@ -1065,7 +1170,7 @@ async fn handle_report_peer(
         .nonce_tracker
         .write()
         .await
-        .record_report(peer_id);
+        .record_report(peer_id, sender_pk);
     state.node.gossip.write().await.stats.peers_reported += 1;
 
     if count >= REPORT_BAN_THRESHOLD {
