@@ -18,11 +18,17 @@ export interface PaymentRequest {
 }
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
+// Public `qta1…` address shape (Bech32m over a 32-byte address): `qta1` + 58
+// charset symbols = 62 chars. This is a fast *shape* filter — the authoritative
+// checksum validation lives in the backend (`validate_address` / `ledger_transfer`).
+const BECH32_ADDR = /^qta1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$/i;
 const USERNAME = /^[a-z][a-z0-9_]{2,19}$/;
 
-/** True when `s` looks like a raw 64-hex account address. */
+/** True when `s` looks like an account address — either the public `qta1…`
+ * (Bech32m) form or the canonical 64-hex form. */
 export function isAddress(s: string): boolean {
-  return HEX64.test(s.trim());
+  const t = s.trim();
+  return HEX64.test(t) || BECH32_ADDR.test(t);
 }
 
 /** True when `s` (with or without @) is a plausible username. */

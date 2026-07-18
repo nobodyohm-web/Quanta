@@ -7,6 +7,9 @@ pub mod biometric;
 pub mod cipher;
 pub mod crypto_agility;
 pub mod hybrid_crypto;
+// Public human-facing address encoding — `qta1…` Bech32m (BIP-350). Presentation
+// layer over the canonical 32-byte address; the hex on-chain form is unchanged.
+pub mod address;
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use fips204::ml_dsa_65;
@@ -274,6 +277,12 @@ impl CryptoEngine {
     /// moteur. `None` tant qu'aucune identité primaire n'est établie.
     pub fn pq_address_hex(&self) -> Option<String> {
         self.pq_address().map(|a| Self::encode_address(&a))
+    }
+
+    /// The **public** `qta1…` (Bech32m) address of the engine's primary PQ identity
+    /// — the receive address a user shares. `None` until a primary identity exists.
+    pub fn pq_address_bech32(&self) -> Option<String> {
+        self.pq_address().map(|a| address::encode(&a))
     }
 
     // ── PQ-MIG-3 : autorité de transaction signée par le primaire ML-DSA ───────
