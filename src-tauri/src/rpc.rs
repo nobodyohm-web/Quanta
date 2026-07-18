@@ -42,9 +42,22 @@ const MAX_BODY: usize = 2 * 1024 * 1024;
 /// A JSON-RPC handler error: `(code, message)` mapped into the response `error`.
 type RpcErr = (i64, String);
 
+/// Self-contained web explorer served on `GET /` — no external assets, no CDN.
+const EXPLORER_HTML: &str = include_str!("explorer.html");
+
+/// Methods that hold keys or move money. In `--public` (read-only) mode these are
+/// refused, so a node can be exposed to the internet as a safe explorer/query node
+/// without also exposing its wallet or a tx-broadcast surface.
+fn public_denied(method: &str) -> bool {
+    matches!(
+        method,
+        "sendtoaddress" | "sendrawtransaction" | "getwalletinfo" | "getnewaddress"
+    )
+}
+
 /// Serve the JSON-RPC endpoint until `shutdown` fires. Never panics; a bind failure
 /// is logged and returns (the node keeps running without RPC).
-pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: CancellationToken) {
+pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: CancellationToken, public: bool) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -52,7 +65,10 @@ pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: Cancellatio
             return;
         }
     };
-    log::info!("◈ [RPC] JSON-RPC actif sur http://{addr}");
+    log::info!(
+        "◈ [RPC] JSON-RPC + explorer sur http://{addr} ({})",
+        if public { "public read-only" } else { "full/local" }
+    );
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -63,7 +79,7 @@ pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: Cancellatio
                 Ok((stream, _peer)) => {
                     let st = state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, st).await {
+                        if let Err(e) = handle_conn(stream, st, public).await {
                             log::debug!("◈ [RPC] connexion: {e}");
                         }
                     });
@@ -76,6 +92,7 @@ pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: Cancellatio
 
 struct HttpReq {
     method: String,
+    path: String,
     body: Vec<u8>,
 }
 
@@ -109,7 +126,9 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
     let head = String::from_utf8_lossy(&buf[..header_end]);
     let mut lines = head.split("\r\n");
     let request_line = lines.next().unwrap_or("");
-    let method = request_line.split_whitespace().next().unwrap_or("").to_string();
+    let mut req_parts = request_line.split_whitespace();
+    let method = req_parts.next().unwrap_or("").to_string();
+    let path = req_parts.next().unwrap_or("/").to_string();
 
     let mut content_length = 0usize;
     for line in lines {
@@ -133,7 +152,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Ok(Some(HttpReq { method, body }))
+    Ok(Some(HttpReq { method, path, body }))
 }
 
 async fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) -> std::io::Result<()> {
@@ -146,15 +165,36 @@ async fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) -> st
     stream.flush().await
 }
 
-async fn handle_conn(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Result<()> {
+async fn write_html(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.flush().await
+}
+
+async fn handle_conn(mut stream: TcpStream, state: Arc<AppState>, public: bool) -> std::io::Result<()> {
     let req = match read_request(&mut stream).await? {
         Some(r) => r,
         None => return Ok(()),
     };
+
+    // GET / → the self-contained web explorer (it POSTs JSON-RPC to this same origin).
+    if req.method.eq_ignore_ascii_case("GET") {
+        let path = req.path.split('?').next().unwrap_or("/");
+        if matches!(path, "/" | "/index.html" | "/explorer") {
+            return write_html(&mut stream, "200 OK", EXPLORER_HTML).await;
+        }
+        return write_response(&mut stream, "404 Not Found", b"{\"error\":\"not found\"}").await;
+    }
+
     if !req.method.eq_ignore_ascii_case("POST") {
-        let body = json!({"error": "JSON-RPC endpoint: POST only"}).to_string();
+        let body = json!({"error": "GET / for the explorer, POST / for JSON-RPC"}).to_string();
         return write_response(&mut stream, "405 Method Not Allowed", body.as_bytes()).await;
     }
+
     let parsed: Result<Value, _> = serde_json::from_slice(&req.body);
     let resp = match parsed {
         Err(_) => json!({"jsonrpc": "2.0", "id": Value::Null, "error": {"code": -32700, "message": "parse error"}}),
@@ -162,9 +202,13 @@ async fn handle_conn(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
             let id = rpc.get("id").cloned().unwrap_or(Value::Null);
             let method = rpc.get("method").and_then(|m| m.as_str()).unwrap_or("");
             let params = rpc.get("params").cloned().unwrap_or_else(|| json!({}));
-            match dispatch(&state, method, &params).await {
-                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-                Err((code, message)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+            if public && public_denied(method) {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method disabled in public read-only mode"}})
+            } else {
+                match dispatch(&state, method, &params).await {
+                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    Err((code, message)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+                }
             }
         }
     };
@@ -213,6 +257,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             let address = state.crypto.lock().await.pq_address_bech32().unwrap_or_default();
             let status = state.node.get_status().await;
             let ledger = state.node.ledger.read().await;
+            let stats = ledger.stats();
             Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": crate::p2p::gossip::TORUS_PROTOCOL_VERSION,
@@ -220,6 +265,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 "micro_per_quanta": crate::p2p::ledger::MICRO,
                 "height": ledger.chain_height(),
                 "finalized_height": ledger.finalized_floor_index(),
+                // Provable-supply transparency (a listing requirement): total minted
+                // so far vs the hard cap, both verifiable on-chain, no hidden mint.
+                "minted_uqta": stats.total_mined,
+                "max_supply_uqta": crate::p2p::reputation::MAX_SUPPLY_MICRO,
+                "blocks": stats.total_blocks,
+                "total_txs": stats.total_txs,
+                "holders": stats.holders,
                 "peers": status.peer_count,
                 "online": status.is_online,
                 "node_id": status.node_id,
@@ -611,5 +663,24 @@ mod tests {
             .unwrap();
         assert!(!sent["txid"].as_str().unwrap().is_empty());
         assert_eq!(sent["amount_uqta"], json!(10 * MICRO));
+    }
+
+    #[tokio::test]
+    async fn public_mode_gating_and_getinfo_supply() {
+        // Public read-only mode gates exactly the key-holding / money methods.
+        assert!(public_denied("sendtoaddress"));
+        assert!(public_denied("sendrawtransaction"));
+        assert!(public_denied("getwalletinfo"));
+        assert!(public_denied("getnewaddress"));
+        assert!(!public_denied("getinfo"));
+        assert!(!public_denied("getblock"));
+        assert!(!public_denied("listtransactions"));
+
+        // getinfo exposes provable-supply fields (transparency for explorers/exchanges).
+        let state = test_state().await;
+        let info = dispatch(&state, "getinfo", &json!({})).await.unwrap();
+        assert!(info["minted_uqta"].is_number());
+        assert_eq!(info["max_supply_uqta"], json!(crate::p2p::reputation::MAX_SUPPLY_MICRO));
+        assert!(info["blocks"].is_number());
     }
 }

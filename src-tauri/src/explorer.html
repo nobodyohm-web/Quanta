@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quanta Explorer</title>
+<style>
+  :root {
+    --bg: #ffffff; --surface: #fbfbfd; --surface-2: #f2f2f5; --line: #e3e3e6;
+    --ink: #1d1d1f; --muted: #86868b; --teal: #0BA5A0; --teal-deep: #087F8C;
+    --green: #16a34a; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.05);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased; line-height: 1.5;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .num { font-variant-numeric: tabular-nums lining-nums; }
+  header {
+    padding: 20px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .logo { width: 26px; height: 26px; border-radius: 50%;
+    background: conic-gradient(from 210deg, var(--teal), var(--teal-deep), #2b6fb3, var(--teal)); }
+  h1 { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  .net { font-size: 12px; color: var(--muted); }
+  .net b { color: var(--teal-deep); font-weight: 600; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px; box-shadow: var(--shadow); }
+  .card .k { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .card .v { font-size: 22px; font-weight: 700; margin-top: 4px; letter-spacing: -.02em; }
+  .card .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .bar { height: 6px; background: var(--surface-2); border-radius: 6px; margin-top: 10px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--teal), var(--teal-deep)); }
+  .search { display: flex; gap: 8px; margin: 24px 0 8px; }
+  .search input {
+    flex: 1; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px;
+    font-size: 14px; background: var(--bg); color: var(--ink); outline: none;
+  }
+  .search input:focus-visible { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(11,165,160,.15); }
+  .search button {
+    padding: 0 18px; border: none; border-radius: 12px; background: var(--teal); color: #fff;
+    font-weight: 600; font-size: 14px; cursor: pointer;
+  }
+  .search button:hover { background: var(--teal-deep); }
+  .hint { font-size: 12px; color: var(--muted); margin: 0 0 20px; }
+  h2 { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; margin: 28px 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { font-size: 12px; color: var(--muted); font-weight: 500; }
+  td.r, th.r { text-align: right; }
+  tr.clk { cursor: pointer; }
+  tr.clk:hover { background: var(--surface); }
+  .pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+  .pill.fin { background: rgba(22,163,74,.12); color: var(--green); }
+  .pill.pend { background: var(--surface-2); color: var(--muted); }
+  .result { margin-top: 12px; }
+  .kv { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 8px 4px; box-shadow: var(--shadow); }
+  .kv .row { display: flex; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  .kv .row:last-child { border-bottom: none; }
+  .kv .rk { width: 160px; color: var(--muted); font-size: 13px; flex-shrink: 0; }
+  .kv .rv { word-break: break-all; font-size: 13px; }
+  .err { color: #b91c1c; font-size: 13px; padding: 10px 2px; }
+  .foot { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
+    font-size: 12px; color: var(--muted); }
+  a { color: var(--teal-deep); text-decoration: none; cursor: pointer; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo"></span>
+  <h1>Quanta Explorer</h1>
+  <span class="net" id="net"></span>
+</header>
+<main>
+  <section class="cards" id="cards"></section>
+
+  <div class="search">
+    <input id="q" placeholder="Search — block height, address (qta1… or hex), or tx hash" />
+    <button id="go">Search</button>
+  </div>
+  <p class="hint">Read-only view over a Quanta node's JSON-RPC. Amounts are QUANTA (1 QUANTA = 1,000,000 µQTA).</p>
+
+  <div class="result" id="result"></div>
+
+  <h2>Latest blocks</h2>
+  <div id="blocks"></div>
+
+  <div class="foot" id="foot"></div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+async function rpc(method, params = {}) {
+  const res = await fetch("/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message || "rpc error");
+  return j.result;
+}
+
+const fmtQ = (uqta) => (Number(uqta) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 6 });
+const fmtN = (n) => Number(n).toLocaleString();
+const short = (s) => (s && s.length > 18 ? s.slice(0, 10) + "…" + s.slice(-6) : s || "");
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function card(k, v, sub) {
+  return `<div class="card"><div class="k">${k}</div><div class="v num">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+}
+
+async function refreshStats() {
+  try {
+    const info = await rpc("getinfo");
+    $("net").innerHTML = `network <b>${esc(info.network)}</b> · v${esc(info.version)} · protocol ${info.protocol_version}`;
+    const minted = Number(info.minted_uqta), cap = Number(info.max_supply_uqta);
+    const pct = cap > 0 ? Math.min(100, (minted / cap) * 100) : 0;
+    $("cards").innerHTML =
+      card("Height", fmtN(info.height), `finalized ${fmtN(info.finalized_height)}`) +
+      card("Supply", fmtQ(info.minted_uqta), `of ${fmtN(cap / 1e6)} QUANTA cap` +
+        `<div class="bar"><i style="width:${pct.toFixed(4)}%"></i></div>`) +
+      card("Blocks", fmtN(info.blocks), `${fmtN(info.total_txs)} txs`) +
+      card("Holders", fmtN(info.holders), `${fmtN(info.peers)} peers`);
+    $("foot").textContent = `Node ${info.node_id.slice(0, 16)}… · ${info.online ? "online" : "offline"} · alpha, unaudited · QUANTA has no market price.`;
+  } catch (e) {
+    $("net").textContent = "node unreachable";
+  }
+}
+
+function blockRow(b, finalized) {
+  const fin = b.index <= finalized;
+  return `<tr class="clk" data-h="${b.index}">
+    <td class="num">${b.index}</td>
+    <td class="mono">${short(b.hash)}</td>
+    <td class="num r">${b.transactions ? b.transactions.length : 0}</td>
+    <td class="r">${fin ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</td>
+  </tr>`;
+}
+
+async function refreshBlocks() {
+  try {
+    const info = await rpc("getinfo");
+    const tip = Number(info.height), fin = Number(info.finalized_height);
+    const start = Math.max(0, tip - 11);
+    const heights = [];
+    for (let h = tip; h >= start; h--) heights.push(h);
+    const blocks = await Promise.all(heights.map((h) => rpc("getblock", { height: h }).catch(() => null)));
+    const rows = blocks.filter(Boolean).map((b) => blockRow(b, fin)).join("");
+    $("blocks").innerHTML = `<table><thead><tr><th>Height</th><th>Hash</th><th class="r">Txs</th><th class="r">Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+    document.querySelectorAll("#blocks tr.clk").forEach((tr) => tr.onclick = () => showBlock(Number(tr.dataset.h)));
+  } catch (e) { /* keep last */ }
+}
+
+function kvBox(pairs) {
+  return `<div class="kv">${pairs.map(([k, v]) => `<div class="row"><div class="rk">${k}</div><div class="rv mono">${v}</div></div>`).join("")}</div>`;
+}
+
+async function showBlock(h) {
+  try {
+    const b = await rpc("getblock", { height: h });
+    const info = await rpc("getinfo");
+    const fin = Number(b.index) <= Number(info.finalized_height);
+    const txs = (b.transactions || []).map((t) =>
+      `<div class="row"><div class="rk">${esc(t.tx_type)}</div><div class="rv mono">${short(t.from)} → ${short(t.to)} · ${fmtQ(t.amount)} QTA</div></div>`).join("") || `<div class="row"><div class="rv" style="color:var(--muted)">no transactions</div></div>`;
+    $("result").innerHTML = `<h2>Block #${b.index} ${fin ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</h2>` +
+      kvBox([["hash", esc(b.hash)], ["prev", esc(b.prev_hash)], ["miner", esc(b.miner)], ["timestamp", esc(b.timestamp)]]) +
+      `<h2>Transactions (${(b.transactions || []).length})</h2><div class="kv">${txs}</div>`;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) { showErr(e); }
+}
+
+async function showAddress(addr) {
+  const bal = await rpc("getbalance", { address: addr });
+  const list = await rpc("listtransactions", { address: addr, limit: 50 });
+  const rows = (list.transactions || []).map((t) =>
+    `<tr><td>${t.direction === "in" ? "▼ in" : "▲ out"}</td><td class="mono">${short(t.hash)}</td><td class="num r">${fmtQ(t.amount_uqta)}</td><td class="num r">${t.height}</td><td class="r">${t.finalized ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</td></tr>`).join("") ||
+    `<tr><td colspan="5" style="color:var(--muted)">no transactions in range</td></tr>`;
+  $("result").innerHTML = `<h2>Address</h2>` +
+    kvBox([["address", esc(bal.address)], ["spendable", fmtQ(bal.spendable_uqta) + " QTA"], ["staked", fmtQ(bal.staked_uqta) + " QTA"]]) +
+    `<h2>Transactions</h2><table><thead><tr><th></th><th>Hash</th><th class="r">Amount</th><th class="r">Height</th><th class="r">Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function showTx(hash) {
+  const t = await rpc("gettransaction", { hash });
+  $("result").innerHTML = `<h2>Transaction</h2>` + kvBox([
+    ["hash", esc(t.hash)], ["type", esc(t.tx_type)], ["from", esc(t.from)], ["to", esc(t.to)],
+    ["amount", fmtQ(t.amount) + " QTA"], ["nonce", esc(t.nonce)], ["timestamp", esc(t.timestamp)],
+    ["in mempool", t.in_mempool ? "yes" : "no"],
+  ]);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function showErr(e) { $("result").innerHTML = `<p class="err">${esc(e.message || e)}</p>`; }
+
+async function search() {
+  const q = $("q").value.trim();
+  if (!q) return;
+  $("result").innerHTML = "";
+  try {
+    if (/^\d+$/.test(q)) return await showBlock(Number(q));
+    // Address (qta1… or 64-hex) vs tx hash — validateaddress decides.
+    const v = await rpc("validateaddress", { address: q });
+    if (v.isvalid) return await showAddress(q);
+    return await showTx(q);
+  } catch (e) { showErr(e); }
+}
+
+$("go").onclick = search;
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+
+refreshStats();
+refreshBlocks();
+setInterval(refreshStats, 10000);
+setInterval(refreshBlocks, 15000);
+</script>
+</body>
+</html>

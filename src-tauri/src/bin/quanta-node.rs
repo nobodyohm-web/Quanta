@@ -59,7 +59,7 @@ async fn main() {
 
     let shutdown = state.node.shutdown.clone();
     tokio::select! {
-        _ = rpc::serve(state.clone(), cfg.rpc_addr, shutdown.clone()) => {}
+        _ = rpc::serve(state.clone(), cfg.rpc_addr, shutdown.clone(), cfg.public) => {}
         _ = tokio::signal::ctrl_c() => {
             log::info!("◈ [quanta-node] SIGINT reçu — arrêt gracieux");
         }
@@ -74,6 +74,7 @@ struct Config {
     data_dir: PathBuf,
     rpc_addr: SocketAddr,
     mine: bool,
+    public: bool,
 }
 
 impl Config {
@@ -83,6 +84,7 @@ impl Config {
         let mut data_dir = node_runtime::default_data_dir();
         let mut rpc_addr = SocketAddr::from(([127, 0, 0, 1], 8645));
         let mut mine = false;
+        let mut public = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -104,6 +106,7 @@ impl Config {
                     }
                 }
                 "--mine" => mine = true,
+                "--public" => public = true,
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -115,7 +118,7 @@ impl Config {
                 }
             }
         }
-        Config { data_dir, rpc_addr, mine }
+        Config { data_dir, rpc_addr, mine, public }
     }
 }
 
@@ -127,6 +130,8 @@ fn print_help() {
     println!("  --data-dir <path>   Data directory (default: <OS data dir>/quanta-protocol)");
     println!("  --rpc-addr <addr>   JSON-RPC bind address (default: 127.0.0.1:8645)");
     println!("  --mine              Enable block production (default: off — watch/relay node)");
+    println!("  --public            Read-only mode: disable wallet/broadcast RPC methods so");
+    println!("                      the node + web explorer can be safely exposed publicly");
     println!("  -h, --help          Show this help\n");
     println!("ENV:");
     println!("  RUST_LOG                 Log level (info, debug, …)");
