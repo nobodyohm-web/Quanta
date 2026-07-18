@@ -240,6 +240,9 @@ const METHODS: &[&str] = &[
     "getfinalityheight",
     "gettransaction",
     "listtransactions",
+    "getfinalityinfo",
+    "getvalidators",
+    "getmempool",
     "sendrawtransaction",
     "getwalletinfo",
     "getnewaddress",
@@ -282,6 +285,71 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
         "getblockcount" => Ok(json!(state.node.ledger.read().await.chain_height())),
 
         "getfinalityheight" => Ok(json!(state.node.ledger.read().await.finalized_floor_index())),
+
+        // Casper-FFG finality state — the differentiator Bitcoin lacks: an exchange
+        // credits a deposit once its block index ≤ finalized_floor (irreversible),
+        // no confirmation-count guessing.
+        "getfinalityinfo" => {
+            use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
+            let ledger = state.node.ledger.read().await;
+            let height = ledger.chain_height();
+            let stakes = ledger.validator_stakes();
+            let total_staked: u64 = stakes.values().sum();
+            let min = crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
+            let validators = stakes.values().filter(|&&s| s >= min).count();
+            let blocks_into_epoch = height % EPOCH_LENGTH_BLOCKS;
+            Ok(json!({
+                "height": height,
+                "finalized_floor": ledger.finalized_floor_index(),
+                "epoch": height / EPOCH_LENGTH_BLOCKS,
+                "epoch_length": EPOCH_LENGTH_BLOCKS,
+                "blocks_into_epoch": blocks_into_epoch,
+                "next_checkpoint": height - blocks_into_epoch + EPOCH_LENGTH_BLOCKS,
+                "validators": validators,
+                "total_staked_uqta": total_staked,
+                "min_validator_stake_uqta": min,
+                "quorum_num": 2,
+                "quorum_den": 3,
+            }))
+        }
+
+        // The on-chain bonded validator set — who secures the network (PoS), sourced
+        // purely from the chain (Stake/Unstake/Slash txs), stake-descending.
+        "getvalidators" => {
+            let stakes = state.node.ledger.read().await.validator_stakes();
+            let min = crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
+            let mut vs: Vec<(String, u64)> = stakes.into_iter().filter(|(_, s)| *s >= min).collect();
+            vs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let list: Vec<Value> = vs
+                .into_iter()
+                .map(|(addr_hex, stake)| {
+                    let bech = address::parse(&addr_hex)
+                        .map(|b| address::encode(&b))
+                        .unwrap_or_else(|_| addr_hex.clone());
+                    json!({ "address": bech, "address_hex": addr_hex, "stake_uqta": stake })
+                })
+                .collect();
+            Ok(json!({ "count": list.len(), "validators": list }))
+        }
+
+        // Pending (mempool) transactions not yet sealed into a block.
+        "getmempool" => {
+            let ledger = state.node.ledger.read().await;
+            let txs: Vec<Value> = ledger
+                .pending_txs()
+                .iter()
+                .map(|t| {
+                    json!({
+                        "hash": t.hash,
+                        "from": t.from,
+                        "to": t.to,
+                        "amount_uqta": t.amount,
+                        "type": format!("{:?}", t.tx_type),
+                    })
+                })
+                .collect();
+            Ok(json!({ "count": txs.len(), "transactions": txs }))
+        }
 
         "getblock" => {
             let height = param_u64(params, "height")?;
@@ -682,5 +750,27 @@ mod tests {
         assert!(info["minted_uqta"].is_number());
         assert_eq!(info["max_supply_uqta"], json!(crate::p2p::reputation::MAX_SUPPLY_MICRO));
         assert!(info["blocks"].is_number());
+    }
+
+    #[tokio::test]
+    async fn finality_validators_and_mempool_methods() {
+        let state = test_state().await;
+
+        let fin = dispatch(&state, "getfinalityinfo", &json!({})).await.unwrap();
+        assert!(fin["epoch"].is_number());
+        assert_eq!(fin["quorum_num"], json!(2));
+        assert_eq!(fin["quorum_den"], json!(3));
+        assert_eq!(
+            fin["min_validator_stake_uqta"],
+            json!(crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE)
+        );
+
+        let vals = dispatch(&state, "getvalidators", &json!({})).await.unwrap();
+        assert!(vals["validators"].is_array());
+        assert_eq!(vals["count"], json!(0)); // fresh chain: nobody has staked
+
+        let mp = dispatch(&state, "getmempool", &json!({})).await.unwrap();
+        assert!(mp["transactions"].is_array());
+        assert_eq!(mp["count"], json!(0));
     }
 }
