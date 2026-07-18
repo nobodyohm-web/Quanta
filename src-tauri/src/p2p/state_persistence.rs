@@ -135,13 +135,31 @@ pub async fn restore_state(state: &AppState, database: &Database) {
     if let Ok(Some(json)) = database.load_state("ledger").await {
         if let Ok(snap) = serde_json::from_str::<p2p::ledger::LedgerSnapshot>(&json) {
             let restored = p2p::ledger::Ledger::restore(snap);
-            match restored.verify_chain() {
-                Ok((vb, vt)) => {
-                    log::info!("◈ [Quanta] Ledger restored & verified ({} blocks, {} txs)", vb, vt);
-                    *state.node.ledger.write().await = restored;
-                }
-                Err(e) => {
-                    log::error!("◈ [Quanta] Ledger CORRUPTED — starting fresh: {}", e);
+            // GENESIS-V4 guard: a snapshot from an earlier chain (v3 or before)
+            // has a different genesis hash. Loading it would boot the node on an
+            // incompatible chain that every v5 peer rejects. The genesis hash IS
+            // the chain's identity (no separate version field needed): if the
+            // restored genesis ≠ the v4 genesis this build produces, discard the
+            // snapshot and start fresh from the v4 genesis (the default already in
+            // `state.node.ledger`).
+            let v4_genesis = p2p::ledger::Ledger::new()
+                .chain
+                .first()
+                .map(|b| b.hash.clone());
+            let restored_genesis = restored.chain.first().map(|b| b.hash.clone());
+            if restored_genesis != v4_genesis {
+                log::warn!(
+                    "◈ [Quanta] Snapshot d'une genèse antérieure (pré-v4) — ignoré, démarrage sur la genèse v4"
+                );
+            } else {
+                match restored.verify_chain() {
+                    Ok((vb, vt)) => {
+                        log::info!("◈ [Quanta] Ledger restored & verified ({} blocks, {} txs)", vb, vt);
+                        *state.node.ledger.write().await = restored;
+                    }
+                    Err(e) => {
+                        log::error!("◈ [Quanta] Ledger CORRUPTED — starting fresh: {}", e);
+                    }
                 }
             }
         }

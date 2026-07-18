@@ -39,7 +39,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// all previously-valid history are UNCHANGED (purely-bonded slashes serialize
 /// byte-identically), so v3↔v4 nodes only diverge once an unbonding-consuming
 /// slash is sealed.
-pub const TORUS_PROTOCOL_VERSION: u8 = 4;
+///
+/// GENESIS-V4 / PROPOSER-1 / PQ-ENVELOPE-1: bumped **4 → 5** — the v4 hard-fork.
+/// Three coupled protocol changes: (a) a **fresh launch genesis** (new frozen
+/// hash, zero premine); (b) **PROPOSER-1** — a received non-genesis block whose
+/// proposer is not a bonded validator (as of the parent) is rejected, once anyone
+/// has staked (deterministic, clock-free); (c) **PQ-ENVELOPE-1** — gossip
+/// envelopes are signed with ML-DSA-65, not Ed25519. A v4 node neither builds nor
+/// validates any of these, so v4↔v5 nodes are incompatible from block 0.
+pub const TORUS_PROTOCOL_VERSION: u8 = 5;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
