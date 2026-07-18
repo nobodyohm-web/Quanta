@@ -11,7 +11,6 @@
   import QuantaMark from "$lib/brand/QuantaMark.svelte";
   import Toasts from "$lib/Toasts.svelte";
   import Welcome from "$lib/Welcome.svelte";
-  import Aurora from "$lib/Aurora.svelte";
   import LanguageSelect from "$lib/LanguageSelect.svelte";
   import QuantumField from "$lib/QuantumField.svelte";
   import { t } from "$lib/i18n.svelte";
@@ -271,7 +270,7 @@
 {:else if !ready && step === "recovery"}
   <div class="setup-screen">
     <QuantumField density={1.1} />
-    <div class="setup-box">
+    <div class="setup-box card card-hero">
       <h1 class="setup-title">{t('su.rec.title')}</h1>
       <p class="setup-sub">{t('su.rec.intro')}</p>
       <div class="recovery-box">
@@ -282,7 +281,7 @@
         {t('su.rec.warn')}
       </div>
       <div class="setup-form">
-        <button class="btn sb" onclick={copyKey}>{keyCopied ? t('su.copied') : t('su.rec.copyKey')}</button>
+        <button class="btn btn-ghost sb" onclick={copyKey}>{keyCopied ? t('su.copied') : t('su.rec.copyKey')}</button>
         <button class="btn btn-primary sb" onclick={goToConfirm}>{t('su.rec.saved')}</button>
       </div>
     </div>
@@ -291,7 +290,7 @@
 {:else if !ready && step === "confirm"}
   <div class="setup-screen">
     <QuantumField density={1.1} />
-    <div class="setup-box">
+    <div class="setup-box card card-hero">
       <h1 class="setup-title">{t('su.confirm.title')}</h1>
       <p class="setup-sub">{@html t('su.confirm.intro')}</p>
       <div class="setup-form">
@@ -312,7 +311,7 @@
 {:else if !ready && step === "username"}
   <div class="setup-screen">
     <QuantumField density={1.1} />
-    <div class="setup-box">
+    <div class="setup-box card card-hero">
       <h1 class="setup-title">{t('su.uname.title')}</h1>
       <p class="setup-sub">{@html t('su.uname.intro')}</p>
       <div class="setup-form">
@@ -350,19 +349,14 @@
 {:else if !ready}
   <div class="setup-screen">
     <QuantumField density={1.1} />
-    <div class="setup-box">
-      <div class="setup-hero">
-        <Aurora radius={0}>
-          <div class="setup-hero-inner">
-            <div class="coin-glass"><QuantaMark size={26} tone="white" /></div>
-            <div class="setup-hero-txt">
-              <div class="setup-wordmark">QUANTA</div>
-              <div class="setup-tag">{step === "create" ? t('auth.create.tag') : t('auth.unlock.tag')}</div>
-            </div>
-          </div>
-        </Aurora>
+    <div class="setup-box card card-hero">
+      <div class="setup-brand">
+        <QuantaMark size={32} tone="aurora" />
+        <div class="setup-brand-txt">
+          <div class="setup-wordmark">QUANTA</div>
+          <div class="setup-tag">{step === "create" ? t('auth.create.tag') : t('auth.unlock.tag')}</div>
+        </div>
       </div>
-      <div class="setup-panel">
       <h1 class="setup-title">{step === "create" ? t('auth.create.title') : t('auth.unlock.title')}</h1>
       <p class="setup-sub">
         {step === "create" ? t('auth.create.sub') : t('auth.unlock.sub')}
@@ -407,7 +401,6 @@
         </div>
       {/if}
       <div class="lang-row"><LanguageSelect /></div>
-      </div>
     </div>
   </div>
 {:else}
@@ -437,7 +430,7 @@
   .load-screen {
     height: 100vh;
     display: flex; align-items: center; justify-content: center;
-    background: var(--color-bg-0);
+    background: var(--canvas);
   }
   .load-inner { text-align: center; animation: fadeIn 0.15s ease-out; }
   .load-mark {
@@ -457,54 +450,45 @@
   }
   .load-sub { font-size: 13px; color: var(--color-text-2); }
 
+  /* Le rituel d'entrée — LE moment de l'écran : carte-hero blanche (rail
+     Aurora via .card-hero global) qui flotte sur le canevas chaud. */
   .setup-screen {
     height: 100vh; position: relative;
     display: flex; align-items: center; justify-content: center;
-    background: var(--color-bg-2);
+    background: var(--canvas);
     padding: 24px;
   }
   .setup-box {
     position: relative; z-index: 1;
     width: 100%; max-width: 420px;
-    background: var(--color-bg-0);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-lg);
-    overflow: hidden;
-    animation: welcomeRise 0.4s cubic-bezier(0.22, 0.61, 0.36, 1);
+    padding: 30px 32px;
+    animation: welcomeRise 0.4s var(--ease-out);
   }
   @keyframes welcomeRise {
     from { opacity: 0; transform: translateY(12px) scale(0.99); }
     to   { opacity: 1; transform: none; }
   }
-  .setup-hero { position: relative; }
-  .setup-hero-inner {
-    display: flex; align-items: center; gap: 13px;
-    padding: 24px 28px;
+  @media (prefers-reduced-motion: reduce) { .setup-box { animation: none; } }
+  .setup-brand {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 24px;
   }
-  .coin-glass {
-    width: 44px; height: 44px; border-radius: 13px;
-    background: rgba(255,255,255,0.18);
-    border: 1px solid rgba(255,255,255,0.4);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 23px; font-weight: 800; color: #fff;
-    backdrop-filter: blur(6px);
-    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-    flex-shrink: 0;
+  .setup-brand-txt { min-width: 0; }
+  .setup-wordmark {
+    font-size: 16px; font-weight: 800; letter-spacing: 0.12em;
+    color: var(--color-text-0);
   }
-  .setup-wordmark { font-size: 19px; font-weight: 800; letter-spacing: 0.14em; color: #fff; }
-  .setup-tag { font-size: 12px; color: rgba(255,255,255,0.9); margin-top: 2px; }
-  .setup-panel { padding: 28px 32px 30px; }
+  .setup-tag { font-size: 12px; color: var(--color-text-2); margin-top: 1px; }
   .lang-row { display: flex; justify-content: center; margin-top: 18px; }
   .setup-title {
     font-size: 24px; font-weight: 700;
-    letter-spacing: -0.03em;
+    letter-spacing: -0.025em;
     margin-bottom: 8px;
   }
   .setup-sub {
     font-size: 14px; color: var(--color-text-1);
     line-height: 1.6;
-    margin-bottom: 32px;
+    margin-bottom: 26px;
   }
   .setup-form { display: flex; flex-direction: column; gap: 16px; }
   .fg { display: flex; flex-direction: column; gap: 6px; }
@@ -544,13 +528,14 @@
   .bio-btn {
     display: flex; align-items: center; justify-content: center; gap: 10px;
     width: 100%; padding: 13px;
-    background: var(--color-bg-1);
+    background: var(--surface);
     border: 1px solid var(--color-border-hover);
-    border-radius: var(--radius);
+    border-radius: 10px;
+    box-shadow: var(--shadow-sm);
     color: var(--color-text-0);
     font-family: inherit; font-size: 14px; font-weight: 600;
     cursor: pointer;
-    transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+    transition: border-color var(--dur-fast) ease, background var(--dur-fast) ease, transform 0.12s var(--ease-out);
   }
   .bio-btn:hover:not(:disabled) { border-color: var(--color-accent); background: var(--cyan-dim); }
   .bio-btn:active:not(:disabled) { transform: scale(0.99); }

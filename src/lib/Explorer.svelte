@@ -174,7 +174,7 @@
                 <span class="mono" style="color:var(--color-amber);font-weight:700;">{tx.amount.toFixed(4)}</span>
                 <span class="dim">QNT</span>
               {:else if tx.type === 'Stake' || tx.type === 'Unstake' || tx.type === 'Slash'}
-                <span style="color:{fd.color};font-weight:600;">{t(('tx.' + tx.type) as any)}</span>
+                <span class="tag {tx.type === 'Stake' ? 'ex-tag-stake' : tx.type === 'Slash' ? 'ex-tag-slash' : 'ex-tag-unstake'}">{t(('tx.' + tx.type) as any)}</span>
                 <span class="mono" style="color:{fd.color};font-weight:700;">{tx.amount.toFixed(4)}</span>
                 <span class="dim">·</span>
                 <span class="mono ex-feed-addr">{tx.from}</span>
@@ -196,19 +196,31 @@
 
 <style>
   .ex-search { display: flex; gap: 10px; margin-bottom: 20px; }
-  .ex-search .input { flex: 1; }
+  /* Variante « proéminente » du .input global (taille seulement — le reste
+     vient du vocabulaire partagé, focus ring inclus). */
+  .ex-search .input { flex: 1; font-size: 15px; padding: 13px 16px; }
   .ex-err {
     font-size: 13px; color: var(--color-red);
     margin-bottom: 16px; padding: 12px;
     background: rgba(229,72,77,0.06); border-radius: 8px;
   }
-  .ex-hit { margin-bottom: 20px; border-color: var(--cyan-mid); }
+  /* Résultat = carte blanche élevée (ombre du système, pas de bordure teal). */
+  .ex-hit { margin-bottom: 20px; box-shadow: var(--shadow); }
   .ex-hit-head { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
-  .ex-hit-name { font-size: 17px; font-weight: 800; color: var(--color-accent); margin-bottom: 2px; }
+  .ex-hit-name { font-size: 17px; font-weight: 700; color: var(--color-accent); margin-bottom: 2px; }
   .ex-hit-k { font-size: 12px; color: var(--color-text-2); margin-bottom: 6px; }
-  .ex-close { background: none; border: none; cursor: pointer; color: var(--color-text-3); }
-  .ex-close:hover { color: var(--color-text-1); }
+  .ex-close {
+    background: none; border: none; cursor: pointer; color: var(--color-text-3);
+    padding: 6px; border-radius: 8px;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .ex-close:hover { color: var(--color-text-1); background: var(--color-bg-2); }
   .ex-unit { font-size: 14px; color: var(--color-text-2); margin-left: 8px; }
+  /* Tags distincts Stake / Unstake / Slash (base .tag globale + teinte locale ;
+     mêmes familles que les pastilles du flux). */
+  .ex-tag-stake   { background: rgba(124,58,237,0.10); color: #7c3aed; }
+  .ex-tag-unstake { background: rgba(124,58,237,0.07); color: #9d7be8; }
+  .ex-tag-slash   { background: rgba(229,72,77,0.10);  color: var(--color-red); }
   .ex-feed-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
   .ex-feed-live { font-size: 11px; color: var(--color-text-3); }
   .ex-feed-line { font-size: 13px; font-weight: 500; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }

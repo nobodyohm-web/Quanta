@@ -152,22 +152,26 @@
 </script>
 
 <div class="page settings-page">
-  <h1 class="page-title">{t('set.title')}</h1>
-  <p class="page-sub">{t('set.pageSub')}</p>
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">{t('set.title')}</h1>
+      <p class="page-sub">{t('set.pageSub')}</p>
+    </div>
+  </div>
 
   <!-- Langue -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('settings.language')}</h2>
+      <h2 class="section-label">{t('settings.language')}</h2>
       <p class="set-sub">{t('settings.languageSub')}</p>
     </header>
     <LanguageSelect />
   </section>
 
   <!-- Apparence -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.appearance')}</h2>
+      <h2 class="section-label">{t('set.appearance')}</h2>
       <p class="set-sub">{t('set.appearanceSub')}</p>
     </header>
     <div class="set-row">
@@ -188,9 +192,9 @@
   </section>
 
   <!-- Sécurité -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.security')}</h2>
+      <h2 class="section-label">{t('set.security')}</h2>
       <p class="set-sub">{t('set.securitySub')}</p>
     </header>
 
@@ -214,29 +218,29 @@
   </section>
 
   <!-- Identité réseau -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.nodeShare')}</h2>
+      <h2 class="section-label">{t('set.nodeShare')}</h2>
       <p class="set-sub">{t('set.nodeShareSub')}</p>
     </header>
     <div class="ticket-box">
       <code class="ticket-val">{nodeTicket}</code>
-      <button class="btn btn-sm" onclick={copyTicket} disabled={!nodeTicket || nodeTicket === t('set.offline')}>
+      <button class="btn btn-ghost btn-sm" onclick={copyTicket} disabled={!nodeTicket || nodeTicket === t('set.offline')}>
         {ticketCopied ? t('set.copied') : t('set.copy')}
       </button>
     </div>
   </section>
 
   <!-- Connecter un pair -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.connectPeer')}</h2>
+      <h2 class="section-label">{t('set.connectPeer')}</h2>
       <p class="set-sub">{t('set.connectPeerSub')}</p>
     </header>
     <div class="connect-box">
       <input class="input connect-input" type="text" bind:value={peerInput}
         placeholder={t('set.connectPlaceholder')} />
-      <button class="btn btn-accent" onclick={connectPeer} disabled={!peerInput.trim()}>{t('set.connectBtn')}</button>
+      <button class="btn btn-primary" onclick={connectPeer} disabled={!peerInput.trim()}>{t('set.connectBtn')}</button>
     </div>
     {#if connectMsg}
       <div class="connect-msg" class:ok={connectStatus === "ok"} class:err={connectStatus === "error"}>
@@ -247,9 +251,9 @@
 
   <!-- Économie QUANTA V2 -->
   {#if economy}
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.econTitle')}</h2>
+      <h2 class="section-label">{t('set.econTitle')}</h2>
       <p class="set-sub">{t('set.econSub')}</p>
     </header>
     <div class="econ-grid">
@@ -288,14 +292,14 @@
   {/if}
 
   <!-- Mise à jour OTA -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.update')}</h2>
+      <h2 class="section-label">{t('set.update')}</h2>
       <p class="set-sub">{t('set.updateSub')}</p>
     </header>
     <div class="update-box">
       {#if updateStatus === "idle"}
-        <button class="btn btn-accent" onclick={checkForUpdate}>{t('set.updateCheck')}</button>
+        <button class="btn btn-primary" onclick={checkForUpdate}>{t('set.updateCheck')}</button>
       {:else if updateStatus === "checking"}
         <div class="update-info">⏳ {t('set.updateChecking')}</div>
       {:else if updateStatus === "downloading"}
@@ -306,27 +310,27 @@
         <div class="ep-label">{downloadProgress}%</div>
       {:else if updateStatus === "ready"}
         <div class="update-info update-success">✅ v{updateVersion} {t('set.updateInstalled')}</div>
-        <button class="btn btn-accent" onclick={doRelaunch}>{t('set.updateRelaunch')}</button>
+        <button class="btn btn-primary" onclick={doRelaunch}>{t('set.updateRelaunch')}</button>
       {:else if updateStatus === "latest"}
         <div class="update-info update-success">✅ {t('set.updateLatest')}</div>
       {:else if updateStatus === "error"}
         <div class="update-info update-err">❌ {updateError}</div>
-        <button class="btn btn-accent" onclick={checkForUpdate}>{t('set.updateRetry')}</button>
+        <button class="btn btn-primary" onclick={checkForUpdate}>{t('set.updateRetry')}</button>
       {/if}
     </div>
   </section>
 
   <!-- API Développeur -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.devApi')}</h2>
+      <h2 class="section-label">{t('set.devApi')}</h2>
       <p class="set-sub">{t('set.devApiSub')}</p>
     </header>
     {#if devApi}
       <div class="set-row">
         <span class="set-label">{t('set.devApiEnable')}</span>
         <button
-          class="seg-btn"
+          class="pill-toggle"
           class:active={devApi.enabled}
           onclick={toggleDevApi}
           disabled={devApiBusy}
@@ -340,11 +344,11 @@
         <div class="set-row">
           <span class="set-label">Token</span>
           <code class="dev-token">{devTokenVisible ? devApi.token : "•".repeat(64)}</code>
-          <button class="seg-btn" onclick={() => (devTokenVisible = !devTokenVisible)}>
+          <button class="btn btn-ghost btn-sm" onclick={() => (devTokenVisible = !devTokenVisible)}>
             {devTokenVisible ? t('set.devHide') : t('set.devShow')}
           </button>
-          <button class="seg-btn" onclick={copyDevToken}>{devTokenCopied ? "✓ " + t('set.copied') : t('set.copy')}</button>
-          <button class="seg-btn" onclick={rotateDevToken} disabled={devApiBusy}>{t('set.devRegen')}</button>
+          <button class="btn btn-ghost btn-sm" onclick={copyDevToken}>{devTokenCopied ? "✓ " + t('set.copied') : t('set.copy')}</button>
+          <button class="btn btn-ghost btn-sm btn-danger" onclick={rotateDevToken} disabled={devApiBusy}>{t('set.devRegen')}</button>
         </div>
         <div class="dev-hint">
           {t('set.devQuickTest')} <code>curl -H "Authorization: Bearer &lt;token&gt;" http://{devApi.endpoint}/api/status</code>
@@ -356,14 +360,14 @@
   </section>
 
   <!-- Charte d'intégrité — confiance -->
-  <section style="margin-bottom:16px;">
+  <section style="margin-bottom:12px;">
     <TrustCharter />
   </section>
 
   <!-- À propos -->
-  <section class="set-card">
+  <section class="card set-card">
     <header class="set-head">
-      <h2 class="set-title">{t('set.about')}</h2>
+      <h2 class="section-label">{t('set.about')}</h2>
     </header>
     <div class="about">
       <span class="about-line"><b>QUANTA</b> · {t('set.aboutTagline')}</span>
@@ -374,16 +378,14 @@
 </div>
 
 <style>
+  /* Écran calme : colonne étroite, cartes blanches globales (.card), zéro Aurora. */
   .settings-page { max-width: 720px; }
 
-  .set-card {
-    background: var(--color-bg-1); border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
-    padding: 18px 20px; margin-bottom: 12px;
-  }
+  /* Groupes de réglages — la carte vient du vocabulaire global ; ici, le rythme. */
+  .set-card { margin-bottom: 12px; }
   .set-head { margin-bottom: 14px; }
-  .set-title { font-size: 14px; font-weight: 700; }
-  .set-sub { font-size: 12px; color: var(--color-text-2); margin-top: 2px; }
+  .set-head h2 { margin-bottom: 3px; }
+  .set-sub { font-size: 12px; color: var(--color-text-2); }
 
   .set-row {
     display: flex; align-items: center; gap: 10px;
@@ -395,27 +397,43 @@
   .set-input { width: 110px; }
   .set-suffix { font-size: 11px; color: var(--color-text-3); font-family: var(--font-mono); }
 
+  /* Contrôle segmenté — puce active blanche surélevée, texte teal (état actif). */
   .seg {
     display: inline-flex;
-    background: var(--color-bg-2); border-radius: var(--radius);
+    background: var(--color-bg-2); border-radius: 10px;
     padding: 2px;
   }
   .seg-btn {
     padding: 5px 12px; font-size: 12px; font-weight: 500;
-    border: none; background: transparent; border-radius: 6px;
+    border: none; background: transparent; border-radius: 8px;
     color: var(--color-text-2); cursor: pointer; font-family: inherit;
-    transition: all 0.12s;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
   }
   .seg-btn:hover { color: var(--color-text-0); }
   .seg-btn.active {
-    background: var(--color-bg-1); color: var(--color-accent);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    background: var(--surface); color: var(--cyan); font-weight: 600;
+    box-shadow: var(--shadow-sm);
   }
+
+  /* Pastille on/off (API dev) — teal uniquement à l'état actif. */
+  .pill-toggle {
+    padding: 5px 14px; font-size: 12px; font-weight: 600;
+    font-family: inherit; cursor: pointer; border-radius: 8px;
+    border: 1px solid var(--color-border-hover);
+    background: var(--surface); color: var(--color-text-2);
+    box-shadow: var(--shadow-sm);
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  }
+  .pill-toggle:hover { color: var(--color-text-0); }
+  .pill-toggle.active {
+    background: var(--cyan-dim); border-color: var(--cyan-mid); color: var(--cyan);
+  }
+  .pill-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .ticket-box {
     display: flex; align-items: center; gap: 10px;
     padding: 12px 14px;
-    background: var(--color-bg-2); border-radius: var(--radius);
+    background: var(--color-bg-2); border-radius: 10px;
   }
   .ticket-val {
     flex: 1;
@@ -424,55 +442,46 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  .connect-box {
-    display: flex; align-items: center; gap: 10px;
-  }
-  .connect-input {
-    flex: 1;
-    font-family: var(--font-mono); font-size: 11px;
-    padding: 10px 12px;
-    background: var(--color-bg-2); border: 1px solid var(--color-border);
-    border-radius: var(--radius); color: var(--color-text-1);
-  }
-  .connect-input::placeholder { color: var(--color-text-3); }
-  .btn-accent {
-    padding: 8px 16px; font-size: 12px; font-weight: 600;
-    background: var(--color-accent); color: #fff;
-    border: none; border-radius: var(--radius); cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  .btn-accent:hover { opacity: 0.85; }
-  .btn-accent:disabled { opacity: 0.4; cursor: default; }
+  /* L'input vient de .input (global) ; ici seulement la métrique mono + le flex. */
+  .connect-box { display: flex; align-items: center; gap: 10px; }
+  .connect-input { flex: 1; font-family: var(--font-mono); font-size: 12px; }
+
   .connect-msg {
     margin-top: 8px; padding: 6px 10px;
-    border-radius: var(--radius); font-size: 11px;
+    border-radius: 8px; font-size: 11px;
     font-family: var(--font-mono);
   }
-  .connect-msg.ok { background: rgba(34,197,94,0.12); color: #22c55e; }
-  .connect-msg.err { background: rgba(239,68,68,0.12); color: #ef4444; }
-  .econ-grid {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
-    margin-bottom: 12px;
-  }
+  .connect-msg.ok { background: rgba(22,163,74,0.08); color: var(--color-green); }
+  .connect-msg.err { background: rgba(229,72,77,0.08); color: var(--color-red); }
+
+  .econ-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .econ-cell {
     padding: 10px 12px;
-    background: var(--color-bg-2); border-radius: var(--radius);
+    background: var(--color-bg-2); border-radius: 10px;
     display: flex; flex-direction: column; gap: 2px;
   }
   .ec-lab { font-size: 10px; color: var(--color-text-3); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
-  .ec-val { font-size: 18px; font-weight: 800; color: var(--color-text-0); font-family: var(--font-mono); }
+  .ec-val {
+    font-size: 18px; font-weight: 700; color: var(--color-text-0);
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums lining-nums; font-feature-settings: 'tnum', 'zero';
+  }
   .ec-meta { font-size: 10px; color: var(--color-text-2); }
 
   .ep-bar {
+    width: 100%;
     height: 6px; border-radius: 3px;
-    background: var(--color-bg-2); overflow: hidden;
+    background: var(--color-bg-3); overflow: hidden;
   }
   .ep-fill {
     height: 100%; background: var(--color-accent);
     border-radius: 3px;
-    transition: width 0.4s ease;
+    transition: width 0.4s var(--ease-out);
   }
-  .ep-label { font-size: 10px; color: var(--color-text-3); font-family: var(--font-mono); text-align: center; }
+  .ep-label {
+    font-size: 10px; color: var(--color-text-3); font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums lining-nums;
+  }
 
   .about { display: flex; flex-direction: column; gap: 4px; }
   .about-line { font-size: 12px; color: var(--color-text-1); line-height: 1.6; }
@@ -480,8 +489,8 @@
 
   .update-box { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
   .update-info { font-size: 13px; color: var(--color-text-1); }
-  .update-success { color: #22c55e; }
-  .update-err { color: #ef4444; font-size: 11px; font-family: var(--font-mono); }
+  .update-success { color: var(--color-green); }
+  .update-err { color: var(--color-red); font-size: 11px; font-family: var(--font-mono); }
 
   @media (max-width: 640px) {
     .econ-grid { grid-template-columns: 1fr 1fr; }
@@ -493,7 +502,7 @@
     background: var(--color-bg-2);
     border: 1px solid var(--color-border);
     padding: 6px 10px;
-    border-radius: 6px;
+    border-radius: 8px;
     color: var(--color-text-1);
     flex: 1;
     min-width: 0;
@@ -501,14 +510,15 @@
     white-space: nowrap;
   }
   .dev-token { letter-spacing: 1px; }
+  /* Encadré d'aide — chrome neutre (le teal reste réservé aux actions/états actifs). */
   .dev-hint {
     margin-top: 8px;
     font-size: 12px;
     color: var(--color-text-2);
     background: var(--color-bg-2);
-    border-left: 3px solid var(--color-accent);
+    border-left: 3px solid var(--color-border-hover);
     padding: 8px 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     overflow-x: auto;
   }
   .dev-hint code {

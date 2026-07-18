@@ -94,16 +94,15 @@
   .hist { display: flex; flex-direction: column; gap: 10px; }
   .hist-legend { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--color-text-2); }
   .lg-sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
-  .lg-agg { background: var(--color-accent); }
+  .lg-agg { background: var(--color-sealed-stone); }
   .lg-one { background: var(--color-bg-4); border: 1px solid var(--color-border-hover); }
   .hist-total { margin-left: auto; font-weight: 600; color: var(--color-text-1); }
 
   .hist-scroll {
     display: flex; align-items: flex-end; gap: 5px;
     overflow-x: auto; padding: 10px 4px 6px; min-height: 110px;
-    background:
-      linear-gradient(90deg, #f5f6f8 0%, #ffffff 18%, #ffffff 100%);
-    border: 1px solid var(--color-border); border-radius: 12px;
+    background: var(--color-bg-1);
+    border: 1px solid var(--color-border); border-radius: var(--radius);
   }
   .hist-scroll::-webkit-scrollbar { height: 6px; }
   .hist-scroll::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 3px; }
@@ -118,9 +117,9 @@
 
   .hist-col { flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: default; }
   .agg {
-    width: 30px; border-radius: 5px; background: var(--color-accent);
+    width: 30px; border-radius: 5px; background: var(--color-sealed-stone);
     display: flex; align-items: flex-start; justify-content: center;
-    box-shadow: 0 2px 6px rgba(11,165,160,0.25);
+    box-shadow: var(--shadow-sm);
   }
   .agg-n { color: #fff; font-size: 10px; font-weight: 700; padding-top: 3px; }
   .one {

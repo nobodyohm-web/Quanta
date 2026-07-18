@@ -338,6 +338,11 @@
   function fmtForge(n: number) {
     return n.toLocaleString('fr-FR', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
   }
+
+  // Presentation only — quality score color class (NET-10: >=80 good, 50-79 mid, <50 low).
+  function qualityCls(q: number) {
+    return q >= 80 ? 'q-good' : q >= 50 ? 'q-mid' : 'q-low';
+  }
 </script>
 
 <div class="page">
@@ -352,10 +357,10 @@
     </div>
   </div>
 
-  <!-- Globe réseau 3D — héros : le réseau P2P souverain à l'échelle mondiale -->
-  <div class="globe-hero">
+  <!-- Globe réseau 3D — topologie mondiale (carte blanche sobre, sans Aurora) -->
+  <div class="card globe-hero">
     <div class="globe-copy">
-      <div class="globe-eyebrow">{t('globe.eyebrow')}</div>
+      <div class="section-label">{t('globe.eyebrow')}</div>
       <div class="globe-h">{@html t('globe.h')}</div>
       <p class="globe-p">{t('globe.p')}</p>
       <div class="globe-stats">
@@ -369,9 +374,9 @@
   </div>
 
   <!-- La Forge — QUANTA forgés en direct (rareté + possession) -->
-  <div class="forge-hero" class:forge-flash={Date.now() - newBlockFlash < 1200}>
+  <div class="card forge-hero" class:forge-flash={Date.now() - newBlockFlash < 1200}>
     <div class="forge-main">
-      <div class="forge-label">{t('net.forgeLabel')} · {t('net.forgeMaxOf')} {fmtNum(maxSupply)} {t('net.forgeMaximum')}</div>
+      <div class="section-label">{t('net.forgeLabel')} · {t('net.forgeMaxOf')} {fmtNum(maxSupply)} {t('net.forgeMaximum')}</div>
       <div class="forge-count mono">{fmtForge(mintedDisplay)}</div>
       <div class="forge-sub">
         <span class="forge-live-dot"></span>
@@ -408,15 +413,15 @@
   </div>
 
   <!-- Blockchain en direct -->
-  <div class="chain-wrap">
+  <div class="card card-hero chain-wrap">
     <div class="chain-head">
-      <span class="chain-title">{t('net.chainTitle')}</span>
+      <span class="card-title chain-title">{t('net.chainTitle')}</span>
       <div style="display:flex;align-items:center;gap:12px;">
         <span class="chain-meta">{pendingTx} {t('net.chainPendingMeta')}</span>
-        <div class="chain-toggle">
-          <button class:active={chainView === 'history'} onclick={() => (chainView = 'history')}>{t('net.chainViewHistory')}</button>
-          <button class:active={chainView === '2d'} onclick={() => (chainView = '2d')}>{t('net.chainViewRecent')}</button>
-          <button class:active={chainView === '3d'} onclick={() => (chainView = '3d')}>3D</button>
+        <div class="filter-tabs">
+          <button class="filter-tab" class:active={chainView === 'history'} onclick={() => (chainView = 'history')}>{t('net.chainViewHistory')}</button>
+          <button class="filter-tab" class:active={chainView === '2d'} onclick={() => (chainView = '2d')}>{t('net.chainViewRecent')}</button>
+          <button class="filter-tab" class:active={chainView === '3d'} onclick={() => (chainView = '3d')}>3D</button>
         </div>
       </div>
     </div>
@@ -479,7 +484,7 @@
           onkeydown={(e) => e.key === 'Enter' && saveDisplayName()}
           style="flex:1;"
         />
-        <button class="btn btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
+        <button class="btn btn-ghost btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
           {displayNameSaving ? '⏳' : t('net.nicknameSave')}
         </button>
       </div>
@@ -492,7 +497,7 @@
   <!-- NET-9/10: Peer metrics table -->
   {#if peerMetrics.length > 0}
     <div class="card peers-panel" style="margin-bottom:12px;">
-      <h3 class="connect-title" style="margin-bottom:12px;">{t('net.peersHeading')} ({peerMetrics.length})</h3>
+      <h3 class="card-title" style="margin-bottom:12px;">{t('net.peersHeading')} ({peerMetrics.length})</h3>
       <div class="peers-table">
         <div class="peers-head">
           <span>{t('net.colNameKey')}</span>
@@ -504,15 +509,16 @@
         </div>
         {#each peerMetrics as p (p.public_key)}
           <div class="peers-row">
-            <span class="peer-name mono" title={p.public_key}>
-              {p.display_name || (p.public_key.slice(0, 16) + '…')}
+            <span class="peer-name" title={p.public_key}>
+              <span class="peer-dot" class:alive={p.last_seen_secs_ago < 300}></span>
+              <span class="mono peer-name-text">{p.display_name || (p.public_key.slice(0, 16) + '…')}</span>
             </span>
             <span>{p.country || '—'}</span>
             <span class="mono">{p.smoothed_rtt_ms != null ? p.smoothed_rtt_ms + ' ms' : '—'}</span>
             <span class="mono">{(p.loss_ratio * 100).toFixed(0)}%</span>
             <span>
               {#if p.quality_score != null}
-                <span class="quality-pill" style="--q:{p.quality_score};">{p.quality_score}</span>
+                <span class="quality-pill {qualityCls(p.quality_score)}">{p.quality_score}</span>
               {:else}
                 <span style="color:var(--color-text-3);">—</span>
               {/if}
@@ -526,7 +532,7 @@
 
   <!-- Connection panel -->
   <div class="card connect-panel" style="margin-bottom:12px;">
-    <h3 class="connect-title">{t('net.connectTitle')}</h3>
+    <h3 class="card-title">{t('net.connectTitle')}</h3>
 
     <!-- Step 1: Your ID -->
     <div class="connect-section">
@@ -537,7 +543,7 @@
       <div class="id-display">
         <code class="peer-id-code">{myPeerId || t('net.endpointLoading')}</code>
         {#if myPeerId}
-          <button class="btn btn-sm" onclick={copyId}>
+          <button class="btn btn-ghost btn-sm" onclick={copyId}>
             {copied ? t('net.copied') : t('net.copy')}
           </button>
         {/if}
@@ -568,22 +574,17 @@
 </div>
 
 <style>
-  /* ── Globe réseau (héros) ── */
+  /* ── Globe réseau — topologie mondiale (carte sobre, base .card globale) ── */
   .globe-hero {
     display: grid; grid-template-columns: 1fr 460px;
     align-items: center; gap: 12px;
-    background: #ffffff; border: 1px solid var(--color-border);
-    border-radius: 20px; padding: 8px 8px 8px 32px; margin-bottom: 14px;
-    overflow: hidden; box-shadow: var(--shadow);
+    padding: 8px 8px 8px 32px; margin-bottom: 12px;
+    overflow: hidden;
   }
   .globe-copy { padding: 22px 0; }
-  .globe-eyebrow {
-    font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
-    color: var(--color-accent); margin-bottom: 12px;
-  }
   .globe-h {
-    font-size: 30px; font-weight: 800; letter-spacing: -0.02em;
-    line-height: 1.08; color: var(--color-text-0); margin-bottom: 12px;
+    font-size: 24px; font-weight: 700; letter-spacing: -0.02em;
+    line-height: 1.15; color: var(--color-text-0); margin-bottom: 12px;
   }
   .globe-p {
     font-size: 14px; line-height: 1.6; color: var(--color-text-2);
@@ -591,36 +592,30 @@
   }
   .globe-stats { display: flex; gap: 28px; }
   .globe-stat { display: flex; flex-direction: column; gap: 2px; }
-  .gs-v { font-size: 26px; font-weight: 800; color: var(--color-text-0); letter-spacing: -0.02em; }
+  .gs-v { font-size: 24px; font-weight: 700; color: var(--color-text-0); letter-spacing: -0.02em; }
   .gs-k { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-3); }
   .globe-canvas {
     display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(circle at 50% 45%, var(--color-bg-1), var(--color-bg-2));
-    border-radius: 16px; align-self: stretch; min-height: 444px;
+    background: var(--color-bg-1);
+    border-radius: 12px; align-self: stretch; min-height: 444px;
   }
   @media (max-width: 860px) {
     .globe-hero { grid-template-columns: 1fr; padding: 24px; }
     .globe-canvas { min-height: 380px; }
   }
 
-  /* ── La Forge — rareté & possession ── */
+  /* ── La Forge — rareté & possession (carte sobre, base .card globale) ── */
   .forge-hero {
     display: flex; gap: 24px; flex-wrap: wrap;
-    background: #ffffff; border: 1px solid var(--color-border);
-    border-radius: 16px; padding: 24px 28px; margin-bottom: 14px;
-    box-shadow: var(--shadow); position: relative; overflow: hidden;
+    padding: 24px 28px; margin-bottom: 12px;
+    position: relative; overflow: hidden;
     transition: box-shadow .45s ease;
-  }
-  .forge-hero::before {
-    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-    background: var(--color-accent);
   }
   .forge-flash { box-shadow: 0 0 0 3px var(--color-accent-dim), var(--shadow-lg); }
   .forge-main { flex: 1; min-width: 240px; }
-  .forge-label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--color-text-3); }
   .forge-count {
     font-size: 46px; font-weight: 700; line-height: 1.05; letter-spacing: -.02em;
-    color: var(--color-text-0); margin: 8px 0 10px;
+    color: var(--color-text-0); margin: 0 0 10px;
     font-variant-numeric: tabular-nums; font-feature-settings: 'tnum';
   }
   .forge-sub { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-text-2); }
@@ -642,24 +637,15 @@
 
   .cap-wrap { margin-top: 16px; max-width: 420px; }
   .cap-bar { height: 8px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
-  .cap-fill { height: 100%; background: linear-gradient(90deg, #0BA5A0, #3D6FE0); border-radius: 4px; transition: width 1.2s ease; }
+  .cap-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 1.2s ease; }
   .cap-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--color-text-2); }
   .cap-meta b { color: var(--color-text-0); }
 
-  /* ── Blockchain en direct ── */
-  .chain-wrap {
-    background: #fff; border: 1px solid var(--color-border); border-radius: 16px;
-    padding: 18px 20px; margin-bottom: 14px; box-shadow: var(--shadow-sm);
-  }
+  /* ── Blockchain en direct — LE moment de l'écran (card-hero, rail Aurora) ── */
+  .chain-wrap { padding: 18px 20px 20px; margin-bottom: 12px; }
   .chain-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-  .chain-toggle { display: inline-flex; background: var(--color-bg-2); border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; }
-  .chain-toggle button {
-    border: 0; background: transparent; cursor: pointer; font-family: inherit;
-    font-size: 12px; font-weight: 600; color: var(--color-text-2); padding: 5px 12px;
-  }
-  .chain-toggle button.active { background: var(--color-accent); color: #fff; }
-  .chain-title { font-size: 14px; font-weight: 700; color: var(--color-text-0); }
-  .chain-meta { font-size: 12px; color: var(--color-text-2); }
+  .chain-title { margin-bottom: 0; }
+  .chain-meta { font-size: 12px; color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
   .chain-strip { display: flex; align-items: stretch; overflow-x: auto; padding-bottom: 6px; }
   .chain-strip::-webkit-scrollbar { height: 4px; }
   .chain-pending {
@@ -699,12 +685,6 @@
     50% { box-shadow: 0 0 0 4px rgba(22,163,74,0); }
   }
 
-  .connect-panel { padding: 24px; }
-  .connect-title {
-    font-size: 15px; font-weight: 600;
-    letter-spacing: -0.02em;
-    margin: 0 0 20px 0;
-  }
   .connect-section {
     margin-bottom: 20px;
     padding-bottom: 20px;
@@ -747,11 +727,6 @@
     line-height: 1.6;
     user-select: all;
   }
-  .btn-sm {
-    padding: 6px 14px;
-    font-size: 11px;
-    white-space: nowrap;
-  }
   .connect-msg {
     font-size: 12px;
     margin-top: 8px;
@@ -768,33 +743,31 @@
   }
 
   /* NET-16: chain-sync banner */
-  .sync-banner { padding: 16px 20px; }
   .sync-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
   .sync-label { font-size: 13px; color: var(--color-text-2); font-weight: 500; }
   .sync-counts { font-size: 12px; color: var(--color-text-1); }
   .sync-delta {
     display: inline-block;
     margin-left: 8px;
-    padding: 1px 6px;
-    border-radius: 3px;
+    padding: 1px 8px;
+    border-radius: 100px;
     background: rgba(22, 163, 74, 0.12);
     color: var(--color-green);
     font-size: 11px;
   }
   .sync-bar {
     height: 4px;
-    background: var(--color-border);
+    background: var(--color-bg-3);
     border-radius: 2px;
     overflow: hidden;
   }
   .sync-bar-fill {
     height: 100%;
-    background: #00DC82;
+    background: var(--cyan);
     transition: width 0.4s ease-out;
   }
 
   /* NET-15: display name editor */
-  .name-panel { padding: 16px 20px; }
   .name-row {
     display: flex;
     align-items: center;
@@ -812,51 +785,47 @@
     color: var(--color-text-2);
   }
 
-  /* NET-9/10: peer table */
-  .peers-panel { padding: 20px; }
-  .peers-table {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    background: var(--color-border);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    overflow: hidden;
-  }
+  /* NET-9/10: peer table — hairlines seules, chiffres tabulaires */
+  .peers-table { display: flex; flex-direction: column; }
   .peers-head, .peers-row {
     display: grid;
     grid-template-columns: 2fr 0.7fr 0.9fr 0.9fr 0.9fr 0.7fr;
     align-items: center;
     gap: 12px;
-    padding: 8px 12px;
-    background: var(--color-bg-1);
-    font-size: 12px;
+    padding: 9px 0;
+    font-size: 12.5px;
+    border-bottom: 1px solid var(--color-border);
   }
   .peers-head {
-    background: var(--color-bg-2);
     color: var(--color-text-3);
     font-size: 11px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
+    padding: 0 0 8px;
   }
-  .peers-row:hover { background: var(--color-bg-2); }
-  .peer-name {
+  .peers-row:last-child { border-bottom: none; }
+  .peers-row:hover { background: var(--color-bg-1); }
+  .peer-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .peer-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-text-3); flex-shrink: 0; }
+  .peer-dot.alive { background: var(--cyan); }
+  .peer-name-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--color-text-1);
+    font-size: 12px;
   }
+  /* NET-10 : >=80 bon (teal), 50-79 moyen (ambre), <50 faible (rouge) — pastille claire, jamais sombre */
   .quality-pill {
     display: inline-block;
     padding: 2px 8px;
-    border-radius: 10px;
+    border-radius: 100px;
     font-size: 11px;
     font-weight: 600;
-    /*
-     * NET-10: green for >=80, amber for 50-79, red below 50.
-     * Pure color cue, no glow (rule 11).
-     */
-    background: hsl(calc(var(--q) * 1.2), 70%, 18%);
-    color: hsl(calc(var(--q) * 1.2), 70%, 70%);
+    font-variant-numeric: tabular-nums lining-nums;
   }
+  .quality-pill.q-good { background: var(--cyan-dim); color: var(--cyan); }
+  .quality-pill.q-mid { background: rgba(232,129,12,0.12); color: var(--color-amber); }
+  .quality-pill.q-low { background: rgba(229,72,77,0.10); color: var(--color-red); }
 </style>

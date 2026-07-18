@@ -27,7 +27,7 @@
     score <= 1 ? "var(--color-red)" :
     score === 2 ? "var(--color-amber)" :
     score === 3 ? "var(--color-amber)" :
-    "var(--color-green)"
+    "var(--cyan)"
   );
 </script>
 
@@ -48,9 +48,9 @@
   .meter { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
   .bars { display: flex; gap: 3px; flex: 1; }
   .bar {
-    flex: 1; height: 3px; border-radius: 2px;
+    flex: 1; height: 4px; border-radius: 8px;
     background: var(--color-bg-3);
-    transition: background 0.2s;
+    transition: background var(--dur-fast) var(--ease-out);
   }
   .bar.on { background: var(--c, var(--color-accent)); }
   .lab { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
