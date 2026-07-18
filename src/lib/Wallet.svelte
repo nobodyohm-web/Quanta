@@ -14,7 +14,8 @@
   // ── Vérité on-chain du portefeuille (get_wallet_overview) ──────
   interface UnbondingEntry { amount: number; unlock_height: number; blocks_remaining: number }
   interface WalletOverview {
-    address: string;
+    address: string;          // canonical on-chain hex (ledger key, tx from/to)
+    address_bech32: string;   // public checksummed `qta1…` form (share/QR/send)
     height: number;
     spendable: number;
     staked: number;
@@ -51,6 +52,10 @@
   let lastHeight = 0;
 
   const myPk = $derived(ov?.address ?? "");
+  // Public, human-facing receive address (`qta1…`, checksummed). `myPk` (hex) stays
+  // the identity used for tx-direction checks and the identicon; `myAddress` is what
+  // we show, copy, QR and put in the payment URI. Falls back to hex until loaded.
+  const myAddress = $derived(ov?.address_bech32 || ov?.address || "");
   const peers = $derived(nodeStatus?.peer_count ?? 0);
   const online = $derived(nodeStatus?.is_online ?? false);
 
@@ -174,6 +179,14 @@
           return;
         }
         to = resolved; label = "@" + uname;
+      } else if (to.toLowerCase().startsWith("qta1")) {
+        // Public `qta1…` address — verify the Bech32m checksum now, so a mistyped
+        // character is caught at preview instead of after signing.
+        const okAddr = await invoke<boolean>("validate_address", { address: to });
+        if (!okAddr) {
+          feedback = { ok: false, msg: t("wallet.err.badRecipient") };
+          return;
+        }
       }
       const { net, burn } = splitTransfer(amt);
       const bal = ov?.spendable ?? 0;
@@ -239,7 +252,7 @@
   }
 
   // ── Réception : QR + lien de paiement (format standard type BIP-21) ──
-  const receiveTarget = $derived(myUsername ? "@" + myUsername : myPk);
+  const receiveTarget = $derived(myUsername ? "@" + myUsername : myAddress);
   const requestAmountNum = $derived.by(() => {
     const a = parseFloat(requestAmount);
     return isFinite(a) && a > 0 ? a : null;
@@ -254,7 +267,7 @@
   }
 
   function copyCode() { copyText(connectionCode, (v) => (codeCopied = v)); }
-  function copyPk() { copyText(myPk, (v) => (pkCopied = v)); }
+  function copyPk() { copyText(myAddress, (v) => (pkCopied = v)); }
   function copyUsername() { copyText("@" + (myUsername ?? ""), (v) => (unameCopied = v)); }
   function copyUri() { copyText(paymentUri, (v) => (uriCopied = v)); }
 
@@ -508,8 +521,8 @@
       <details style="margin-top:10px;">
         <summary style="font-size:12px;color:var(--color-text-2);cursor:pointer;">{t('wallet.recv.showPublicKey')}</summary>
         <div class="w-pk-box" style="margin-top:8px;">
-          <code class="w-pk mono">{myPk || t('loading')}</code>
-          <button class="copy-btn w-copy" onclick={copyPk} disabled={!myPk}>
+          <code class="w-pk mono">{myAddress || t('loading')}</code>
+          <button class="copy-btn w-copy" onclick={copyPk} disabled={!myAddress}>
             {pkCopied ? t('wallet.recv.copied') : t('wallet.recv.copy')}
           </button>
         </div>

@@ -444,6 +444,41 @@ async fn get_recovery_key(state: tauri::State<'_, Arc<AppState>>) -> Result<Stri
     Ok(formatted.join("-"))
 }
 
+/// The user's **public receive address** in canonical `qta1…` (Bech32m) form — the
+/// checksummed address to share, put in a QR, or hand to an exchange. Unlike the raw
+/// hex (`get_public_key`), a single mistyped character fails the checksum instead of
+/// silently pointing at another account. The hex form stays the on-chain identity.
+/// See [`crate::security::address`].
+#[tauri::command]
+async fn get_receive_address(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
+    state
+        .crypto
+        .lock()
+        .await
+        .pq_address_bech32()
+        .ok_or_else(|| "Identité ML-DSA absente".to_string())
+}
+
+/// Exchange-grade address validation: `true` iff `address` is a well-formed Quanta
+/// `qta1…` address (Bech32m checksum + length). This is the `validateaddress`
+/// primitive a wallet send-form and an exchange integration both need.
+#[tauri::command]
+fn validate_address(address: String) -> bool {
+    crate::security::address::is_valid(&address)
+}
+
+/// Normalize any accepted address form — `qta1…` Bech32m **or** canonical 64-hex —
+/// into both representations, or an opaque error. Lets a UI accept either and always
+/// display the checksummed public form.
+#[tauri::command]
+fn resolve_address(address: String) -> Result<serde_json::Value, String> {
+    let bytes = crate::security::address::parse(&address)?;
+    Ok(serde_json::json!({
+        "bech32": crate::security::address::encode(&bytes),
+        "hex": hex::encode(bytes),
+    }))
+}
+
 // ─── P2P (Willow Node) ─────────────────────────────────────────
 
 #[tauri::command]
@@ -944,10 +979,13 @@ async fn get_balance(state: tauri::State<'_, Arc<AppState>>, pk: String) -> Resu
 
 #[tauri::command]
 async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amount: f64) -> Result<serde_json::Value, String> {
-    // V7: Input validation
-    if to.len() != 64 || hex::decode(&to).is_err() {
-        return Err("Adresse destinataire invalide".into());
-    }
+    // V7: Input validation. Accept EITHER the public `qta1…` (Bech32m, checksummed)
+    // form OR the canonical 64-hex form, and normalize to the on-chain hex the
+    // ledger keys on. The bech32 path is checksum-validated, so a mistyped receive
+    // address is rejected here instead of sending to a valid-looking wrong account.
+    let to = crate::security::address::parse(&to)
+        .map(hex::encode)
+        .map_err(|_| "Adresse destinataire invalide".to_string())?;
     if amount <= 0.0 || amount > 1_000_000.0 {
         return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
     }
@@ -1077,7 +1115,15 @@ async fn ledger_unstake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> 
 /// All amounts converted µQTA → QUANTA for display.
 #[tauri::command]
 async fn get_wallet_overview(state: tauri::State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
-    let addr = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
+    // `address` = canonical on-chain hex (keys the ledger, tx `from`/`to`).
+    // `address_bech32` = the public checksummed `qta1…` form to show/share/QR.
+    let (addr, addr_bech32) = {
+        let c = state.crypto.lock().await;
+        (
+            c.pq_address_hex().unwrap_or_default(),
+            c.pq_address_bech32().unwrap_or_default(),
+        )
+    };
     let earned_uqta = {
         let rep = state.node.reputation.read().await;
         rep.get_user(&addr).map(|u| u.atn_earned).unwrap_or(0)
@@ -1114,6 +1160,7 @@ async fn get_wallet_overview(state: tauri::State<'_, Arc<AppState>>) -> Result<s
     }
     Ok(serde_json::json!({
         "address": addr,
+        "address_bech32": addr_bech32,
         "height": height,
         "spendable": spendable as f64 / micro,
         "staked": staked as f64 / micro,
@@ -1285,6 +1332,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
+            get_receive_address, validate_address, resolve_address,
             biometric_status, enable_biometric_unlock, disable_biometric_unlock, unlock_biometric,
             get_node_status, get_node_mode,
             get_peer_metrics, get_network_topology,
