@@ -206,7 +206,7 @@
 {#if loading}
   <div class="load-screen">
     <div class="load-inner">
-      <div class="load-mark"><QuantaMark size={46} tone="aurora" /></div>
+      <div class="load-mark"><QuantaMark size={46} tone="teal" /></div>
       <span class="load-logo">QUANTA</span>
       <span class="load-sub">{t('loading')}</span>
     </div>
@@ -268,7 +268,7 @@
   <div class="setup-screen">
     <div class="setup-box card">
       <div class="setup-brand">
-        <QuantaMark size={32} tone="aurora" />
+        <QuantaMark size={32} tone="teal" />
         <div class="setup-brand-txt">
           <div class="setup-wordmark">QUANTA</div>
           <div class="setup-tag">{t('auth.unlock.tag')}</div>
@@ -295,7 +295,10 @@
         </div>
         {#if err}<div class="setup-err">{err}</div>{/if}
         <button class="btn btn-primary sb" onclick={unlock}>{t('auth.unlockBtn')}</button>
-        <button class="btn btn-ghost sb" onclick={() => { step = "welcome"; pass = ""; err = ""; }}>{t('auth.newIdentity')}</button>
+        <button class="new-id-cta" onclick={() => { step = "welcome"; pass = ""; err = ""; }}>
+          <span>{t('auth.newIdentity')}</span>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
       </div>
       <div class="lang-row"><LanguageSelect /></div>
     </div>
@@ -433,6 +436,17 @@
   .bio-sep::before, .bio-sep::after {
     content: ""; flex: 1; height: 1px; background: var(--color-border);
   }
+
+  /* « Créer une nouvelle identité » — chemin clair vers l'inscription refaite */
+  .new-id-cta {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 12px; margin-top: 2px;
+    background: var(--cyan-dim); border: 1px solid var(--cyan-mid);
+    border-radius: 11px; color: var(--color-accent-hover);
+    font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  }
+  .new-id-cta:hover { background: rgba(11,165,160,0.16); border-color: var(--color-accent); }
 
   /* Layout handled by app.css .app-shell and .main-content */
 
