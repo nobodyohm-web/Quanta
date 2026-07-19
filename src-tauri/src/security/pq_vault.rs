@@ -180,6 +180,26 @@ impl PQVault {
         Ok((pq_pk_hex, enc.ciphertext, enc.nonce))
     }
 
+    /// RECOVER-1 — restore the primary PQ identity from a **known 32-byte seed** (the
+    /// one a BIP39 recovery phrase carries), then re-encrypt it at rest under the new
+    /// password. Mirror of [`Self::create_pq_identity`] but **seeded**: ML-DSA keygen
+    /// is deterministic, so this reconstructs the SAME public key / fund address as
+    /// the original wallet. The in-clear seed copy is wiped after encryption.
+    pub fn restore_pq_identity(
+        engine: &mut CryptoEngine,
+        seed: &[u8; 32],
+        password: &str,
+    ) -> Result<CreatedPqIdentity, String> {
+        let pq_pk_hex = engine.import_pq_identity(seed)?;
+        let mut seed_copy = engine.get_pq_seed_bytes()?;
+        let salt = CryptoEngine::blake3_hash(
+            format!("{PQ_VAULT_SALT_DOMAIN}:{pq_pk_hex}").as_bytes(),
+        );
+        let enc_key = Zeroizing::new(cipher::derive_key(password, &salt[..16])?);
+        let enc = cipher::encrypt_and_wipe(&mut seed_copy, &enc_key)?;
+        Ok((pq_pk_hex, enc.ciphertext, enc.nonce))
+    }
+
     /// PQ-MIG-1 — déverrouille l'identité primaire post-quantique : déchiffre la
     /// graine racine ML-DSA de 32 octets et rétablit la paire ML-DSA-65 dans le
     /// moteur. Round-trip vers la clé publique **identique** (keygen

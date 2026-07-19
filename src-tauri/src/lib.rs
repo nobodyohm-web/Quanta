@@ -43,6 +43,7 @@ use storage::db::Database;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::Manager;
+use zeroize::Zeroize;
 
 /// Local brute-force throttle on vault unlocks (password AND Touch ID paths).
 /// Exponential backoff: after `n ≥ 3` consecutive failures the next attempt is
@@ -262,6 +263,76 @@ pub(crate) async fn unlock_wallet(
                 .await?;
         }
     }
+    Ok(id)
+}
+
+/// RECOVER-1 — the wallet's **recovery phrase**: a 24-word BIP39 mnemonic of the
+/// ML-DSA **fund** seed. Whoever holds this phrase controls the funds — it is the
+/// true backup. (The legacy `get_recovery_key` exports the Ed25519 transport seed,
+/// which does NOT recover funds; the phrase does.) Shown once at onboarding and
+/// forced to be backed up + confirmed. Requires an unlocked identity.
+#[tauri::command]
+async fn get_recovery_phrase(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
+    let engine = state.crypto.lock().await;
+    // Self-wiping 32-byte ML-DSA root seed (the fund-controlling secret).
+    let seed = engine.get_pq_seed_bytes()?;
+    let mnemonic = bip39::Mnemonic::from_entropy(&seed[..])
+        .map_err(|_| "Impossible de générer la phrase de récupération".to_string())?;
+    Ok(mnemonic.to_string())
+}
+
+/// RECOVER-1 — restore a wallet from its 24-word recovery phrase, under a NEW
+/// password + display name (e.g. a new device, or a forgotten password).
+#[tauri::command]
+async fn restore_from_phrase(
+    state: tauri::State<'_, Arc<AppState>>,
+    mnemonic: String,
+    display_name: String,
+    password: String,
+) -> Result<security::pq_vault::QuantaIdentity, String> {
+    restore_wallet(state.inner(), &mnemonic, &display_name, &password).await
+}
+
+/// RECOVER-1 — reconstruct the ML-DSA **fund authority** from a BIP39 phrase's seed
+/// (deterministic keygen → the SAME address as the original wallet) and persist it
+/// encrypted under `password`. The Ed25519 transport key is freshly generated (it is
+/// regenerable and never the account authority). Headless-callable.
+pub(crate) async fn restore_wallet(
+    state: &Arc<AppState>,
+    mnemonic: &str,
+    display_name: &str,
+    password: &str,
+) -> Result<security::pq_vault::QuantaIdentity, String> {
+    let display_name = display_name.trim().to_string();
+    if display_name.is_empty() {
+        return Err("Le nom d'affichage est requis".into());
+    }
+    if password.len() < 8 {
+        return Err("Mot de passe trop court (min. 8)".into());
+    }
+    // Decode the phrase → the 32-byte fund seed (validates the checksum).
+    let parsed = bip39::Mnemonic::parse_normalized(mnemonic.trim())
+        .map_err(|_| "Phrase de récupération invalide".to_string())?;
+    let mut entropy = parsed.to_entropy();
+    if entropy.len() != 32 {
+        entropy.zeroize();
+        return Err("Phrase de récupération invalide (doit faire 24 mots)".into());
+    }
+    let mut seed: [u8; 32] = entropy[..32].try_into().map_err(|_| "Phrase invalide".to_string())?;
+    entropy.zeroize();
+
+    let mut engine = state.crypto.lock().await;
+    // Fresh Ed25519 transport + the QuantaIdentity bundle (transport is regenerable).
+    let (id, pk_bytes, enc_sk, nonce) = PQVault::create_identity(&mut engine, &display_name, password)?;
+    // Reconstruct the ML-DSA fund authority from the phrase's seed, encrypted anew.
+    let (pq_pk, pq_enc, pq_nonce) = PQVault::restore_pq_identity(&mut engine, &seed, password)?;
+    seed.zeroize();
+    let db = state.db.lock().await;
+    let dbref = db.as_ref().ok_or("DB not ready")?;
+    dbref.store_keypair(&pk_bytes, &enc_sk, &nonce, &display_name).await?;
+    dbref
+        .save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce))
+        .await?;
     Ok(id)
 }
 
@@ -1345,6 +1416,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
+            get_recovery_phrase, restore_from_phrase,
             get_receive_address, validate_address, resolve_address,
             biometric_status, enable_biometric_unlock, disable_biometric_unlock, unlock_biometric,
             get_node_status, get_node_mode,
