@@ -142,6 +142,9 @@ security-framework = "3"
 # App Nap opt-out (node_runtime::prevent_app_nap) — same version Tauri already
 # carries transitively, so this adds no new build unit family.
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
+# NSWindow.occlusionState (guardian.rs) — the ONLY truthful "is macOS throttling
+# this window" signal (minimized ∪ hidden ∪ fully occluded by another window).
+objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
 
 [dev-dependencies]
 proptest = "1"     # Property-based testing for invariants (Shapley, ledger overflow)

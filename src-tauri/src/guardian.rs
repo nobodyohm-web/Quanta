@@ -13,6 +13,33 @@ use crate::commands::diagnostics::{
     epoch_secs, ui_diag_write, GUARDIAN_RELOADED, LAST_UI_BEAT,
 };
 
+/// True when the main window is NOT visible on screen (fully occluded by other
+/// windows, hidden, or on another Space) — the exact condition under which
+/// macOS suspends webview timers. MUST be called on the main thread.
+#[cfg(target_os = "macos")]
+fn window_occluded(app: &tauri::AppHandle) -> bool {
+    use objc2_app_kit::{NSWindow, NSWindowOcclusionState};
+    use tauri::Manager;
+    let Some(w) = app.get_webview_window("main") else {
+        return false;
+    };
+    let Ok(ptr) = w.ns_window() else {
+        return false;
+    };
+    if ptr.is_null() {
+        return false;
+    }
+    // SAFETY: main-thread only (run_on_main_thread caller); `ptr` is the live
+    // NSWindow owned by Tauri for the window's whole lifetime.
+    let ns: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+    !ns.occlusionState().contains(NSWindowOcclusionState::Visible)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_occluded(_app: &tauri::AppHandle) -> bool {
+    false
+}
+
 /// Spawn the background freeze guardian on the Tauri async runtime. Called from
 /// `setup()` with `app.handle().clone()`.
 pub(crate) fn spawn_freeze_guardian(guard: tauri::AppHandle) {
@@ -41,16 +68,33 @@ pub(crate) fn spawn_freeze_guardian(guard: tauri::AppHandle) {
             if last != 0 {
                 let silent = epoch_secs().saturating_sub(last);
                 if silent > 25 {
-                    // Fenêtre repliée = suspension macOS NORMALE, pas un
-                    // webview mort — ne jamais recharger dans ce cas
-                    // (9 rechargements fantômes constatés le 19/07 au soir).
+                    // Fenêtre repliée OU OCCLUSE (cachée derrière une autre) =
+                    // suspension macOS NORMALE des timers webview, pas un webview
+                    // mort — ne jamais recharger dans ce cas. `is_minimized` ne
+                    // couvrait pas l'occlusion : 3 rechargements fantômes en
+                    // boucle constatés le 20/07 (01:03-01:05), fenêtre simplement
+                    // derrière une autre. `NSWindow.occlusionState` est le signal
+                    // exact de ce que macOS throttle réellement.
                     let minimized = guard
                         .get_webview_window("main")
                         .and_then(|w| w.is_minimized().ok())
                         .unwrap_or(false);
+                    let occluded = {
+                        let (otx, orx) = tokio::sync::oneshot::channel::<bool>();
+                        let g2 = guard.clone();
+                        let _ = guard.run_on_main_thread(move || {
+                            let _ = otx.send(window_occluded(&g2));
+                        });
+                        // Main thread gelé → on ne peut pas savoir → prudence :
+                        // traiter comme occlus (pas de reload sur un inconnu).
+                        match tokio::time::timeout(std::time::Duration::from_secs(2), orx).await {
+                            Ok(Ok(v)) => v,
+                            _ => true,
+                        }
+                    };
                     LAST_UI_BEAT.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
-                    if minimized {
-                        log::debug!("◈ [Gardien] fenêtre repliée — silence normal, pas de rechargement");
+                    if minimized || occluded {
+                        log::debug!("◈ [Gardien] fenêtre repliée/occluse — silence normal, pas de rechargement");
                     } else {
                         ui_diag_write(&format!(
                             "webview muet depuis {} s — rechargement automatique",
