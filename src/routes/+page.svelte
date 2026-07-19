@@ -12,7 +12,6 @@
   import Toasts from "$lib/Toasts.svelte";
   import Welcome from "$lib/Welcome.svelte";
   import LanguageSelect from "$lib/LanguageSelect.svelte";
-  import QuantumField from "$lib/QuantumField.svelte";
   import { t } from "$lib/i18n.svelte";
   import StrengthMeter from "$lib/StrengthMeter.svelte";
   import HelpModal from "$lib/HelpModal.svelte";
@@ -227,8 +226,7 @@
 
 {:else if !ready && step === "username"}
   <div class="setup-screen">
-    <QuantumField density={1.1} />
-    <div class="setup-box card card-hero">
+    <div class="setup-box card">
       <h1 class="setup-title">{t('su.uname.title')}</h1>
       <p class="setup-sub">{@html t('su.uname.intro')}</p>
       <div class="setup-form">
@@ -268,8 +266,7 @@
        "welcome"); this screen only ever unlocks an existing vault. "Nouvelle
        identité" routes back to the secure onboarding. -->
   <div class="setup-screen">
-    <QuantumField density={1.1} />
-    <div class="setup-box card card-hero">
+    <div class="setup-box card">
       <div class="setup-brand">
         <QuantaMark size={32} tone="aurora" />
         <div class="setup-brand-txt">
@@ -350,8 +347,8 @@
   }
   .load-sub { font-size: 13px; color: var(--color-text-2); }
 
-  /* Le rituel d'entrée — LE moment de l'écran : carte-hero blanche (rail
-     Aurora via .card-hero global) qui flotte sur le canevas chaud. */
+  /* L'entrée — niveau banque : carte blanche nette sur fond clair, zéro
+     particule, zéro rail aurora. La typo et le vide portent le moment. */
   .setup-screen {
     height: 100vh; position: relative;
     display: flex; align-items: center; justify-content: center;
@@ -360,8 +357,8 @@
   }
   .setup-box {
     position: relative; z-index: 1;
-    width: 100%; max-width: 420px;
-    padding: 30px 32px;
+    width: 100%; max-width: 410px;
+    padding: 36px 36px 30px;
     animation: welcomeRise 0.4s var(--ease-out);
   }
   @keyframes welcomeRise {
@@ -371,7 +368,7 @@
   @media (prefers-reduced-motion: reduce) { .setup-box { animation: none; } }
   .setup-brand {
     display: flex; align-items: center; gap: 12px;
-    margin-bottom: 24px;
+    margin-bottom: 30px;
   }
   .setup-brand-txt { min-width: 0; }
   .setup-wordmark {
@@ -381,14 +378,14 @@
   .setup-tag { font-size: 12px; color: var(--color-text-2); margin-top: 1px; }
   .lang-row { display: flex; justify-content: center; margin-top: 18px; }
   .setup-title {
-    font-size: 24px; font-weight: 700;
-    letter-spacing: -0.025em;
-    margin-bottom: 8px;
+    font-size: 29px; font-weight: 700;
+    letter-spacing: -0.03em; line-height: 1.1;
+    margin-bottom: 10px; color: var(--color-text-0);
   }
   .setup-sub {
-    font-size: 14px; color: var(--color-text-1);
-    line-height: 1.6;
-    margin-bottom: 26px;
+    font-size: 15px; color: var(--color-text-2);
+    line-height: 1.55;
+    margin-bottom: 28px;
   }
   .setup-form { display: flex; flex-direction: column; gap: 16px; }
   .fg { display: flex; flex-direction: column; gap: 6px; }

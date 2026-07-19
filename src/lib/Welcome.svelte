@@ -3,7 +3,6 @@
   import StrengthMeter from "./StrengthMeter.svelte";
   import QuantaMark from "./brand/QuantaMark.svelte";
   import LanguageSelect from "./LanguageSelect.svelte";
-  import QuantumField from "./QuantumField.svelte";
   import { t } from "./i18n.svelte";
 
   let {
@@ -183,12 +182,11 @@
 </script>
 
 <div class="welcome">
-  <QuantumField density={1.1} />
   <div class="wrap">
     <!-- Brand moment -->
-    <div class="card card-hero hero">
+    <div class="hero">
       <div class="brand">
-        <QuantaMark size={40} tone="aurora" />
+        <QuantaMark size={34} tone="aurora" />
         <span class="wordmark">QUANTA</span>
       </div>
       <h1 class="headline">{@html t("welcome.headline")}</h1>
@@ -359,13 +357,15 @@
 </div>
 
 <style>
+  /* Inscription — niveau banque : blanc net, typo héros, un seul accent teal.
+     Zéro fond de particules, zéro rail aurora (retirés). */
   .welcome {
-    height: 100vh; position: relative;
-    display: flex; background: var(--canvas); padding: 24px; overflow-y: auto;
+    min-height: 100vh; display: flex; background: var(--canvas);
+    padding: 44px 24px; overflow-y: auto;
   }
   .wrap {
-    position: relative; z-index: 1; width: 100%; max-width: 440px; margin: auto;
-    display: flex; flex-direction: column; gap: 12px;
+    width: 100%; max-width: 416px; margin: auto;
+    display: flex; flex-direction: column; gap: 16px;
     animation: welcomeRise var(--dur-med) var(--ease-out);
   }
   @keyframes welcomeRise {
@@ -374,33 +374,70 @@
   }
   @media (prefers-reduced-motion: reduce) { .wrap { animation: none; } }
 
+  /* Le moment de marque — sur le fond clair, pas dans une carte */
+  .hero { padding: 2px 2px 2px; }
+  .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+  .wordmark {
+    font-size: 15px; font-weight: 800; letter-spacing: 0.12em; color: var(--color-text-0);
+  }
+  .headline {
+    font-size: 30px; font-weight: 700; letter-spacing: -0.032em; line-height: 1.08;
+    color: var(--color-text-0); margin: 0 0 9px; text-wrap: balance;
+  }
+  .sub { font-size: 15px; color: var(--color-text-2); line-height: 1.5; margin: 0; }
+
+  /* Panneaux — cartes blanches (.card global) ; agencement bank-grade */
+  .panel { padding: 24px; }
+  .form { display: flex; flex-direction: column; gap: 14px; }
+  .fg { display: flex; flex-direction: column; gap: 6px; }
+  .input-lg { padding: 13px 15px; font-size: 15px; border-radius: 11px; }
+  .cta { width: 100%; padding: 13px; font-size: 15px; margin-top: 4px; }
+  .links { display: flex; flex-direction: column; align-items: center; gap: 9px; margin-top: 8px; }
+  .ghost-link {
+    background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit;
+    font-size: 13px; color: var(--color-text-2); transition: color var(--dur-fast) ease;
+  }
+  .ghost-link:hover { color: var(--color-accent-hover); }
+  .err {
+    font-size: 13px; color: var(--color-red);
+    background: rgba(229,72,77,0.06); border: 1px solid rgba(229,72,77,0.16);
+    padding: 10px 13px; border-radius: 10px;
+  }
+  .security-note {
+    font-size: 12px; color: var(--color-text-3); text-align: center;
+    line-height: 1.5; margin: 4px 8px 0;
+  }
+  .lang-row { display: flex; justify-content: center; margin-top: 2px; }
+
+  /* Validité du pseudo */
   .hint-row { min-height: 18px; margin-top: 4px; }
   .hint { font-size: 12px; color: var(--color-text-2); }
-  .hint.good { color: var(--color-green, #16a34a); font-weight: 600; }
-  .hint.bad { color: #b91c1c; }
+  .hint.good { color: var(--color-green); font-weight: 600; }
+  .hint.bad { color: var(--color-red); }
 
-  .step-title { font-size: 18px; font-weight: 700; margin: 0 0 6px; letter-spacing: -.01em; }
-  .step-intro { font-size: 13px; color: var(--color-text-2); margin: 0 0 14px; line-height: 1.5; }
+  /* Étapes backup / verify / restore */
+  .step-title { font-size: 20px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.02em; color: var(--color-text-0); }
+  .step-intro { font-size: 13.5px; color: var(--color-text-2); margin: 0 0 16px; line-height: 1.5; }
 
   .phrase {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
-    background: var(--color-surface-1, #fbfbfd); border: 1px solid var(--color-line, #e3e3e6);
-    border-radius: 12px; padding: 12px; margin-bottom: 12px;
+    background: var(--color-bg-1); border: 1px solid var(--color-border);
+    border-radius: 12px; padding: 14px; margin-bottom: 12px;
   }
   .word {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
-    display: flex; align-items: baseline; gap: 6px; word-break: break-all;
+    font-family: var(--font-mono); font-size: 13px;
+    display: flex; align-items: baseline; gap: 6px; word-break: break-all; color: var(--color-text-0);
   }
-  .word b { color: var(--color-text-3, #a1a1a6); font-weight: 600; font-size: 11px; min-width: 16px; }
+  .word b { color: var(--color-text-3); font-weight: 600; font-size: 11px; min-width: 16px; }
   .copybtn { width: 100%; margin-bottom: 12px; }
   .phrase-input {
-    width: 100%; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    width: 100%; resize: vertical; font-family: var(--font-mono);
     font-size: 14px; line-height: 1.6; margin-bottom: 12px;
   }
   .warn {
-    font-size: 12px; color: #b45309; background: rgba(245, 158, 11, .08);
-    border-radius: 8px; padding: 8px 10px; margin: 0 0 12px; line-height: 1.5;
+    font-size: 12px; color: var(--color-text-1); background: var(--color-bg-2);
+    border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; line-height: 1.5;
   }
-  .ack { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 14px; cursor: pointer; }
-  .ack input { width: 16px; height: 16px; accent-color: var(--color-accent, #0BA5A0); }
+  .ack { display: flex; align-items: center; gap: 9px; font-size: 13px; margin-bottom: 16px; cursor: pointer; color: var(--color-text-1); }
+  .ack input { width: 16px; height: 16px; accent-color: var(--color-accent); }
 </style>
