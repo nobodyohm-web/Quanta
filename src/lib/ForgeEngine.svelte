@@ -30,7 +30,7 @@
       note: "Proof-of-Stake: no hash race, no mining farm. These are real BLAKE3 hashes — the primitive that hashes and links every block — computed live to prove integrity, not to win a power contest.",
       boot: "engine online — real crypto, real events",
       eReward: "reward minted  +{a} QUANTA", eSealMine: "BLOCK SEALED #{n} · {t} tx — you were the leader",
-      eSeal: "block #{n} sealed · {t} tx · {h}", eTx: "tx applied · {k}", eVote: "finality vote · epoch {n}",
+      eSeal: "block #{n} sealed · {t} tx", eVerify: "block #{n} verified — PoS proposer ✓ · coverage ✓ · Merkle ✓", eState: "chain #{n} · epoch {e} · {v} validators", eTx: "tx applied · {k}", eVote: "finality vote · epoch {n}",
       eFinal: "block #{n} finalized · irreversible", ePeer: "peer connected · {n} peers" },
     fr: { title: "Moteur de consensus", live: "en direct", slot: "SLOT", chain: "BLAKE3 · chaînage d'intégrité",
       hps: "hashs/s", computed: "calculés en direct sur ton appareil", verified: "chaînés sur le bloc",
@@ -41,7 +41,7 @@
       note: "Proof-of-Stake : pas de course au hash, pas de ferme de minage. Ce sont de vrais BLAKE3 — la primitive qui hache et lie chaque bloc — calculés en direct pour prouver l'intégrité, pas pour gagner une course à la puissance.",
       boot: "moteur en ligne — crypto réelle, évènements réels",
       eReward: "récompense minée  +{a} QUANTA", eSealMine: "BLOC SCELLÉ #{n} · {t} tx — tu étais le leader",
-      eSeal: "bloc #{n} scellé · {t} tx · {h}", eTx: "tx appliquée · {k}", eVote: "vote de finalité · époque {n}",
+      eSeal: "bloc #{n} scellé · {t} tx", eVerify: "bloc #{n} vérifié — proposeur PoS ✓ · couverture ✓ · Merkle ✓", eState: "chaîne #{n} · époque {e} · {v} validateurs", eTx: "tx appliquée · {k}", eVote: "vote de finalité · époque {n}",
       eFinal: "bloc #{n} finalisé · irréversible", ePeer: "pair connecté · {n} pairs" },
     es: { title: "Motor de consenso", live: "en vivo", slot: "SLOT", chain: "BLAKE3 · encadenado de integridad",
       hps: "hashes/s", computed: "calculados en vivo en tu dispositivo", verified: "encadenados en el bloque",
@@ -52,7 +52,7 @@
       note: "Proof-of-Stake: sin carrera de hashes, sin granja. Son BLAKE3 reales — la primitiva que hashea y enlaza cada bloque — calculados en vivo para probar integridad, no para ganar una carrera de potencia.",
       boot: "motor en línea — cripto real, eventos reales",
       eReward: "recompensa minada  +{a} QUANTA", eSealMine: "BLOQUE SELLADO #{n} · {t} tx — fuiste el líder",
-      eSeal: "bloque #{n} sellado · {t} tx · {h}", eTx: "tx aplicada · {k}", eVote: "voto de finalidad · época {n}",
+      eSeal: "bloque #{n} sellado · {t} tx", eVerify: "bloque #{n} verificado — proponente PoS ✓ · cobertura ✓ · Merkle ✓", eState: "cadena #{n} · época {e} · {v} validadores", eTx: "tx aplicada · {k}", eVote: "voto de finalidad · época {n}",
       eFinal: "bloque #{n} finalizado · irreversible", ePeer: "par conectado · {n} pares" },
     ru: { title: "Движок консенсуса", live: "в эфире", slot: "СЛОТ", chain: "BLAKE3 · сцепление целостности",
       hps: "хэшей/с", computed: "вычислено вживую на вашем устройстве", verified: "сцеплены с блоком",
@@ -63,7 +63,7 @@
       note: "Proof-of-Stake: без гонки хэшей и ферм. Это настоящие BLAKE3 — примитив, что хэширует и связывает каждый блок — вычисляемые вживую для доказательства целостности, а не ради гонки мощности.",
       boot: "движок в сети — реальная крипта, реальные события",
       eReward: "награда добыта  +{a} QUANTA", eSealMine: "БЛОК ЗАПЕЧАТАН #{n} · {t} tx — вы лидер",
-      eSeal: "блок #{n} запечатан · {t} tx · {h}", eTx: "tx применена · {k}", eVote: "голос финальности · эпоха {n}",
+      eSeal: "блок #{n} запечатан · {t} tx", eVerify: "блок #{n} проверен — PoS-предлагатель ✓ · покрытие ✓ · Merkle ✓", eState: "цепь #{n} · эпоха {e} · {v} валидаторов", eTx: "tx применена · {k}", eVote: "голос финальности · эпоха {n}",
       eFinal: "блок #{n} финализирован · необратимо", ePeer: "пир подключён · {n} пиров" },
     zh: { title: "共识引擎", live: "实时", slot: "时隙", chain: "BLAKE3 · 完整性链接",
       hps: "哈希/秒", computed: "在你的设备上实时计算", verified: "链接于区块",
@@ -74,7 +74,7 @@
       note: "权益证明：没有哈希竞赛，没有矿场。这些是真实的 BLAKE3——哈希并链接每个区块的原语——实时计算以证明完整性，而非争夺算力。",
       boot: "引擎在线——真实密码学，真实事件",
       eReward: "已获挖矿奖励  +{a} QUANTA", eSealMine: "区块已封存 #{n} · {t} 笔 — 你是出块者",
-      eSeal: "区块 #{n} 已封存 · {t} 笔 · {h}", eTx: "交易已应用 · {k}", eVote: "最终性投票 · 纪元 {n}",
+      eSeal: "区块 #{n} 已封存 · {t} 笔", eVerify: "区块 #{n} 已验证 — PoS 出块者 ✓ · 覆盖 ✓ · Merkle ✓", eState: "链 #{n} · 纪元 {e} · {v} 个验证者", eTx: "交易已应用 · {k}", eVote: "最终性投票 · 纪元 {n}",
       eFinal: "区块 #{n} 已最终确定 · 不可逆", ePeer: "节点已连接 · {n} 个节点" },
     ja: { title: "コンセンサスエンジン", live: "ライブ", slot: "スロット", chain: "BLAKE3 · 整合性チェーン",
       hps: "ハッシュ/秒", computed: "あなたの端末でライブ計算", verified: "ブロックに連鎖",
@@ -85,7 +85,7 @@
       note: "プルーフ・オブ・ステーク：ハッシュ競争もマイニングファームもありません。これは本物の BLAKE3 — 各ブロックをハッシュし連結する原語 — を整合性証明のためにライブ計算しています。力の競争のためではありません。",
       boot: "エンジン起動 — 本物の暗号、本物のイベント",
       eReward: "報酬を採掘  +{a} QUANTA", eSealMine: "ブロック封印 #{n} · {t} tx — あなたがリーダー",
-      eSeal: "ブロック #{n} 封印 · {t} tx · {h}", eTx: "tx 適用 · {k}", eVote: "ファイナリティ投票 · エポック {n}",
+      eSeal: "ブロック #{n} 封印 · {t} tx", eVerify: "ブロック #{n} 検証済 — PoS 提案者 ✓ · カバレッジ ✓ · Merkle ✓", eState: "チェーン #{n} · エポック {e} · {v} 検証者", eTx: "tx 適用 · {k}", eVote: "ファイナリティ投票 · エポック {n}",
       eFinal: "ブロック #{n} 確定 · 不可逆", ePeer: "ピア接続 · {n} ピア" },
   };
   function tl(k: string): string { const l = locale(); return L[l]?.[k] ?? L.en[k] ?? k; }
@@ -135,6 +135,7 @@
   }
 
   let seenStats = false;
+  let statePushed = false;
   async function poll() {
     try {
       const s = await invoke<any>("get_node_status");
@@ -151,6 +152,12 @@
         height = f.height ?? height; epoch = f.epoch ?? epoch; floor = f.finalized_floor ?? floor;
         validators = f.validators ?? validators; totalStaked = f.total_staked ?? totalStaked;
         iAmValidator = !!f.i_am_validator; seenStats = true;
+        // Première sonde réussie → une ligne d'état immédiate (le journal ne
+        // reste jamais vide en attendant le prochain tick de minage à 60 s).
+        if (!statePushed) {
+          statePushed = true;
+          push("boot", fill(tl("eState"), { n: (f.height ?? 0).toLocaleString("fr-FR"), e: f.epoch ?? 0, v: f.validators ?? 0 }));
+        }
       }
     } catch {}
     try {
@@ -188,8 +195,12 @@
     if (now - tMark >= 1000) { hps = Math.round((acc * 1000) / (now - tMark)); acc = 0; tMark = now; }
   }
   function play() {
-    const want = visible && !reduce;
-    if (want && !timer) { running = true; tMark = performance.now(); acc = 0; timer = setInterval(computeBatch, 90); }
+    // Le cœur tourne TOUJOURS quand la carte est à l'écran — même sous
+    // « réduire les animations » (on ralentit la cadence, on ne fige jamais :
+    // un moteur « en direct » figé lirait comme un mensonge).
+    const want = visible;
+    const period = reduce ? 400 : 90;
+    if (want && !timer) { running = true; tMark = performance.now(); acc = 0; timer = setInterval(computeBatch, period); }
     else if (!want && timer) { running = false; clearInterval(timer); timer = null; }
   }
 
@@ -205,7 +216,12 @@
       const u2 = await listen<{ index: number; txs: number; mine: boolean }>("quanta://block-sealed", (e) => {
         const p = e.payload; if (!p) return;
         if (p.mine) push("sealMine", fill(tl("eSealMine"), { n: p.index, t: p.txs ?? 0 }));
-        else push("seal", fill(tl("eSeal"), { n: p.index, t: p.txs ?? 0, h: (coreHash || "").slice(0, 12) + "…" }));
+        else {
+          push("seal", fill(tl("eSeal"), { n: p.index, t: p.txs ?? 0 }));
+          // Honnête : ces vérifications tournent réellement à la réception
+          // (validate_block_against_prev — proposeur bondé, couverture, Merkle).
+          push("verify", fill(tl("eVerify"), { n: p.index }));
+        }
       });
       const u3 = await listen<{ tx_type: string }>("quanta://tx-applied", (e) => {
         const p = e.payload; if (!p) return;
@@ -293,7 +309,7 @@
     {#each lines as line (line.id)}
       <div class="ln ln-{line.kind}">
         <span class="lt">{line.time}</span>
-        <span class="lg" aria-hidden="true">{#if line.kind === "sealMine"}◆{:else if line.kind === "reward"}✦{:else if line.kind === "final"}●{:else if line.kind === "vote"}◇{:else if line.kind === "seal"}▪{:else if line.kind === "tx"}→{:else if line.kind === "peer"}↺{:else}›{/if}</span>
+        <span class="lg" aria-hidden="true">{#if line.kind === "sealMine"}◆{:else if line.kind === "reward"}✦{:else if line.kind === "final"}●{:else if line.kind === "vote"}◇{:else if line.kind === "seal"}▪{:else if line.kind === "verify"}✓{:else if line.kind === "tx"}→{:else if line.kind === "peer"}↺{:else}›{/if}</span>
         <span class="lx">{line.text}</span>
       </div>
     {/each}
@@ -368,6 +384,7 @@
   .ln-sealMine { background: rgba(20,200,184,0.09); border: 1px solid rgba(20,200,184,0.22); }
   .ln-sealMine .lg { color: var(--teal); } .ln-sealMine .lx { color: #d6f5f1; font-weight: 600; }
   .ln-final .lg { color: var(--teal); } .ln-final .lx { color: #cdeee9; }
+  .ln-verify .lg { color: var(--teal); } .ln-verify .lx { color: #9aa3b2; }
   .ln-boot .lx, .ln-boot .lg { color: var(--dim); }
 
   .note { padding: 14px 22px 18px; font-size: 11.5px; color: var(--dim); line-height: 1.55; border-top: 1px solid var(--line); font-family: var(--font-display); max-width: 78ch; }

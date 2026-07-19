@@ -382,6 +382,12 @@
     </div>
   </div>
 
+  <!-- Graphe vivant du réseau — Canvas2D honnête : MES pairs réels en orbite,
+       impulsions de propagation à chaque bloc réel (newBlockFlash). -->
+  <div class="card net-live">
+    <canvas bind:this={networkCanvas} width="880" height="400" class="net-live-canvas"></canvas>
+  </div>
+
   <!-- La Forge — QUANTA forgés en direct (rareté + possession) -->
   <div class="card forge-hero" class:forge-flash={Date.now() - newBlockFlash < 1200}>
     <div class="forge-main">
@@ -603,6 +609,8 @@
 
   /* ── Résumé réseau — 4 chiffres réels, aucune imagerie ───── */
   .net-summary { margin-bottom: 16px; }
+  .net-live { margin-bottom: 16px; padding: 8px; }
+  .net-live-canvas { display: block; width: 100%; height: auto; }
 
   /* ── La Forge — rareté & possession ──────────────────────── */
   .forge-hero {

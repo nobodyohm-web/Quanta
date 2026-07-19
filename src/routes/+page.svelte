@@ -5,7 +5,6 @@
   import Dashboard from "$lib/Dashboard.svelte";
   import Network from "$lib/Network.svelte";
   import Profile from "$lib/Profile.svelte";
-  import Explorer from "$lib/Explorer.svelte";
   import Contacts from "$lib/Contacts.svelte";
   import CommandPalette from "$lib/CommandPalette.svelte";
   import QuantaMark from "$lib/brand/QuantaMark.svelte";
@@ -67,7 +66,7 @@
       const tgt = e.target as HTMLElement;
       if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)) return;
       const map: Record<string, string> = {
-        "1": "dashboard", "2": "wallet", "3": "network", "4": "profile", "5": "explorer",
+        "1": "wallet", "2": "contacts", "3": "dashboard", "4": "network", "5": "profile",
       };
       const v = map[e.key];
       if (v) { e.preventDefault(); nav(v); }
@@ -314,15 +313,27 @@
     <main class="main-content">
       {#key view}
         <div class="view-anim">
-          {#if view === "wallet"}<Wallet />
-          {:else if view === "contacts"}<Contacts />
-          {:else if view === "dashboard"}<Dashboard />
-          {:else if view === "network"}<Network />
-          {:else if view === "explorer"}<Explorer />
-          {:else if view === "profile"}<Profile />
-          {:else if view === "whitepaper"}<Whitepaper />
-          {:else if view === "settings"}<Settings />
-          {:else}<Wallet />{/if}
+          <!-- Garde-fou : si un écran plante, IL s'affiche en erreur — la
+               navigation, elle, ne peut plus jamais geler. -->
+          <svelte:boundary onerror={(e) => console.error("[view]", e)}>
+            {#if view === "wallet"}<Wallet />
+            {:else if view === "contacts"}<Contacts />
+            {:else if view === "dashboard"}<Dashboard />
+            {:else if view === "network"}<Network />
+            {:else if view === "profile"}<Profile />
+            {:else if view === "whitepaper"}<Whitepaper />
+            {:else if view === "settings"}<Settings />
+            {:else}<Wallet />{/if}
+            {#snippet failed(error, reset)}
+              <div class="page">
+                <div class="card view-fail">
+                  <div class="vf-t">Cet écran a rencontré une erreur</div>
+                  <div class="vf-d">{String(error).slice(0, 300)}</div>
+                  <button class="btn btn-primary" onclick={reset}>Réessayer</button>
+                </div>
+              </div>
+            {/snippet}
+          </svelte:boundary>
         </div>
       {/key}
     </main>
@@ -455,6 +466,11 @@
   .new-id-cta:hover { background: rgba(11,165,160,0.16); border-color: var(--color-accent); }
 
   /* Layout handled by app.css .app-shell and .main-content */
+
+  /* Écran en erreur (boundary) — sobre, actionnable. */
+  .view-fail { max-width: 480px; display: flex; flex-direction: column; gap: 12px; }
+  .vf-t { font-size: 16px; font-weight: 700; color: var(--color-text-0); }
+  .vf-d { font-size: 12px; color: var(--color-text-2); word-break: break-word; }
 
   /* Transition de page soyeuse — fondu + glissé + micro-échelle, easing maître. */
   .view-anim {

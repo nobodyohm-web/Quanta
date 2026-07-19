@@ -373,6 +373,7 @@
     {#if loading}
       <div class="skeleton sk-label"></div>
       <div class="skeleton sk-bal"></div>
+      <div class="skeleton sk-sub"></div>
     {:else}
       <div class="w-hero-top">
         <span class="w-hero-label">{t('wallet.totalBalance')}</span>
@@ -388,6 +389,13 @@
       <div class="w-balance-row" class:amt-private={privacy}>
         <span class="w-balance">{shownBalance.toFixed(2)}</span>
         <span class="w-cur">QUANTA</span>
+      </div>
+      <div class="w-hero-sub" class:amt-private={privacy}>
+        <span>{(ov?.spendable ?? 0).toFixed(2)} {t('wallet.available')}</span>
+        <span class="w-hero-sub-dot">·</span>
+        <span>{(ov?.staked ?? 0).toFixed(2)} {t('wallet.stakedShort')}</span>
+        <span class="w-hero-sub-dot">·</span>
+        <span>{(ov?.unbonding ?? 0).toFixed(2)} {t('wallet.unbondingShort')}</span>
       </div>
     {/if}
   </div>
@@ -628,7 +636,7 @@
         </div>
       </div>
       <div class="w-status-foot">
-        <span class="w-dot" style="background:{online ? 'var(--color-green)' : 'var(--color-text-3)'}"></span>
+        <span class="w-dot" style="background:{online ? 'var(--cyan)' : 'var(--color-text-3)'}"></span>
         <span>{online ? `${t('wallet.connected')} · ${peers} ${peers === 1 ? t('wallet.peer') : t('wallet.peers')}` : t('wallet.offline')}</span>
         <span class="w-sep">·</span>
         <span>{txs.length} {t('wallet.recentTx')}</span>
@@ -753,17 +761,18 @@
 
 <style>
   /* ── Hero — le solde total, la typo seule (niveau banque : Trade Republic) ── */
-  .w-hero { padding: 22px 26px 26px; margin-bottom: 12px; }
+  .w-hero { padding: var(--space-10) var(--space-6) var(--space-8); margin-bottom: var(--space-4); }
   .w-hero-top {
     display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
   }
   .w-hero-label {
-    font-size: 12px; font-weight: 600; letter-spacing: 0.01em; color: var(--color-text-2);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--color-text-2);
+    text-transform: uppercase;
   }
   .w-balance-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .w-balance {
-    font-size: clamp(46px, 9vw, 64px); font-weight: 700; letter-spacing: -0.035em;
+    font-size: clamp(46px, 6.4vw, 56px); font-weight: 700; letter-spacing: -0.03em;
     line-height: 1; color: var(--color-text-0);
     font-variant-numeric: tabular-nums lining-nums;
   }
@@ -771,6 +780,14 @@
     font-size: 17px; font-weight: 600; letter-spacing: 0.02em; color: var(--color-accent-hover);
   }
   .w-sep { opacity: 0.5; }
+  /* Sous-ligne : la ventilation en un coup d'œil — dépensable · staké · en déverrouillage */
+  .w-hero-sub {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2);
+    margin-top: var(--space-3);
+    font-size: 13px; color: var(--color-text-2);
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .w-hero-sub-dot { color: var(--color-text-3); }
   .w-eye {
     display: flex; align-items: center; justify-content: center;
     width: 30px; height: 30px; border-radius: 8px;
@@ -793,11 +810,12 @@
   @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
   .sk-label { width: 96px; height: 15px; border-radius: 5px; margin-bottom: 12px; }
   .sk-bal  { width: 240px; height: 60px; border-radius: var(--radius-sm); }
+  .sk-sub  { width: 200px; height: 14px; border-radius: 5px; margin-top: var(--space-3); }
   .sk-row  { width: 100%; height: 44px; border-radius: var(--radius-sm); margin-bottom: 6px; }
 
   /* Actions — trois tuiles blanches flottantes ; l'état actif porte le teal */
   .w-actions {
-    display: flex; gap: 10px; margin-bottom: 12px;
+    display: flex; gap: var(--space-3); margin-bottom: var(--space-3);
   }
   .w-btn {
     flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px;
@@ -829,7 +847,7 @@
     font-size: 13px; animation: fadeIn 0.15s ease-out;
   }
   .w-fb-ok  { background: var(--cyan-dim); color: var(--teal-700); border: 1px solid var(--cyan-mid); }
-  .w-fb-err { background: rgba(229,72,77,0.06); color: var(--color-red); border: 1px solid rgba(229,72,77,0.18); }
+  .w-fb-err { background: var(--color-bg-2); color: var(--color-text-0); border: 1px solid var(--color-border); border-left: 3px solid var(--color-text-0); font-weight: 600; }
 
   /* Panels — cartes blanches globales (.card), seul l'agencement reste local */
   .w-panel { margin-bottom: 12px; animation: fadeIn 0.15s ease-out; }
@@ -883,8 +901,8 @@
   }
   .st-k { color: var(--color-text-2); display: flex; align-items: center; gap: 8px; }
   .st-v { font-weight: 600; color: var(--color-text-0); }
-  .st-v.recv { color: var(--color-green); }
-  .st-v.burn { color: var(--color-amber); }
+  .st-v.recv { color: var(--cyan); }
+  .st-v.burn { color: var(--color-text-2); }
   .st-total { border-bottom: 0; padding-top: 14px; }
   .st-total .st-k, .st-total .st-v { font-weight: 700; font-size: 15px; color: var(--color-text-0); }
   .st-pill {
@@ -949,7 +967,7 @@
     font-size: 14px; color: var(--color-text-1);
   }
   .w-staked-row .mono { color: var(--cyan); font-weight: 600; }
-  .stk-pending { font-size: 11px; color: var(--color-amber); margin-left: 6px; font-weight: 600; }
+  .stk-pending { font-size: 11px; color: var(--color-text-2); margin-left: 6px; font-weight: 600; }
   .stk-validator {
     margin-top: 10px; font-size: 12px; color: var(--color-text-2);
     padding: 8px 12px; background: var(--color-bg-2); border-radius: 8px; line-height: 1.5;
@@ -962,7 +980,7 @@
     font-size: 13px;
   }
   .stk-unbond-row:last-child { border-bottom: none; }
-  .stk-eta { font-size: 12px; color: var(--color-amber); }
+  .stk-eta { font-size: 12px; color: var(--color-text-2); }
   .stk-forms {
     display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4);
     margin-top: var(--space-5);
@@ -972,13 +990,13 @@
   .stk-warn {
     display: flex; align-items: flex-start; gap: 10px;
     margin-top: var(--space-5); padding: 12px 14px;
-    background: rgba(232,129,12,0.06); border: 1px solid rgba(232,129,12,0.22);
+    background: var(--color-bg-2); border: 1px solid var(--color-border-hover);
     border-radius: var(--radius-sm);
     font-size: 12px; color: var(--color-text-1); line-height: 1.55;
   }
   .stk-warn-ic {
     width: 18px; height: 18px; min-width: 18px; border-radius: 50%;
-    background: var(--color-amber); color: #fff;
+    background: var(--color-text-0); color: #fff;
     display: flex; align-items: center; justify-content: center;
     font-size: 11px; font-weight: 700;
   }
@@ -1001,15 +1019,15 @@
   .tx-in      { color: var(--cyan); }
   .tx-out     { color: var(--color-text-0); }
   .tx-neutral { color: var(--color-text-2); }
-  .tx-slash   { color: var(--color-red); }
+  .tx-slash   { color: var(--color-text-0); }
 
   /* Icônes de ligne — teal entrant, encre sortant, rouge sobre pour Slash */
   .w-ic-in    { background: var(--cyan-dim); color: var(--cyan); }
   .w-ic-out   { background: var(--color-bg-3); color: var(--color-text-1); }
   .w-ic-mine  { background: var(--cyan-dim); color: var(--cyan); }
   .w-ic-stake { background: var(--cyan-dim); color: var(--teal-700); }
-  .w-ic-burn  { background: rgba(232,129,12,0.10); color: var(--color-amber); }
-  .w-ic-slash { background: rgba(229,72,77,0.08); color: var(--color-red); }
+  .w-ic-burn  { background: var(--color-bg-3); color: var(--color-text-1); }
+  .w-ic-slash { background: var(--color-text-0); color: #fff; }
 
   /* Filtres — vocabulaire global .filter-tabs/.filter-tab ; seul le wrap est local */
   .w-filters { flex-wrap: wrap; margin-bottom: var(--space-3); }

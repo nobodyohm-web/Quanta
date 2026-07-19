@@ -14,7 +14,6 @@
     { id: "wallet", labelKey: "cmd.wallet", shortcut: "W", groupKey: "cmd.group.goTo" },
     { id: "dashboard", labelKey: "cmd.dashboard", shortcut: "D", groupKey: "cmd.group.goTo" },
     { id: "network", labelKey: "cmd.network", shortcut: "N", groupKey: "cmd.group.goTo" },
-    { id: "explorer", labelKey: "cmd.explorer", shortcut: "E", groupKey: "cmd.group.goTo" },
     { id: "profile", labelKey: "cmd.profile", shortcut: "P", groupKey: "cmd.group.goTo" },
     { id: "settings", labelKey: "cmd.settings", shortcut: ",", groupKey: "cmd.group.goTo" },
   ];

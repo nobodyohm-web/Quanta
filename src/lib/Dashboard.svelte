@@ -137,7 +137,7 @@
   const epochPct = $derived(fin ? (fin.blocks_into_epoch / fin.epoch_length) * 100 : 0);
 
   // ── Explicatif honnête « comprendre ton minage » (dict local 6 langues,
-  //    même patron que MiningTerminal) — répond exactement à : c'est quoi,
+  //    même patron que ForgeEngine) — répond exactement à : c'est quoi,
   //    qu'est-ce que ça prouve, est-ce gratuit. ─────────────────────────────
   const EX: Record<string, Record<string, string>> = {
     en: {
@@ -212,7 +212,12 @@
     </span>
   </div>
 
-  <!-- ── Comprendre ton minage (honnête, une fois) ─────────────────── -->
+  <!-- ── Le moteur de consensus, en direct — LA pièce maîtresse ──── -->
+  <div class="forge">
+    <ForgeEngine />
+  </div>
+
+  <!-- ── Comprendre ton minage (honnête, compact) ─────────────────── -->
   <div class="card understand">
     <div class="card-title">{tx('understand')}</div>
     <div class="ex-grid">
@@ -238,11 +243,6 @@
         <div class="ex-v">{tx('proofV')}</div>
       </div>
     </div>
-  </div>
-
-  <!-- ── Le moteur de consensus, en direct — la pièce maîtresse ──── -->
-  <div class="forge">
-    <ForgeEngine />
   </div>
 
   <!-- ── Chiffres du nœud (zéro énergie) ───────────────────────────── -->

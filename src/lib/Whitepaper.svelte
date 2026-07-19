@@ -154,7 +154,18 @@
     return { html: out.join("\n"), toc };
   }
 
-  const parsed = render(source);
+  // Parse at mount. This runs at top level (component init) — a throw here would
+  // propagate through the {#key view} block and freeze navigation (dead clicks),
+  // so degrade gracefully to the raw source instead of taking the app down.
+  function safeRender(md: string): { html: string; toc: Section[] } {
+    try {
+      return render(md);
+    } catch {
+      return { html: `<pre class="wp-pre"><code>${escapeHtml(md)}</code></pre>`, toc: [] };
+    }
+  }
+
+  const parsed = safeRender(source);
   const html = parsed.html;
   const toc = parsed.toc;
   const readMin = Math.max(1, Math.round(source.trim().split(/\s+/).length / 220));
