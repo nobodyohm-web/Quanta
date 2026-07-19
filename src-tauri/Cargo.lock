@@ -5648,7 +5648,7 @@ dependencies = [
 
 [[package]]
 name = "quanta-protocol"
-version = "3.9.1"
+version = "3.10.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
