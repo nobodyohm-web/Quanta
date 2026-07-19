@@ -22,6 +22,11 @@ mod commands_v3;
 mod commands;
 mod guardian;
 
+/// Shared read-model builders — pure functions that compute the view-models
+/// consumed by BOTH `crate::commands` (desktop UI) and `crate::rpc` (exchange /
+/// explorer integration), so the calculation lives once. See `views.rs`.
+mod views;
+
 /// Tauri-agnostic node boot path (DB, endpoint, background tasks), shared by the
 /// desktop app and the headless `quanta-node` daemon. See `node_runtime.rs`.
 pub mod node_runtime;

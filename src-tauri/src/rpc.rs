@@ -262,6 +262,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             let status = state.node.get_status().await;
             let ledger = state.node.ledger.read().await;
             let stats = ledger.stats();
+            // Provable-supply transparency (a listing requirement): total minted so
+            // far vs the hard cap, from the shared supply math (see `crate::views`).
+            let supply = crate::views::supply_view(&ledger, &stats);
             Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": crate::p2p::gossip::TORUS_PROTOCOL_VERSION,
@@ -269,10 +272,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 "micro_per_quanta": crate::p2p::ledger::MICRO,
                 "height": ledger.chain_height(),
                 "finalized_height": ledger.finalized_floor_index(),
-                // Provable-supply transparency (a listing requirement): total minted
-                // so far vs the hard cap, both verifiable on-chain, no hidden mint.
-                "minted_uqta": stats.total_mined,
-                "max_supply_uqta": crate::p2p::reputation::MAX_SUPPLY_MICRO,
+                "minted_uqta": supply.minted_uqta,
+                "max_supply_uqta": supply.max_supply_uqta,
                 "blocks": stats.total_blocks,
                 "total_txs": stats.total_txs,
                 "holders": stats.holders,
@@ -291,43 +292,28 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
         // credits a deposit once its block index ≤ finalized_floor (irreversible),
         // no confirmation-count guessing.
         "getfinalityinfo" => {
-            use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
+            // Shared finality math (see `crate::views`). This surface's frozen JSON
+            // *is* the view's shape (all µQTA integers), so it serializes directly —
+            // byte-identical to the former hand-rolled map.
             let ledger = state.node.ledger.read().await;
-            let height = ledger.chain_height();
-            let stakes = ledger.validator_stakes();
-            let total_staked: u64 = stakes.values().sum();
-            let min = crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
-            let validators = stakes.values().filter(|&&s| s >= min).count();
-            let blocks_into_epoch = height % EPOCH_LENGTH_BLOCKS;
-            Ok(json!({
-                "height": height,
-                "finalized_floor": ledger.finalized_floor_index(),
-                "epoch": height / EPOCH_LENGTH_BLOCKS,
-                "epoch_length": EPOCH_LENGTH_BLOCKS,
-                "blocks_into_epoch": blocks_into_epoch,
-                "next_checkpoint": height - blocks_into_epoch + EPOCH_LENGTH_BLOCKS,
-                "validators": validators,
-                "total_staked_uqta": total_staked,
-                "min_validator_stake_uqta": min,
-                "quorum_num": 2,
-                "quorum_den": 3,
-            }))
+            serde_json::to_value(crate::views::finality_view(&ledger))
+                .map_err(|_| (-32603, "serialize error".into()))
         }
 
         // The on-chain bonded validator set — who secures the network (PoS), sourced
         // purely from the chain (Stake/Unstake/Slash txs), stake-descending.
         "getvalidators" => {
-            let stakes = state.node.ledger.read().await.validator_stakes();
-            let min = crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
-            let mut vs: Vec<(String, u64)> = stakes.into_iter().filter(|(_, s)| *s >= min).collect();
-            vs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let list: Vec<Value> = vs
+            // Shared canonical bonded set (see `crate::views`): ≥MIN, stake-desc then
+            // addr-asc. This surface adds the bech32 presentation form per entry.
+            let vv = crate::views::validators_view(&*state.node.ledger.read().await);
+            let list: Vec<Value> = vv
+                .validators
                 .into_iter()
-                .map(|(addr_hex, stake)| {
-                    let bech = address::parse(&addr_hex)
+                .map(|e| {
+                    let bech = address::parse(&e.address_hex)
                         .map(|b| address::encode(&b))
-                        .unwrap_or_else(|_| addr_hex.clone());
-                    json!({ "address": bech, "address_hex": addr_hex, "stake_uqta": stake })
+                        .unwrap_or_else(|_| e.address_hex.clone());
+                    json!({ "address": bech, "address_hex": e.address_hex, "stake_uqta": e.stake_uqta })
                 })
                 .collect();
             Ok(json!({ "count": list.len(), "validators": list }))
@@ -360,21 +346,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
 
         // Pending (mempool) transactions not yet sealed into a block.
         "getmempool" => {
-            let ledger = state.node.ledger.read().await;
-            let txs: Vec<Value> = ledger
-                .pending_txs()
-                .iter()
-                .map(|t| {
-                    json!({
-                        "hash": t.hash,
-                        "from": t.from,
-                        "to": t.to,
-                        "amount_uqta": t.amount,
-                        "type": format!("{:?}", t.tx_type),
-                    })
-                })
-                .collect();
-            Ok(json!({ "count": txs.len(), "transactions": txs }))
+            // Shared mempool projection (see `crate::views`): each entry's `type`
+            // field is the tx-type Debug form, as before.
+            let mv = crate::views::mempool_view(&*state.node.ledger.read().await);
+            Ok(json!({ "count": mv.transactions.len(), "transactions": mv.transactions }))
         }
 
         "getblock" => {
@@ -390,11 +365,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             let addr = param_str(params, "address")?;
             let bytes = address::parse(&addr).map_err(|_| (-32602, "invalid address".into()))?;
             let hexs = hex::encode(bytes);
-            let ledger = state.node.ledger.read().await;
+            // Shared per-account money split (see `crate::views`), plus the echoed address.
+            let b = crate::views::balance_view(&*state.node.ledger.read().await, &hexs);
             Ok(json!({
                 "address": address::encode(&bytes),
-                "spendable_uqta": ledger.balance_of(&hexs),
-                "staked_uqta": ledger.staked_of(&hexs),
+                "spendable_uqta": b.spendable_uqta,
+                "staked_uqta": b.staked_uqta,
             }))
         }
 
@@ -568,12 +544,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                     c.pq_address_hex().unwrap_or_default(),
                 )
             };
-            let ledger = state.node.ledger.read().await;
+            // Shared per-account money split (see `crate::views`), plus wallet flags.
+            let b = crate::views::balance_view(&*state.node.ledger.read().await, &hexs);
             Ok(json!({
                 "has_wallet": has_wallet,
                 "address": address,
-                "spendable_uqta": ledger.balance_of(&hexs),
-                "staked_uqta": ledger.staked_of(&hexs),
+                "spendable_uqta": b.spendable_uqta,
+                "staked_uqta": b.staked_uqta,
             }))
         }
 
