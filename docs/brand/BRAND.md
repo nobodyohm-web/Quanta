@@ -2,34 +2,28 @@
 
 > La marque doit survivre aux modes. Deux formes, une couleur, une histoire.
 
-## La marque : « l'anneau et le quantum »
+## La marque : « le Q bloc » (validée 2026-07-19)
 
-Le symbole Quanta est un **Q géométrique** composé de exactement deux traits :
+Le symbole Quanta est un **Q géométrique** en deux formes :
 
 1. **L'anneau** — le Torus : le réseau, la monnaie qui circule, le cycle sans
    serveur ni centre.
-2. **Le quantum** — la queue diagonale détachée qui **traverse** l'anneau par
-   sa brèche : le bloc en train d'être scellé dans la chaîne, l'unité
-   d'énergie qui entre dans le réseau.
+2. **Le bloc** — un rectangle plein qui **traverse** l'anneau à sa pointe
+   sud-est, sur la diagonale 45° : le quantum qui plonge dans la chaîne et la
+   **scelle**. Serti à fleur *sur* la ligne de l'anneau, jamais posé dessus.
 
-Ensemble ils se lisent « Q » à toutes les tailles, dès 16 px, en une seule
-graisse optique (trait 5.5/48, terminaisons rondes).
+Ensemble ils se lisent « Q » à toutes les tailles, dès 16 px.
 
 ### Géométrie canonique (espace 48×48)
 
-- Anneau : centre (24, 24), rayon 15, brèche de 60° ouverte au sud-est
-  (centrée sur la diagonale 45°). Arc majeur de 300° :
-  `M27.882 38.489 A15 15 0 1 1 38.489 27.882`.
-- Quantum : segment sur la diagonale 45°, du rayon **9** au rayon **21** —
-  il **croise** la ligne de l'anneau (R=15) exactement à son **milieu**
-  (34.607, 34.607) : le bloc saisi au seuil du scellement. Jamais accolé,
-  jamais entièrement dehors : dehors = loupe, accolé = lettre banale.
-  `x1=30.364 y1=30.364 x2=38.849 y2=38.849`.
-- Trait : 5.5, `stroke-linecap: round`. Aucun remplissage. Tout dérive de
-  deux constantes (cercle R=15, diagonale 45°) → reproductible à n'importe
-  quelle taille en multipliant.
-- **Ne jamais** : comprimer la brèche de 60°, sortir la queue de la
-  diagonale 45°, fermer l'anneau, ajouter un disque/biseau/ellipse d'orbite.
+- Anneau : cercle **fermé**, centre (24, 24), rayon **15**, trait **4.4**.
+- Bloc : rectangle arrondi **13 × 6.8** (rayon d'angle 1.6), **centré sur la
+  ligne de l'anneau** au point 45° = **(34.607, 34.607)**, **pivoté de 45°** —
+  il plonge radialement à travers la couture, symétrique par rapport à l'axe
+  radial → **serti à fleur, aucun chevauchement**. Rempli (`fill`), pas un trait.
+- **Ne jamais** : poser le bloc *au-dessus* de l'anneau (le chevauchement =
+  le bug d'origine), le décentrer de la ligne, l'incliner hors de la diagonale
+  45°, ajouter un disque/biseau/ellipse d'orbite.
 
 **Source unique** : `src/lib/brand/QuantaMark.svelte` (app) et
 `docs/brand/quanta-app-icon.svg` (icône système 1024).
@@ -46,7 +40,7 @@ graisse optique (trait 5.5/48, terminaisons rondes).
 ### Interdits
 
 - Ne pas incliner, déformer, ombrer ni contourner d'un halo.
-- Ne pas fermer la brèche, ne pas recoller la queue à l'anneau.
+- Ne pas poser le bloc *au-dessus* de l'anneau (serti, jamais superposé) ni le décentrer de la ligne.
 - Jamais d'or (dérive « BTC »), jamais de bleu générique fintech.
 - Le gradient Aurora ne colore **jamais** le chrome (panneaux, listes, barres).
 

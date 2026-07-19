@@ -1,22 +1,22 @@
 <script lang="ts">
-  // QuantaMark — « l'anneau et le quantum ». The timeless mark:
+  // QuantaMark — « le Q bloc ». The mark, validated 2026-07-19:
   //
-  //   ● a RING — the Torus, the network, the money that circulates;
-  //   ● a detached diagonal TAIL — the quantum: the block sealing INTO the
-  //     ring, crossing its seam. Together they read as a geometric Q.
+  //   ● a closed RING — the Torus: the network, the money that circulates;
+  //   ● a rectangular BLOCK crossing the ring's south-east edge along the 45°
+  //     diagonal — the quantum plunging in and sealing the chain. Together
+  //     they read as a confident, geometric Q.
   //
-  // Geometry (viewBox 48): ring r=15 centred 24,24 with a 60° seam opening
-  // south-east; the tail lies on the 45° diagonal from radius 9 → 21, so it
-  // crosses the (absent) ring line at r=15 = (34.607, 34.607) — the tail's
-  // EXACT midpoint: the block caught precisely at the threshold = the seal.
-  // Stroke 5.5, round caps — one optical weight, no fill.
+  // Geometry (viewBox 48): ring r=15 centred (24,24), stroke 4.4. The block is
+  // a rounded rectangle (13 × 6.8, r1.6) CENTRED on the ring line at 45° =
+  // (34.607, 34.607) and rotated 45°, so it sits symmetric about the radial
+  // axis — serti à fleur, no accidental overlap. One optical weight.
   //
   //   tone="ink"    — near-black on light chrome (default)
   //   tone="teal"   — the jewel accent / nav logo
   //   tone="white"  — on Aurora / dark imagery
-  //   tone="aurora" — gradient stroke, reserved for hero MOMENTS only
+  //   tone="aurora" — gradient, reserved for hero MOMENTS only
   //
-  // `sealing`: when it flips true, the seam blooms Aurora once (~600 ms) then
+  // `sealing`: when it flips true the block blooms Aurora once (~600 ms) then
   // settles — wire it to real quanta://block-sealed events at CALL SITES,
   // never as a loop. Honours prefers-reduced-motion.
   let {
@@ -32,7 +32,9 @@
   }>();
 
   const uid = `qm${Math.random().toString(36).slice(2, 8)}`;
-  const stroke = $derived(
+  // One paint value drives BOTH the ring stroke and the block fill (a url()/hex/
+  // var() paint works for either), so the mark is one tone by construction.
+  const paint = $derived(
     tone === "aurora" ? `url(#${uid}g)`
     : tone === "white" ? "#ffffff"
     : tone === "teal" ? "var(--color-accent, #0BA5A0)"
@@ -73,17 +75,13 @@
     </radialGradient>
   </defs>
 
-  <path
-    d="M27.882 38.489 A15 15 0 1 1 38.489 27.882"
-    {stroke}
-    stroke-width="5.5"
-    stroke-linecap="round"
-  />
-  <line
-    x1="30.364" y1="30.364" x2="38.849" y2="38.849"
-    {stroke}
-    stroke-width="5.5"
-    stroke-linecap="round"
+  <!-- The ring — the Torus -->
+  <circle cx="24" cy="24" r="15" stroke={paint} stroke-width="4.4" />
+  <!-- The block — the quantum sealing the chain, serti à fleur on the 45° axis -->
+  <rect
+    x="28.107" y="31.207" width="13" height="6.8" rx="1.6"
+    transform="rotate(45 34.607 34.607)"
+    fill={paint}
   />
 
   {#key seal}
