@@ -1019,6 +1019,15 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
         );
         return;
     }
+    // MINT-GUARD-1 (defense in depth): a `Mining` reward is SYSTEM-issued
+    // (`NETWORK` → miner), built locally by the seal path and carried inside a
+    // `NewBlock` — it has no legitimate reason to arrive via `BroadcastTx`. Drop it
+    // here too, so a forged `Mining` tx can never even enter a peer's mempool.
+    // (`verify_tx` also rejects any non-NETWORK `Mining` tx, this is the outer belt.)
+    if matches!(tx.tx_type, crate::p2p::ledger::TxType::Mining) {
+        log::warn!("◈ [Dispatch] BroadcastTx carrying a Mining tx — rejected (rewards are block-only)");
+        return;
+    }
 
     // C5: mint the verification token — THE single signature gate (AUDIT-TX-1:
     // enforces signatures even on burn-target txs, previously bypassed by

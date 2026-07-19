@@ -75,19 +75,46 @@ pub const ADDR_DOMAIN: &[u8] = b"QUANTA-ADDR-V1";
 /// [`ADDR_DOMAIN`] so a multisig address can never collide with a single-key one.
 pub const MSIG_DOMAIN: &[u8] = b"QUANTA-MSIG-V1";
 
-/// MSIG-1 — derive the 32-byte address of an **M-of-N multisig account** from its
-/// policy (the registered ML-DSA public keys + the threshold).
+/// MSIG-1 — canonicalize a multisig policy's public keys **cryptographically**:
+/// decode each hex, require the exact ML-DSA-65 public-key length, re-encode as
+/// canonical **lowercase** hex, then sort + de-duplicate.
 ///
-/// The keys are **canonicalized** — sorted and de-duplicated — so the address is
-/// independent of key order and of accidental duplicates, and the encoding is
-/// **injective** (length-prefixed) so no two distinct policies collide. The account
-/// address therefore *commits* to `{keys, threshold}`: a spend reveals them and they
-/// cannot be swapped without changing the address (rebind-proof), exactly as a
-/// single-key address commits to its one key. Pure & deterministic (C1-safe).
-pub fn multisig_address_bytes(pubkeys: &[String], threshold: u32) -> [u8; 32] {
-    let mut keys: Vec<&str> = pubkeys.iter().map(|s| s.as_str()).collect();
-    keys.sort_unstable();
-    keys.dedup();
+/// MSIG-SEC-1: `hex::decode` is case-insensitive, so two different hex *spellings* of
+/// the SAME key (e.g. differing only in case) decode to the same key. De-duplicating
+/// on the raw strings would let one key fill several quorum slots (one signature
+/// satisfying a nominal M-of-N). Canonicalizing to the decoded bytes makes "distinct
+/// keys" mean distinct *keys*, not distinct *strings*. Returns `None` if ANY key is
+/// not a well-formed ML-DSA-65 public key, or the set is empty — the whole policy is
+/// rejected. THE single source of truth, used identically by the address derivation
+/// and the on-chain verifier, so binding and counting can never disagree.
+pub fn canonicalize_msig_keys(pubkeys: &[String]) -> Option<Vec<String>> {
+    let mut out = Vec::with_capacity(pubkeys.len());
+    for k in pubkeys {
+        let bytes = hex::decode(k).ok()?;
+        if bytes.len() != ml_dsa_65::PK_LEN {
+            return None;
+        }
+        out.push(hex::encode(bytes)); // canonical lowercase
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// MSIG-1 — derive the 32-byte address of an **M-of-N multisig account** from its
+/// policy (the registered ML-DSA public keys + the threshold). `None` if the keys are
+/// not all well-formed ML-DSA-65 keys ([`canonicalize_msig_keys`]).
+///
+/// Order-independent and **injective** (length-prefixed encoding), domain-separated
+/// from single-key addresses. The account address *commits* to `{keys, threshold}`:
+/// a spend reveals them and they cannot be swapped without changing the address
+/// (rebind-proof). Pure & deterministic (C1-safe).
+pub fn multisig_address_bytes(pubkeys: &[String], threshold: u32) -> Option<[u8; 32]> {
+    let keys = canonicalize_msig_keys(pubkeys)?;
     let mut h = blake3::Hasher::new();
     h.update(MSIG_DOMAIN);
     h.update(&(keys.len() as u32).to_le_bytes());
@@ -96,12 +123,12 @@ pub fn multisig_address_bytes(pubkeys: &[String], threshold: u32) -> [u8; 32] {
         h.update(k.as_bytes());
     }
     h.update(&threshold.to_le_bytes());
-    *h.finalize().as_bytes()
+    Some(*h.finalize().as_bytes())
 }
 
 /// MSIG-1 — hex form of [`multisig_address_bytes`] (the on-chain `from`/`to` value).
-pub fn multisig_address_hex(pubkeys: &[String], threshold: u32) -> String {
-    hex::encode(multisig_address_bytes(pubkeys, threshold))
+pub fn multisig_address_hex(pubkeys: &[String], threshold: u32) -> Option<String> {
+    multisig_address_bytes(pubkeys, threshold).map(hex::encode)
 }
 
 impl CryptoEngine {

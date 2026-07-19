@@ -1805,6 +1805,15 @@ impl Ledger {
         if tx.tx_type == TxType::Slash {
             return Ok(true);
         }
+        // MINT-GUARD-1: `Mining` is a SYSTEM tx type — legitimately issued ONLY by the
+        // synthetic `NETWORK` sender (exempted above). A tx reaching this point has a
+        // real user `from`, so a user-authorized `Mining` tx (single-key OR multisig)
+        // is a forgery: left unchecked it would be swept into the block reward by
+        // `coalesce_block_rewards`, minting unbacked QUANTA. Reject it at THE gate
+        // (verify_tx is the single portal before admission AND in block validation).
+        if tx.tx_type == TxType::Mining {
+            return Ok(false);
+        }
         // MSIG-1: a multisig tx is flagged by `pq_public_key == MSIG_TAG`. Its
         // authority is a QUORUM of independent ML-DSA signatures, not a single one,
         // so it takes a distinct path *before* the single-key requirements below
@@ -1888,15 +1897,21 @@ impl Ledger {
         };
         // Canonicalize exactly as the address derivation does (sorted, de-duplicated)
         // so counting is per-DISTINCT-key and independent of order/duplicates.
-        let mut keys = auth.pubkeys.clone();
-        keys.sort();
-        keys.dedup();
-        if keys.is_empty() || auth.threshold == 0 || auth.threshold as usize > keys.len() {
+        // MSIG-SEC-1: canonicalize by decoded key BYTES (not raw hex strings), so a
+        // single key spelled in two hex cases cannot fill two quorum slots; also
+        // rejects any malformed / wrong-length key. This is the SAME canonicalization
+        // the address derivation uses, so counting and binding can never disagree.
+        let keys = match crate::security::canonicalize_msig_keys(&auth.pubkeys) {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+        if auth.threshold == 0 || auth.threshold as usize > keys.len() {
             return Ok(false);
         }
-        // (1) Binding — `from` must be the address of exactly this policy.
-        if crate::security::multisig_address_hex(&keys, auth.threshold) != tx.from {
-            return Ok(false);
+        // (1) Binding — `from` must be the address of exactly this (canonical) policy.
+        match crate::security::multisig_address_hex(&keys, auth.threshold) {
+            Some(addr) if addr == tx.from => {}
+            _ => return Ok(false),
         }
         // (2) Pre-image + hash integrity. The pq_pk slot signed is the MSIG tag.
         let payload = Self::tx_signing_preimage(
@@ -2093,17 +2108,36 @@ impl Ledger {
         index: u64,
         ts: &str,
     ) -> Vec<Transaction> {
-        if txs.iter().filter(|t| t.tx_type == TxType::Mining).count() <= 1 {
-            return txs; // ≤1 reward — nothing to coalesce, leave untouched
+        // MINT-GUARD-2 (defense in depth for the critical mint vector): `Mining` is
+        // NETWORK-only. ONLY genuine `NETWORK` rewards are coalesced; a `Mining` tx
+        // from any other sender is a forgery (MINT-GUARD-1 already rejects it at
+        // admission — this ensures a corrupted mempool could never mint either) and
+        // is DROPPED here, never summed into the reward.
+        let network_rewards = txs
+            .iter()
+            .filter(|t| t.tx_type == TxType::Mining && t.from == "NETWORK")
+            .count();
+        let has_forged = txs
+            .iter()
+            .any(|t| t.tx_type == TxType::Mining && t.from != "NETWORK");
+        // ≤1 genuine reward and no forgery → byte-identical to the pre-EMIT-1 seal.
+        if network_rewards <= 1 && !has_forged {
+            return txs;
         }
         let mut total: u64 = 0;
         let mut rest: Vec<Transaction> = Vec::with_capacity(txs.len());
         for tx in txs {
             if tx.tx_type == TxType::Mining {
-                total = total.saturating_add(tx.amount);
+                if tx.from == "NETWORK" {
+                    total = total.saturating_add(tx.amount);
+                }
+                // else: forged Mining tx — dropped, never minted.
             } else {
                 rest.push(tx);
             }
+        }
+        if total == 0 {
+            return rest; // no genuine reward to emit; any forgeries were dropped
         }
         let id = format!("tx_mint_b{index}");
         // TX-AUTH-NONCE-1: one canonical pre-image everywhere. Synthetic NETWORK
@@ -3408,13 +3442,13 @@ impl Ledger {
         threshold: u32,
         signers: &[&CryptoEngine],
     ) -> Result<Transaction, String> {
-        let mut keys = pubkeys.to_vec();
-        keys.sort();
-        keys.dedup();
-        if keys.is_empty() || threshold == 0 || threshold as usize > keys.len() {
-            return Err("politique multisig invalide".into());
+        let keys = crate::security::canonicalize_msig_keys(pubkeys)
+            .ok_or("politique multisig invalide (clé malformée)")?;
+        if threshold == 0 || threshold as usize > keys.len() {
+            return Err("politique multisig invalide (seuil hors bornes)".into());
         }
-        let from = crate::security::multisig_address_hex(&keys, threshold);
+        let from = crate::security::multisig_address_hex(&keys, threshold)
+            .ok_or("politique multisig invalide")?;
         let nonce = self.get_nonce(&from);
         self.increment_nonce(&from);
         let (id, ts, payload, hash) = self.next_tx_at(
@@ -6121,16 +6155,16 @@ mod tests {
         let s: Vec<CryptoEngine> = (0..3).map(|_| msig_signer()).collect();
         let keys: Vec<String> = s.iter().map(|c| c.pq_identity_hex().unwrap()).collect();
 
-        let a = crate::security::multisig_address_hex(&keys, 2);
-        assert_eq!(a, crate::security::multisig_address_hex(&keys, 2), "deterministic");
+        let a = crate::security::multisig_address_hex(&keys, 2).unwrap();
+        assert_eq!(a, crate::security::multisig_address_hex(&keys, 2).unwrap(), "deterministic");
         let mut reordered = keys.clone();
         reordered.reverse();
-        assert_eq!(a, crate::security::multisig_address_hex(&reordered, 2), "order-independent");
-        assert_ne!(a, crate::security::multisig_address_hex(&keys, 3), "threshold-bound");
+        assert_eq!(a, crate::security::multisig_address_hex(&reordered, 2).unwrap(), "order-independent");
+        assert_ne!(a, crate::security::multisig_address_hex(&keys, 3).unwrap(), "threshold-bound");
         // A different key set ⇒ a different address.
         let other = msig_signer().pq_identity_hex().unwrap();
         let swapped = vec![keys[0].clone(), keys[1].clone(), other];
-        assert_ne!(a, crate::security::multisig_address_hex(&swapped, 2), "key-set-bound");
+        assert_ne!(a, crate::security::multisig_address_hex(&swapped, 2).unwrap(), "key-set-bound");
         // A multisig address never collides with a single-key address (domain sep).
         assert_ne!(a, CryptoEngine::ml_dsa_address_hex(keys[0].as_bytes()));
     }
@@ -6139,7 +6173,7 @@ mod tests {
     fn msig1_quorum_accept_and_reject() {
         let s: Vec<CryptoEngine> = (0..3).map(|_| msig_signer()).collect();
         let keys: Vec<String> = s.iter().map(|c| c.pq_identity_hex().unwrap()).collect();
-        let addr = crate::security::multisig_address_hex(&keys, 2);
+        let addr = crate::security::multisig_address_hex(&keys, 2).unwrap();
 
         // 2-of-3 with two DISTINCT signers → accepted. Any valid pair works.
         for pair in [[0usize, 1], [0, 2], [1, 2]] {
@@ -6192,5 +6226,83 @@ mod tests {
             .unwrap();
         tx.amount = 999_999;
         assert!(VerifiedTx::new(tx).is_none(), "amount tamper breaks the pre-image hash");
+    }
+
+    // ── Regression tests for the adversarial-review findings ─────────────────
+
+    /// MSIG-SEC-1: a single key spelled in two hex CASES must not fill two quorum
+    /// slots (hex decoding is case-insensitive). Cryptographic canonicalization
+    /// collapses the aliases to one key, so a "2-of-2" of one key is impossible.
+    #[test]
+    fn msig1_case_aliased_keys_collapse() {
+        let k = msig_signer();
+        let k_lo = k.pq_identity_hex().unwrap();
+        let k_hi = k_lo.to_uppercase();
+        assert_ne!(k_lo, k_hi, "hex spellings differ as strings");
+        let canon = crate::security::canonicalize_msig_keys(&[k_lo.clone(), k_hi.clone()]).unwrap();
+        assert_eq!(canon.len(), 1, "case aliases are the SAME key");
+        // The "2-of-2" address of the aliases equals the 1-key address (unsatisfiable
+        // at threshold 2) — it can never be a genuine 2-of-2.
+        assert_eq!(
+            crate::security::multisig_address_hex(&[k_lo.clone(), k_hi.clone()], 2),
+            crate::security::multisig_address_hex(std::slice::from_ref(&k_lo), 2)
+        );
+        // Building a 2-of-2 from a single aliased key is refused (threshold 2 > 1 key).
+        let mut l = Ledger::new();
+        assert!(l
+            .build_multisig_tx("r", 1, TxType::Transfer, &[k_lo.clone(), k_hi.clone()], 2, &[&k, &k])
+            .is_err());
+        // A malformed (non-ML-DSA-65) key invalidates the whole policy.
+        assert!(crate::security::canonicalize_msig_keys(&["deadbeef".to_string()]).is_none());
+    }
+
+    /// MINT-GUARD-1: a `Mining` tx authorized by a real user account (not the
+    /// synthetic `NETWORK`) is a mint forgery and must be rejected at the gate.
+    #[test]
+    fn mint_guard_rejects_user_authorized_mining_tx() {
+        let mut c = CryptoEngine::new();
+        let _ = c.generate_keypair();
+        c.generate_pq_identity().unwrap();
+        let from = c.pq_address_hex().unwrap();
+        let mut l = Ledger::new();
+        let forged = l.build_signed_tx(&from, &from, 1_000_000, TxType::Mining, &c).unwrap();
+        assert_eq!(forged.from, from);
+        assert!(VerifiedTx::new(forged).is_none(), "user-signed Mining rejected (MINT-GUARD-1)");
+        // A normal Transfer from the same account still verifies (single-key unaffected).
+        let ok = l.build_signed_tx(&from, "recipient", 1, TxType::Transfer, &c).unwrap();
+        assert!(VerifiedTx::new(ok).is_some());
+    }
+
+    /// MINT-GUARD-2: `coalesce_block_rewards` coalesces ONLY genuine `NETWORK`
+    /// rewards; a forged non-`NETWORK` `Mining` tx is dropped, never minted.
+    #[test]
+    fn mint_guard_coalesce_drops_forged_mining() {
+        fn mining(from: &str, amount: u64, id: &str) -> Transaction {
+            Transaction {
+                id: id.into(),
+                from: from.into(),
+                to: "x".into(),
+                amount,
+                tx_type: TxType::Mining,
+                timestamp: "t".into(),
+                signature: String::new(),
+                hash: String::new(),
+                nonce: 0,
+                pq_signature: None,
+                pq_public_key: None,
+                fault_proof: None,
+                slash_unbonding: None,
+            }
+        }
+        let txs = vec![
+            mining("NETWORK", 10, "a"),
+            mining("NETWORK", 20, "b"),
+            mining("attacker", 1000, "c"),
+        ];
+        let out = Ledger::coalesce_block_rewards(txs, "miner", 1, "ts");
+        let rewards: Vec<&Transaction> = out.iter().filter(|t| t.tx_type == TxType::Mining).collect();
+        assert_eq!(rewards.len(), 1, "exactly one coalesced reward");
+        assert_eq!(rewards[0].from, "NETWORK");
+        assert_eq!(rewards[0].amount, 30, "forged Mining amount is DROPPED, never minted");
     }
 }
