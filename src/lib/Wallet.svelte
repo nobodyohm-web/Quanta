@@ -41,7 +41,6 @@
 
   let ov = $state<WalletOverview | null>(null);
   let txs = $state<LedgerTx[]>([]);
-  let energyKwh = $state(0);
   let myUsername = $state<string | null>(null);
   let connectionCode = $state("");
   let codeCopied = $state(false);
@@ -126,7 +125,6 @@
       ov = await invoke<WalletOverview>("get_wallet_overview");
     } catch { /* ignore */ }
     try { txs = await invoke<LedgerTx[]>("get_recent_txs"); } catch { /* ignore */ }
-    try { const e = await invoke<any>("get_energy_stats"); energyKwh = e?.kwh_consumed ?? 0; } catch { /* optional */ }
     try { myUsername = await invoke<string | null>("get_my_username"); } catch { /* ignore */ }
     try { connectionCode = await invoke<string>("get_my_connection_code"); } catch { /* ignore */ }
     try { nodeStatus = await invoke<any>("get_node_status"); } catch { /* ignore */ }
@@ -629,13 +627,11 @@
           <div class="w-cell-s">{t('wallet.forgedSub')}</div>
         </div>
       </div>
-      <div class="w-energy-foot">
+      <div class="w-status-foot">
         <span class="w-dot" style="background:{online ? 'var(--color-green)' : 'var(--color-text-3)'}"></span>
         <span>{online ? `${t('wallet.connected')} · ${peers} ${peers === 1 ? t('wallet.peer') : t('wallet.peers')}` : t('wallet.offline')}</span>
         <span class="w-sep">·</span>
         <span>{txs.length} {t('wallet.recentTx')}</span>
-        <span class="w-sep">·</span>
-        <span>⚡ {energyKwh.toFixed(3)} kWh</span>
       </div>
     {/if}
   </div>
@@ -921,7 +917,7 @@
   }
   .w-cell-v { font-size: 22px; font-weight: 700; color: var(--color-text-0); line-height: 1; }
   .w-cell-s { font-size: 11px; color: var(--color-text-2); margin-top: 7px; line-height: 1.4; }
-  .w-energy-foot {
+  .w-status-foot {
     display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
     margin-top: 12px; font-size: 11.5px; color: var(--color-text-3);
   }

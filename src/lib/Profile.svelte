@@ -10,7 +10,6 @@
   let staked = $state(0);
   let trustScore = $state(0);
   let uptime = $state(0);
-  let energyKwh = $state(0);
   let mode = $state("Actif");
   let peers = $state(0);
   let joined = $state("");
@@ -114,7 +113,6 @@
       staked = r?.atn_staked ?? 0;
       trustScore = r?.trust_score ?? 0;
       uptime = r?.uptime_minutes ?? 0;
-      energyKwh = r?.energy_kwh ?? 0;
       joined = r?.joined_at ?? "";
     } catch {}
     try {
@@ -220,15 +218,10 @@
         </div>
       </div>
       <div class="divider"></div>
-      <div class="stat-grid">
+      <div class="stat-grid stat-grid-2">
         <div class="stat">
           <div class="section-label">{t('pf.peers')}</div>
           <div class="fig fig-md">{peers}</div>
-        </div>
-        <div class="stat">
-          <div class="section-label">{t('pf.energy')}</div>
-          <div class="fig fig-md">{energyKwh.toFixed(1)}</div>
-          <div class="stat-unit">kWh</div>
         </div>
         <div class="stat">
           <div class="section-label">{t('pf.mode')}</div>
@@ -241,7 +234,7 @@
     <div class="card">
       <div class="card-title">{t('pf.contribTitle')}</div>
       <p class="contrib-text">{@html t('pf.contribText')}</p>
-      <div class="stat-grid">
+      <div class="stat-grid stat-grid-2">
         <div class="stat">
           <div class="section-label">{t('pf.networkMaintained')}</div>
           <div class="fig fig-md">{formatUptime(uptime)}</div>
@@ -250,11 +243,6 @@
           <div class="section-label">{t('pf.quantaForged')}</div>
           <div class="fig fig-md accent">{earned.toFixed(2)}</div>
           <div class="stat-unit">QNT</div>
-        </div>
-        <div class="stat">
-          <div class="section-label">{t('pf.energyInvested')}</div>
-          <div class="fig fig-md">{energyKwh.toFixed(1)}</div>
-          <div class="stat-unit">kWh</div>
         </div>
       </div>
     </div>
@@ -442,6 +430,7 @@
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 28px 24px;
   }
+  .stat-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fig {
     font-family: var(--font-display);
     font-variant-numeric: tabular-nums lining-nums;

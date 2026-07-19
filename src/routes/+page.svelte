@@ -18,6 +18,10 @@
   import Settings from "$lib/Settings.svelte";
   import Whitepaper from "$lib/Whitepaper.svelte";
   import { getPrefs, applyTheme } from "$lib/prefs";
+  // Local fonts — bundled, no CDN (offline-first). Inter for everything,
+  // JetBrains Mono reserved for the pro terminal only.
+  import "@fontsource-variable/inter";
+  import "@fontsource-variable/jetbrains-mono";
   import "../app.css";
 
   // Reachable steps after the onboarding consolidation: identity creation lives

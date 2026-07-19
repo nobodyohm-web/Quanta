@@ -144,15 +144,6 @@ const en = {
   "network.title": "Network",
   "network.sub": "QUANTA P2P network",
   "network.connectedAdj": "connected",
-  "globe.eyebrow": "GLOBAL NETWORK · LIVE",
-  "globe.h": "A sovereign web,<br/>without borders.",
-  "globe.p": "Every glowing point is a real node. Your node talks peer-to-peer with the rest of the planet — no server, no middleman.",
-  "globe.peers": "peers",
-  "globe.blocks": "blocks",
-  "net3d.live": "Global network",
-  "net3d.peersConnected": "peers connected",
-  "net3d.peerConnected": "peer connected",
-  "net3d.searching": "Sovereign node · searching for peers",
 
   // settings
   "settings.language": "Language",
@@ -228,10 +219,6 @@ const fr: Dict = {
   "tx.Transfer": "Transfert", "tx.Mining": "Minage", "tx.Burn": "Burn", "tx.Stake": "Stake", "tx.Unstake": "Unstake",
   "time.now": "à l'instant", "time.min": "min", "time.h": "h", "time.d": "j",
   "network.title": "Réseau", "network.sub": "Réseau P2P QUANTA", "network.connectedAdj": "connectés",
-  "globe.eyebrow": "RÉSEAU MONDIAL · EN DIRECT", "globe.h": "Un Web souverain,<br/>sans frontières.",
-  "globe.p": "Chaque point lumineux est un nœud réel. Ton nœud dialogue en pair-à-pair avec le reste de la planète — sans serveur, sans intermédiaire.",
-  "globe.peers": "pairs", "globe.blocks": "blocs",
-  "net3d.live": "Réseau mondial", "net3d.peersConnected": "pairs connectés", "net3d.peerConnected": "pair connecté", "net3d.searching": "Nœud souverain · en recherche de pairs",
   "settings.language": "Langue", "settings.languageSub": "Choisissez la langue de l'app.",
 };
 
@@ -300,10 +287,6 @@ const es: Dict = {
   "tx.Transfer": "Transferencia", "tx.Mining": "Minería", "tx.Burn": "Quema", "tx.Stake": "Stake", "tx.Unstake": "Unstake",
   "time.now": "ahora mismo", "time.min": "min", "time.h": "h", "time.d": "d",
   "network.title": "Red", "network.sub": "Red P2P de QUANTA", "network.connectedAdj": "conectados",
-  "globe.eyebrow": "RED GLOBAL · EN VIVO", "globe.h": "Una web soberana,<br/>sin fronteras.",
-  "globe.p": "Cada punto luminoso es un nodo real. Tu nodo dialoga de igual a igual con el resto del planeta — sin servidor, sin intermediario.",
-  "globe.peers": "pares", "globe.blocks": "bloques",
-  "net3d.live": "Red global", "net3d.peersConnected": "pares conectados", "net3d.peerConnected": "par conectado", "net3d.searching": "Nodo soberano · buscando pares",
   "settings.language": "Idioma", "settings.languageSub": "Elige el idioma de la app.",
 };
 
@@ -372,10 +355,6 @@ const ru: Dict = {
   "tx.Transfer": "Перевод", "tx.Mining": "Майнинг", "tx.Burn": "Сжигание", "tx.Stake": "Стейк", "tx.Unstake": "Анстейк",
   "time.now": "только что", "time.min": "мин", "time.h": "ч", "time.d": "д",
   "network.title": "Сеть", "network.sub": "P2P-сеть QUANTA", "network.connectedAdj": "подключено",
-  "globe.eyebrow": "ГЛОБАЛЬНАЯ СЕТЬ · В ЭФИРЕ", "globe.h": "Суверенная сеть,<br/>без границ.",
-  "globe.p": "Каждая светящаяся точка — реальный узел. Ваш узел общается напрямую с остальной планетой — без сервера, без посредника.",
-  "globe.peers": "пиры", "globe.blocks": "блоки",
-  "net3d.live": "Глобальная сеть", "net3d.peersConnected": "пиров подключено", "net3d.peerConnected": "пир подключён", "net3d.searching": "Суверенный узел · поиск пиров",
   "settings.language": "Язык", "settings.languageSub": "Выберите язык приложения.",
 };
 
@@ -444,10 +423,6 @@ const zh: Dict = {
   "tx.Transfer": "转账", "tx.Mining": "挖矿", "tx.Burn": "销毁", "tx.Stake": "质押", "tx.Unstake": "解押",
   "time.now": "刚刚", "time.min": "分钟", "time.h": "小时", "time.d": "天",
   "network.title": "网络", "network.sub": "QUANTA P2P 网络", "network.connectedAdj": "已连接",
-  "globe.eyebrow": "全球网络 · 实时", "globe.h": "主权网络，<br/>没有边界。",
-  "globe.p": "每个发光点都是真实节点。你的节点与全球点对点通信——无服务器、无中介。",
-  "globe.peers": "节点", "globe.blocks": "区块",
-  "net3d.live": "全球网络", "net3d.peersConnected": "个节点已连接", "net3d.peerConnected": "个节点已连接", "net3d.searching": "主权节点 · 正在寻找节点",
   "settings.language": "语言", "settings.languageSub": "选择应用语言。",
 };
 
@@ -516,10 +491,6 @@ const ja: Dict = {
   "tx.Transfer": "送金", "tx.Mining": "マイニング", "tx.Burn": "バーン", "tx.Stake": "ステーク", "tx.Unstake": "アンステーク",
   "time.now": "たった今", "time.min": "分", "time.h": "時間", "time.d": "日",
   "network.title": "ネットワーク", "network.sub": "QUANTA P2P ネットワーク", "network.connectedAdj": "接続",
-  "globe.eyebrow": "グローバルネットワーク · ライブ", "globe.h": "主権的なウェブ、<br/>国境なし。",
-  "globe.p": "光る点はすべて実在のノード。あなたのノードは世界とP2Pで対話します——サーバーも仲介者もなし。",
-  "globe.peers": "ピア", "globe.blocks": "ブロック",
-  "net3d.live": "グローバルネットワーク", "net3d.peersConnected": "ピア接続中", "net3d.peerConnected": "ピア接続中", "net3d.searching": "主権ノード · ピアを探索中",
   "settings.language": "言語", "settings.languageSub": "アプリの言語を選択。",
 };
 

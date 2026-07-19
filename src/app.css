@@ -52,8 +52,8 @@
   --radius: 12px;
   --radius-lg: 16px;
   --radius-xl: 24px;
-  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
-  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'SF Mono', ui-monospace, monospace;
+  --font-display: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
 
   /* Ombres chaudes & douces — profondeur Apple (lumière rasante, pas de noir dur) */
   --shadow-sm: 0 1px 2px rgba(17,24,39,0.05);
@@ -126,10 +126,12 @@
 
 html, body {
   height: 100%; overflow: hidden;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-family: var(--font-display);
   background: var(--color-bg-0); color: var(--color-text-0);
   -webkit-font-smoothing: antialiased;
   font-size: 14px; line-height: 1.5;
+  /* Figures line up everywhere by default — one type system, bank-grade. */
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
 /* Grain « papier » global — texture crayon très subtile, par-dessus tout,
@@ -268,10 +270,13 @@ html, body {
 
 /* ── Stats ── */
 .stat-label { font-size: 11px; color: var(--color-text-3); letter-spacing: 0.04em; margin-bottom: 6px; text-transform: uppercase; font-weight: 500; }
-.stat-val { font-family: var(--font-mono); font-size: 28px; font-weight: 700; color: var(--color-text-0); line-height: 1; }
-.stat-val.lg { font-size: 36px; }
+/* Amounts use Inter with tabular figures (NOT a monospace font) — that single
+   sans + tabular-nums treatment is the Trade Republic / Revolut look, and ends
+   the sans-vs-mono mishmash. Monospace is reserved for addresses & the terminal. */
+.stat-val { font-family: var(--font-display); font-size: 28px; font-weight: 700; color: var(--color-text-0); line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums lining-nums; }
+.stat-val.lg { font-size: 36px; letter-spacing: -0.03em; }
 .stat-val.sm { font-size: 20px; }
-.stat-sub { font-size: 12px; color: var(--color-text-2); margin-top: 5px; font-family: var(--font-mono); }
+.stat-sub { font-size: 12px; color: var(--color-text-2); margin-top: 5px; font-variant-numeric: tabular-nums lining-nums; }
 
 /* ── Buttons ── */
 .btn {

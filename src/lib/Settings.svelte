@@ -102,53 +102,6 @@
     await relaunch();
   }
 
-  // ── Dev API (Phase 3) ──
-  let devApi = $state<{ enabled: boolean; endpoint: string; token: string } | null>(null);
-  let devTokenVisible = $state(false);
-  let devTokenCopied = $state(false);
-  let devApiBusy = $state(false);
-
-  async function loadDevApi() {
-    try {
-      devApi = await invoke("dev_api_status");
-    } catch {
-      devApi = null;
-    }
-  }
-
-  $effect(() => { loadDevApi(); });
-
-  async function toggleDevApi() {
-    if (!devApi) return;
-    devApiBusy = true;
-    try {
-      const next = !devApi.enabled;
-      const enabled = await invoke<boolean>("dev_api_set_enabled", { enabled: next });
-      devApi = { ...devApi, enabled };
-    } catch (e) {
-      console.warn("dev_api toggle failed", e);
-    } finally {
-      devApiBusy = false;
-    }
-  }
-
-  async function copyDevToken() {
-    if (!devApi?.token) return;
-    await navigator.clipboard.writeText(devApi.token);
-    devTokenCopied = true;
-    setTimeout(() => (devTokenCopied = false), 1600);
-  }
-
-  async function rotateDevToken() {
-    if (!confirm(t('set.regenConfirm'))) return;
-    devApiBusy = true;
-    try {
-      const tok = await invoke<string>("dev_api_rotate_token");
-      if (devApi) devApi = { ...devApi, token: tok };
-    } finally {
-      devApiBusy = false;
-    }
-  }
 </script>
 
 <div class="page settings-page">
@@ -335,49 +288,6 @@
     </div>
   </section>
 
-  <!-- API Développeur -->
-  <section class="group">
-    <div class="group-head">
-      <h2 class="section-label">{t('set.devApi')}</h2>
-      <p class="group-sub">{t('set.devApiSub')}</p>
-    </div>
-    <div class="card group-body">
-      {#if devApi}
-        <div class="row">
-          <span class="row-label">{t('set.devApiEnable')}</span>
-          <button
-            class="pill-toggle"
-            class:active={devApi.enabled}
-            onclick={toggleDevApi}
-            disabled={devApiBusy}
-          >{devApi.enabled ? t('set.devApiOn') : t('set.devApiOff')}</button>
-        </div>
-        {#if devApi.enabled}
-          <div class="cred">
-            <span class="cred-label">Endpoint</span>
-            <code class="cred-val">http://{devApi.endpoint}</code>
-          </div>
-          <div class="cred">
-            <span class="cred-label">Token</span>
-            <code class="cred-val">{devTokenVisible ? devApi.token : "•".repeat(64)}</code>
-            <div class="cred-actions">
-              <button class="btn btn-ghost btn-sm" onclick={() => (devTokenVisible = !devTokenVisible)}>
-                {devTokenVisible ? t('set.devHide') : t('set.devShow')}
-              </button>
-              <button class="btn btn-ghost btn-sm" onclick={copyDevToken}>{devTokenCopied ? "✓ " + t('set.copied') : t('set.copy')}</button>
-              <button class="btn btn-ghost btn-sm btn-danger" onclick={rotateDevToken} disabled={devApiBusy}>{t('set.devRegen')}</button>
-            </div>
-          </div>
-          <div class="dev-hint">
-            {t('set.devQuickTest')} <code>curl -H "Authorization: Bearer &lt;token&gt;" http://{devApi.endpoint}/api/status</code>
-          </div>
-        {/if}
-      {:else}
-        <div class="dev-hint muted">{t('set.loading')}</div>
-      {/if}
-    </div>
-  </section>
-
   <!-- Charte d'intégrité — confiance -->
   <section class="group">
     <TrustCharter />
@@ -451,21 +361,6 @@
     box-shadow: var(--shadow-sm);
   }
 
-  /* ── Pastille on/off (API dev) — teal uniquement à l'état actif ── */
-  .pill-toggle {
-    padding: 6px 16px; font-size: 12px; font-weight: 600;
-    font-family: inherit; cursor: pointer; border-radius: 8px;
-    border: 1px solid var(--color-border-hover);
-    background: var(--surface); color: var(--color-text-2);
-    box-shadow: var(--shadow-sm);
-    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
-  }
-  .pill-toggle:hover:not(.active) { color: var(--color-text-0); }
-  .pill-toggle.active {
-    background: var(--color-accent); border-color: var(--color-accent); color: #fff;
-  }
-  .pill-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
-
   /* ── Ticket de nœud ── */
   .ticket {
     display: flex; align-items: center; gap: var(--space-3);
@@ -533,42 +428,6 @@
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums lining-nums;
   }
-
-  /* ── Identifiants API dev — libellé caption + valeur mono pleine largeur ── */
-  .cred {
-    display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
-    padding: var(--space-3) 0;
-    border-top: 1px solid var(--color-border);
-  }
-  .cred-label {
-    flex-basis: 72px; flex-shrink: 0;
-    font-size: 13px; font-weight: 500; color: var(--color-text-1);
-  }
-  .cred-val {
-    flex: 1; min-width: 160px;
-    font-family: var(--font-mono); font-size: 12px;
-    color: var(--color-text-1);
-    background: var(--color-bg-2);
-    border: 1px solid var(--color-border);
-    padding: 6px 10px; border-radius: 8px;
-    overflow-x: auto; white-space: nowrap; letter-spacing: 0.5px;
-  }
-  .cred-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-
-  .dev-hint {
-    margin-top: var(--space-2);
-    font-size: 12px; color: var(--color-text-2);
-    background: var(--color-bg-2);
-    border-left: 3px solid var(--color-border-hover);
-    padding: var(--space-2) var(--space-3);
-    border-radius: 8px;
-    overflow-x: auto;
-  }
-  .dev-hint code {
-    font-family: var(--font-mono);
-    background: transparent; color: var(--color-text-1);
-  }
-  .dev-hint.muted { color: var(--color-text-3); border-color: var(--color-border); }
 
   /* ── À propos ── */
   .about { display: flex; flex-direction: column; gap: 5px; padding: var(--space-2) 0; }

@@ -1,12 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import ChainScene from "./three/ChainScene.svelte";
-  import Network3D from "./Network3D.svelte";
   import ChainHistory from "./ChainHistory.svelte";
   import { t } from "./i18n.svelte";
 
-  let chainView = $state<"history" | "2d" | "3d">("3d");
+  let chainView = $state<"history" | "2d">("history");
 
   let peerCount = $state(0);
   let myPeerId = $state("");
@@ -68,7 +66,6 @@
     public_key: string;
     display_name: string | null;
     country: string;
-    watts: number;
     last_rtt_ms: number | null;
     smoothed_rtt_ms: number | null;
     bytes_in: number;
@@ -358,19 +355,25 @@
     </div>
   </div>
 
-  <!-- Topologie mondiale — globe réseau (surface sobre, zéro Aurora) -->
-  <div class="card globe-hero">
-    <div class="globe-copy">
-      <div class="section-label">{t('globe.eyebrow')}</div>
-      <div class="globe-h">{@html t('globe.h')}</div>
-      <p class="globe-p">{t('globe.p')}</p>
-      <div class="globe-stats">
-        <div class="globe-stat"><span class="gs-v">{peerCount}</span><span class="gs-k">{t('globe.peers')}</span></div>
-        <div class="globe-stat"><span class="gs-v">{chainHeight}</span><span class="gs-k">{t('globe.blocks')}</span></div>
-      </div>
+  <!-- Résumé réseau — chiffres réels du nœud, zéro imagerie -->
+  <div class="grid-4 net-summary">
+    <div class="card">
+      <div class="stat-label">{t('db.peers')}</div>
+      <div class="stat-val sm">{peerCount}</div>
     </div>
-    <div class="globe-canvas">
-      <Network3D size={420} caption={false} />
+    <div class="card">
+      <div class="stat-label">{t('db.height')}</div>
+      <div class="stat-val sm">{chainHeight}</div>
+      <div class="stat-sub">{t('db.blocks')}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Plancher de finalité</div>
+      <div class="stat-val sm">{finalityFloor}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Statut</div>
+      <div class="stat-val sm">{isOnline ? t('wallet.connected') : t('wallet.offline')}</div>
+      <div class="stat-sub mono">{protocol || '—'}</div>
     </div>
   </div>
 
@@ -422,14 +425,11 @@
         <div class="filter-tabs">
           <button class="filter-tab" class:active={chainView === 'history'} onclick={() => (chainView = 'history')}>{t('net.chainViewHistory')}</button>
           <button class="filter-tab" class:active={chainView === '2d'} onclick={() => (chainView = '2d')}>{t('net.chainViewRecent')}</button>
-          <button class="filter-tab" class:active={chainView === '3d'} onclick={() => (chainView = '3d')}>3D</button>
         </div>
       </div>
     </div>
     {#if chainView === 'history'}
       <ChainHistory />
-    {:else if chainView === '3d'}
-      <ChainScene blocks={blocks} floor={finalityFloor} flashAt={newBlockFlash} />
     {:else}
       <div class="chain-strip">
         <div class="chain-pending" title={t('net.chainPendingTip')}>
@@ -596,40 +596,8 @@
     50% { box-shadow: 0 0 0 4px rgba(22,163,74,0); }
   }
 
-  /* ── Globe — topologie mondiale (surface blanche sobre) ───── */
-  .globe-hero {
-    display: grid; grid-template-columns: 1fr 460px;
-    align-items: center; gap: 12px;
-    padding: 8px 8px 8px 32px; margin-bottom: 16px;
-    overflow: hidden;
-  }
-  .globe-copy { padding: 28px 0; }
-  .globe-h {
-    font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
-    line-height: 1.15; color: var(--color-text-0); margin-bottom: 12px;
-  }
-  .globe-p {
-    font-size: 14px; line-height: 1.6; color: var(--color-text-2);
-    max-width: 400px; margin-bottom: 24px;
-  }
-  .globe-stats { display: flex; gap: 40px; }
-  .globe-stat { display: flex; flex-direction: column; gap: 4px; }
-  .gs-v {
-    font-family: var(--font-display);
-    font-size: 30px; font-weight: 700; color: var(--color-text-0);
-    letter-spacing: -0.02em; line-height: 1;
-    font-variant-numeric: tabular-nums lining-nums;
-  }
-  .gs-k { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-text-3); }
-  .globe-canvas {
-    display: flex; align-items: center; justify-content: center;
-    background: var(--color-bg-1);
-    border-radius: 12px; align-self: stretch; min-height: 444px;
-  }
-  @media (max-width: 860px) {
-    .globe-hero { grid-template-columns: 1fr; padding: 24px; }
-    .globe-canvas { min-height: 380px; }
-  }
+  /* ── Résumé réseau — 4 chiffres réels, aucune imagerie ───── */
+  .net-summary { margin-bottom: 16px; }
 
   /* ── La Forge — rareté & possession ──────────────────────── */
   .forge-hero {
