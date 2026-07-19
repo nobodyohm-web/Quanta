@@ -343,13 +343,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .ok_or((-32602, "missing 'pubkeys' array".to_string()))?;
             let threshold = param_u64(params, "threshold")? as u32;
-            let mut canon = pubkeys;
-            canon.sort();
-            canon.dedup();
-            if canon.is_empty() || threshold == 0 || threshold as usize > canon.len() {
+            let canon = crate::security::canonicalize_msig_keys(&pubkeys)
+                .ok_or((-32602, "invalid pubkeys (each must be a valid ML-DSA-65 public key)".to_string()))?;
+            if threshold == 0 || threshold as usize > canon.len() {
                 return Err((-32602, "invalid policy (need 1 ≤ threshold ≤ distinct keys)".into()));
             }
-            let bytes = crate::security::multisig_address_bytes(&canon, threshold);
+            let bytes = crate::security::multisig_address_bytes(&canon, threshold)
+                .ok_or((-32603, "address derivation failed".to_string()))?;
             Ok(json!({
                 "address": address::encode(&bytes),
                 "address_hex": hex::encode(bytes),
@@ -802,8 +802,16 @@ mod tests {
 
     #[tokio::test]
     async fn getmultisigaddress_matches_onchain_derivation() {
+        use crate::security::CryptoEngine;
         let state = test_state().await;
-        let keys = vec!["aa".to_string(), "bb".to_string(), "cc".to_string()];
+        // Real ML-DSA-65 public keys (the derivation now validates key well-formedness).
+        let keys: Vec<String> = (0..3)
+            .map(|_| {
+                let mut c = CryptoEngine::new();
+                c.generate_pq_identity().unwrap();
+                c.pq_identity_hex().unwrap()
+            })
+            .collect();
         let r = dispatch(&state, "getmultisigaddress", &json!({ "pubkeys": keys, "threshold": 2 }))
             .await
             .unwrap();
@@ -811,10 +819,13 @@ mod tests {
         assert_eq!(r["keys"], json!(3));
         assert_eq!(r["threshold"], json!(2));
         // Must equal the exact derivation the consensus authority check uses.
-        assert_eq!(r["address_hex"], json!(crate::security::multisig_address_hex(&keys, 2)));
+        assert_eq!(r["address_hex"], json!(crate::security::multisig_address_hex(&keys, 2).unwrap()));
 
         // Invalid policy (threshold > distinct keys) → error.
         let bad = dispatch(&state, "getmultisigaddress", &json!({ "pubkeys": keys, "threshold": 9 })).await;
         assert_eq!(bad.unwrap_err().0, -32602);
+        // Malformed key → rejected (MSIG-SEC-1: keys must be valid ML-DSA-65 pubkeys).
+        let badkey = dispatch(&state, "getmultisigaddress", &json!({ "pubkeys": ["zz"], "threshold": 1 })).await;
+        assert_eq!(badkey.unwrap_err().0, -32602);
     }
 }
