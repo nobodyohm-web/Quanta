@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ChainHistory from "./ChainHistory.svelte";
@@ -189,9 +190,14 @@
   // Canvas animation — graphe réseau vivant (compte de peers RÉEL, zéro fake).
   // Les peers orbitent en ellipse ; les connexions « coulent » (pointillés
   // animés) ; à chaque nouveau bloc, une rafale d'impulsions part de mon nœud
-  // vers tous les peers (propagation du bloc). Lit newBlockFlash dans le rAF
-  // (async) → pas de dépendance réactive, l'effet ne se reconstruit que sur
-  // changement de peerCount.
+  // vers tous les peers (propagation du bloc).
+  // SEULE dépendance voulue : peerCount. Piège Svelte 5 (bug du gel au forge) :
+  // le premier draw() était appelé SYNCHRONIQUEMENT dans le corps de l'effet →
+  // toutes ses lectures ($state newBlockFlash, locale via t()) devenaient des
+  // dépendances trackées, et l'écriture de newBlockFlash au scellement d'un
+  // bloc reconstruisait tout l'effet (positions re-tirées, rAF relancé) au
+  // moment exact du forge. Désormais : lastFlash init sous untrack, et le
+  // premier draw passe par requestAnimationFrame (asynchrone = non tracké).
   $effect(() => {
     if (!networkCanvas) return;
     const W = networkCanvas.width, H = networkCanvas.height;
@@ -206,7 +212,7 @@
       phase: Math.random() * Math.PI * 2,
     }));
     let localPulses: { fx: number; fy: number; tx: number; ty: number; t: number; big: boolean }[] = [];
-    let lastFlash = newBlockFlash;
+    let lastFlash = untrack(() => newBlockFlash);
 
     const draw = () => {
       const ctx = networkCanvas.getContext('2d');
@@ -294,7 +300,9 @@
 
       animFrame = requestAnimationFrame(draw);
     };
-    draw();
+    // JAMAIS de draw() synchrone ici (ses lectures seraient trackées) — le
+    // premier rendu passe par rAF, hors du contexte réactif de l'effet.
+    animFrame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animFrame);
   });
 

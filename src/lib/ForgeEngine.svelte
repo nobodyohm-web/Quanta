@@ -32,9 +32,14 @@
       note: "Proof-of-Stake: no hash race, no mining farm. These are real BLAKE3 hashes — the primitive that hashes and links every block — computed live to prove integrity, not to win a power contest.",
       boot: "engine online — real crypto, real events",
       solo: "Solo node — 0 peers. Only YOUR node's work shows here (mine ~60s → seal ~120s). Amounts look alike because emission declines slowly — but every tx is unique: check its hash. Connect a peer to see signed network traffic.",
-      eReward: "reward minted  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "BLOCK SEALED #{n} · {t} tx · {h} ← {p}",
-      eSeal: "block #{n} sealed · {t} tx · {h} ← {p}", eVerify: "block #{n} verified — PoS proposer ✓ · coverage ✓ · Merkle ✓", eState: "chain #{n} · epoch {e} · {v} validators", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "finality vote · epoch {n}", eEnv: "{m} from {s} · nonce {n} — ML-DSA ✓", eVoteCast: "OUR finality vote signed — epoch {e} → #{h}",
-      eFinal: "block #{n} finalized · irreversible", ePeer: "peer connected · {n} peers" },
+      eReward: "reward minted  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "BLOCK SEALED #{n} · {t} tx · {h} ← {p} · {d} µs",
+      eSeal: "block #{n} sealed · {t} tx · {h} ← {p}", eVerify: "block #{n} verified — PoS proposer ✓ · coverage ✓ · Merkle ✓", eState: "chain #{n} · epoch {e} · {v} validators", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "finality vote · epoch {n}", eEnv: "{m} from {s} · nonce {n} — ML-DSA ✓ {us} µs", eVoteCast: "OUR finality vote signed — epoch {e} → #{h}",
+      eFinal: "block #{n} finalized · irreversible", ePeer: "peer connected · {n} peers",
+      eSign: "ML-DSA-65 signed · {m} envelope · {b} B · {us} µs", ePersist: "disk snapshot · {k} states · {b} KB · {ms} ms",
+      eElectLead: "slot #{s} — ELECTED leader ({v} validators) — sealing", eElectFall: "slot #{s} — fallback proposer — sealing",
+      eElectObs: "slot #{s} — another validator leads ({v}) — observing", eElectBoot: "slot #{s} — permissionless bootstrap (no stake yet)",
+      eHashCk: "blake3 · {t} hashes computed · {h} · {r} h/s", eStall: "⚠ UI thread stalled {ms} ms",
+      cold: "Your Mac stays cool by design: security comes from ML-DSA signatures and stake — measured above in µs — not from heat. (Bitcoin burns ~175 TWh/yr for the same guarantee.)" },
     fr: { title: "Moteur de consensus", live: "en direct", slot: "SLOT", chain: "BLAKE3 · chaînage d'intégrité",
       hps: "hashs/s", computed: "calculés en direct sur ton appareil", verified: "chaînés sur le bloc",
       pBeacon: "Beacon", pElect: "Élection du leader", pSeal: "Scellement", pSig: "Signature ML-DSA", pFinal: "Finalité",
@@ -44,9 +49,14 @@
       note: "Proof-of-Stake : pas de course au hash, pas de ferme de minage. Ce sont de vrais BLAKE3 — la primitive qui hache et lie chaque bloc — calculés en direct pour prouver l'intégrité, pas pour gagner une course à la puissance.",
       boot: "moteur en ligne — crypto réelle, évènements réels",
       solo: "Nœud solo — 0 pair. Tu ne vois ici que le travail de TON nœud (mine ~60 s → scelle ~120 s). Les montants se ressemblent car l'émission décroît lentement — mais chaque tx est unique : regarde son hash. Connecte un pair pour voir le trafic réseau signé.",
-      eReward: "récompense minée  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "BLOC SCELLÉ #{n} · {t} tx · {h} ← {p}",
-      eSeal: "bloc #{n} scellé · {t} tx · {h} ← {p}", eVerify: "bloc #{n} vérifié — proposeur PoS ✓ · couverture ✓ · Merkle ✓", eState: "chaîne #{n} · époque {e} · {v} validateurs", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "vote de finalité · époque {n}", eEnv: "{m} de {s} · nonce {n} — ML-DSA ✓", eVoteCast: "NOTRE vote de finalité signé — époque {e} → #{h}",
-      eFinal: "bloc #{n} finalisé · irréversible", ePeer: "pair connecté · {n} pairs" },
+      eReward: "récompense minée  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "BLOC SCELLÉ #{n} · {t} tx · {h} ← {p} · {d} µs",
+      eSeal: "bloc #{n} scellé · {t} tx · {h} ← {p}", eVerify: "bloc #{n} vérifié — proposeur PoS ✓ · couverture ✓ · Merkle ✓", eState: "chaîne #{n} · époque {e} · {v} validateurs", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "vote de finalité · époque {n}", eEnv: "{m} de {s} · nonce {n} — ML-DSA ✓ {us} µs", eVoteCast: "NOTRE vote de finalité signé — époque {e} → #{h}",
+      eFinal: "bloc #{n} finalisé · irréversible", ePeer: "pair connecté · {n} pairs",
+      eSign: "ML-DSA-65 signée · enveloppe {m} · {b} o · {us} µs", ePersist: "snapshot disque · {k} états · {b} Ko · {ms} ms",
+      eElectLead: "slot #{s} — ÉLU leader ({v} validateurs) — scellement", eElectFall: "slot #{s} — proposeur fallback — scellement",
+      eElectObs: "slot #{s} — un autre validateur mène ({v}) — on observe", eElectBoot: "slot #{s} — bootstrap permissionless (personne n'a staké)",
+      eHashCk: "blake3 · {t} hashs calculés · {h} · {r} h/s", eStall: "⚠ fil UI bloqué {ms} ms",
+      cold: "Ton Mac reste froid par design : la sécurité vient des signatures ML-DSA et de l'enjeu — mesurés ci-dessus en µs — pas de la chaleur. (Bitcoin brûle ~175 TWh/an pour la même garantie.)" },
     es: { title: "Motor de consenso", live: "en vivo", slot: "SLOT", chain: "BLAKE3 · encadenado de integridad",
       hps: "hashes/s", computed: "calculados en vivo en tu dispositivo", verified: "encadenados en el bloque",
       pBeacon: "Beacon", pElect: "Elección de líder", pSeal: "Sellado", pSig: "Firma ML-DSA", pFinal: "Finalidad",
@@ -56,9 +66,14 @@
       note: "Proof-of-Stake: sin carrera de hashes, sin granja. Son BLAKE3 reales — la primitiva que hashea y enlaza cada bloque — calculados en vivo para probar integridad, no para ganar una carrera de potencia.",
       boot: "motor en línea — cripto real, eventos reales",
       solo: "Nodo solo — 0 pares. Aquí solo ves el trabajo de TU nodo (mina ~60 s → sella ~120 s). Los montos se parecen porque la emisión decrece despacio — pero cada tx es única: mira su hash. Conecta un par para ver el tráfico de red firmado.",
-      eReward: "recompensa minada  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "BLOQUE SELLADO #{n} · {t} tx · {h} ← {p}",
-      eSeal: "bloque #{n} sellado · {t} tx · {h} ← {p}", eVerify: "bloque #{n} verificado — proponente PoS ✓ · cobertura ✓ · Merkle ✓", eState: "cadena #{n} · época {e} · {v} validadores", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "voto de finalidad · época {n}", eEnv: "{m} de {s} · nonce {n} — ML-DSA ✓", eVoteCast: "NUESTRO voto de finalidad firmado — época {e} → #{h}",
-      eFinal: "bloque #{n} finalizado · irreversible", ePeer: "par conectado · {n} pares" },
+      eReward: "recompensa minada  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "BLOQUE SELLADO #{n} · {t} tx · {h} ← {p} · {d} µs",
+      eSeal: "bloque #{n} sellado · {t} tx · {h} ← {p}", eVerify: "bloque #{n} verificado — proponente PoS ✓ · cobertura ✓ · Merkle ✓", eState: "cadena #{n} · época {e} · {v} validadores", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "voto de finalidad · época {n}", eEnv: "{m} de {s} · nonce {n} — ML-DSA ✓ {us} µs", eVoteCast: "NUESTRO voto de finalidad firmado — época {e} → #{h}",
+      eFinal: "bloque #{n} finalizado · irreversible", ePeer: "par conectado · {n} pares",
+      eSign: "ML-DSA-65 firmada · sobre {m} · {b} B · {us} µs", ePersist: "snapshot a disco · {k} estados · {b} KB · {ms} ms",
+      eElectLead: "slot #{s} — líder ELEGIDO ({v} validadores) — sellando", eElectFall: "slot #{s} — proponente fallback — sellando",
+      eElectObs: "slot #{s} — lidera otro validador ({v}) — observando", eElectBoot: "slot #{s} — bootstrap permissionless (nadie ha stakeado)",
+      eHashCk: "blake3 · {t} hashes calculados · {h} · {r} h/s", eStall: "⚠ hilo UI bloqueado {ms} ms",
+      cold: "Tu Mac se mantiene frío por diseño: la seguridad viene de las firmas ML-DSA y del stake — medidos arriba en µs — no del calor. (Bitcoin quema ~175 TWh/año por la misma garantía.)" },
     ru: { title: "Движок консенсуса", live: "в эфире", slot: "СЛОТ", chain: "BLAKE3 · сцепление целостности",
       hps: "хэшей/с", computed: "вычислено вживую на вашем устройстве", verified: "сцеплены с блоком",
       pBeacon: "Маяк", pElect: "Выбор лидера", pSeal: "Запечатывание", pSig: "Подпись ML-DSA", pFinal: "Финальность",
@@ -68,9 +83,14 @@
       note: "Proof-of-Stake: без гонки хэшей и ферм. Это настоящие BLAKE3 — примитив, что хэширует и связывает каждый блок — вычисляемые вживую для доказательства целостности, а не ради гонки мощности.",
       boot: "движок в сети — реальная крипта, реальные события",
       solo: "Одиночный узел — 0 пиров. Здесь видна только работа ВАШЕГО узла (майнинг ~60 с → запечатывание ~120 с). Суммы похожи, потому что эмиссия убывает медленно — но каждая tx уникальна: смотрите её хэш. Подключите пира, чтобы увидеть подписанный сетевой трафик.",
-      eReward: "награда добыта  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "БЛОК ЗАПЕЧАТАН #{n} · {t} tx · {h} ← {p}",
-      eSeal: "блок #{n} запечатан · {t} tx · {h} ← {p}", eVerify: "блок #{n} проверен — PoS-предлагатель ✓ · покрытие ✓ · Merkle ✓", eState: "цепь #{n} · эпоха {e} · {v} валидаторов", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "голос финальности · эпоха {n}", eEnv: "{m} от {s} · nonce {n} — ML-DSA ✓", eVoteCast: "НАШ голос финальности подписан — эпоха {e} → #{h}",
-      eFinal: "блок #{n} финализирован · необратимо", ePeer: "пир подключён · {n} пиров" },
+      eReward: "награда добыта  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "БЛОК ЗАПЕЧАТАН #{n} · {t} tx · {h} ← {p} · {d} мкс",
+      eSeal: "блок #{n} запечатан · {t} tx · {h} ← {p}", eVerify: "блок #{n} проверен — PoS-предлагатель ✓ · покрытие ✓ · Merkle ✓", eState: "цепь #{n} · эпоха {e} · {v} валидаторов", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "голос финальности · эпоха {n}", eEnv: "{m} от {s} · nonce {n} — ML-DSA ✓ {us} мкс", eVoteCast: "НАШ голос финальности подписан — эпоха {e} → #{h}",
+      eFinal: "блок #{n} финализирован · необратимо", ePeer: "пир подключён · {n} пиров",
+      eSign: "ML-DSA-65 подписан · конверт {m} · {b} Б · {us} мкс", ePersist: "снапшот на диск · {k} состояний · {b} КБ · {ms} мс",
+      eElectLead: "слот #{s} — ИЗБРАН лидером ({v} валидаторов) — запечатываем", eElectFall: "слот #{s} — резервный предлагатель — запечатываем",
+      eElectObs: "слот #{s} — лидирует другой валидатор ({v}) — наблюдаем", eElectBoot: "слот #{s} — permissionless-бутстрап (никто не застейкал)",
+      eHashCk: "blake3 · {t} хэшей вычислено · {h} · {r} х/с", eStall: "⚠ поток UI завис на {ms} мс",
+      cold: "Ваш Mac остаётся холодным по замыслу: безопасность дают подписи ML-DSA и стейк — измерено выше в мкс — а не тепло. (Bitcoin сжигает ~175 ТВт·ч/год ради той же гарантии.)" },
     zh: { title: "共识引擎", live: "实时", slot: "时隙", chain: "BLAKE3 · 完整性链接",
       hps: "哈希/秒", computed: "在你的设备上实时计算", verified: "链接于区块",
       pBeacon: "信标", pElect: "出块者选举", pSeal: "封存", pSig: "ML-DSA 签名", pFinal: "最终性",
@@ -80,9 +100,14 @@
       note: "权益证明：没有哈希竞赛，没有矿场。这些是真实的 BLAKE3——哈希并链接每个区块的原语——实时计算以证明完整性，而非争夺算力。",
       boot: "引擎在线——真实密码学，真实事件",
       solo: "单节点 — 0 个对等节点。这里只显示你自己节点的工作（挖矿 ~60 秒 → 封存 ~120 秒）。金额相近是因为发行量缓慢递减——但每笔交易都是唯一的：看它的哈希。连接一个节点即可看到签名的网络流量。",
-      eReward: "已获挖矿奖励  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "区块已封存 #{n} · {t} 笔 · {h} ← {p}",
-      eSeal: "区块 #{n} 已封存 · {t} 笔 · {h} ← {p}", eVerify: "区块 #{n} 已验证 — PoS 出块者 ✓ · 覆盖 ✓ · Merkle ✓", eState: "链 #{n} · 纪元 {e} · {v} 个验证者", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "最终性投票 · 纪元 {n}", eEnv: "{m} 来自 {s} · nonce {n} — ML-DSA ✓", eVoteCast: "我们的最终性投票已签名 — 纪元 {e} → #{h}",
-      eFinal: "区块 #{n} 已最终确定 · 不可逆", ePeer: "节点已连接 · {n} 个节点" },
+      eReward: "已获挖矿奖励  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "区块已封存 #{n} · {t} 笔 · {h} ← {p} · {d} µs",
+      eSeal: "区块 #{n} 已封存 · {t} 笔 · {h} ← {p}", eVerify: "区块 #{n} 已验证 — PoS 出块者 ✓ · 覆盖 ✓ · Merkle ✓", eState: "链 #{n} · 纪元 {e} · {v} 个验证者", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "最终性投票 · 纪元 {n}", eEnv: "{m} 来自 {s} · nonce {n} — ML-DSA ✓ {us} µs", eVoteCast: "我们的最终性投票已签名 — 纪元 {e} → #{h}",
+      eFinal: "区块 #{n} 已最终确定 · 不可逆", ePeer: "节点已连接 · {n} 个节点",
+      eSign: "ML-DSA-65 已签名 · {m} 信封 · {b} 字节 · {us} µs", ePersist: "磁盘快照 · {k} 个状态 · {b} KB · {ms} ms",
+      eElectLead: "时隙 #{s} — 当选出块者（{v} 个验证者）— 封存中", eElectFall: "时隙 #{s} — 后备提议者 — 封存中",
+      eElectObs: "时隙 #{s} — 由其他验证者出块（{v}）— 观察中", eElectBoot: "时隙 #{s} — 无许可引导（尚无质押）",
+      eHashCk: "blake3 · 已计算 {t} 个哈希 · {h} · {r} 哈希/秒", eStall: "⚠ 界面线程卡顿 {ms} ms",
+      cold: "你的 Mac 保持凉爽是设计使然：安全来自 ML-DSA 签名与质押——见上方以 µs 计的实测——而非热量。（Bitcoin 为同样的保证每年烧掉约 175 TWh。）" },
     ja: { title: "コンセンサスエンジン", live: "ライブ", slot: "スロット", chain: "BLAKE3 · 整合性チェーン",
       hps: "ハッシュ/秒", computed: "あなたの端末でライブ計算", verified: "ブロックに連鎖",
       pBeacon: "ビーコン", pElect: "リーダー選出", pSeal: "封印", pSig: "ML-DSA 署名", pFinal: "ファイナリティ",
@@ -92,9 +117,14 @@
       note: "プルーフ・オブ・ステーク：ハッシュ競争もマイニングファームもありません。これは本物の BLAKE3 — 各ブロックをハッシュし連結する原語 — を整合性証明のためにライブ計算しています。力の競争のためではありません。",
       boot: "エンジン起動 — 本物の暗号、本物のイベント",
       solo: "ソロノード — ピア 0。ここにはあなたのノードの仕事だけが表示されます（採掘 ~60 秒 → 封印 ~120 秒）。発行量はゆっくり減るため金額は似ていますが、各 tx は一意です：ハッシュをご覧ください。ピアに接続すると署名済みネットワークトラフィックが見られます。",
-      eReward: "報酬を採掘  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "ブロック封印 #{n} · {t} tx · {h} ← {p}",
-      eSeal: "ブロック #{n} 封印 · {t} tx · {h} ← {p}", eVerify: "ブロック #{n} 検証済 — PoS 提案者 ✓ · カバレッジ ✓ · Merkle ✓", eState: "チェーン #{n} · エポック {e} · {v} 検証者", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "ファイナリティ投票 · エポック {n}", eEnv: "{m} ({s}) · nonce {n} — ML-DSA ✓", eVoteCast: "私たちのファイナリティ投票に署名 — エポック {e} → #{h}",
-      eFinal: "ブロック #{n} 確定 · 不可逆", ePeer: "ピア接続 · {n} ピア" },
+      eReward: "報酬を採掘  +{u} µQTA ({a} QTA) · tx {h}", eSealMine: "ブロック封印 #{n} · {t} tx · {h} ← {p} · {d} µs",
+      eSeal: "ブロック #{n} 封印 · {t} tx · {h} ← {p}", eVerify: "ブロック #{n} 検証済 — PoS 提案者 ✓ · カバレッジ ✓ · Merkle ✓", eState: "チェーン #{n} · エポック {e} · {v} 検証者", eTx: "tx {k} · +{u} µQTA · nonce {o} · {h}", eVote: "ファイナリティ投票 · エポック {n}", eEnv: "{m} ({s}) · nonce {n} — ML-DSA ✓ {us} µs", eVoteCast: "私たちのファイナリティ投票に署名 — エポック {e} → #{h}",
+      eFinal: "ブロック #{n} 確定 · 不可逆", ePeer: "ピア接続 · {n} ピア",
+      eSign: "ML-DSA-65 署名 · {m} エンベロープ · {b} B · {us} µs", ePersist: "ディスクスナップショット · {k} 状態 · {b} KB · {ms} ms",
+      eElectLead: "スロット #{s} — リーダーに当選（{v} 検証者）— 封印", eElectFall: "スロット #{s} — フォールバック提案者 — 封印",
+      eElectObs: "スロット #{s} — 別の検証者がリード（{v}）— 観測中", eElectBoot: "スロット #{s} — パーミッションレス・ブートストラップ（ステークなし）",
+      eHashCk: "blake3 · {t} ハッシュ計算済 · {h} · {r} h/s", eStall: "⚠ UI スレッド {ms} ms 停止",
+      cold: "Mac が熱くならないのは設計どおり：安全性は ML-DSA 署名とステーク（上の µs 実測）から来ます。熱からではありません。（Bitcoin は同じ保証のために年間約 175 TWh を燃やします。）" },
   };
   function tl(k: string): string { const l = locale(); return L[l]?.[k] ?? L.en[k] ?? k; }
   function fill(tpl: string, v: Record<string, string | number>): string {
@@ -119,6 +149,8 @@
   let hps = $state(0);              // hashs/seconde mesurés
   let totalHashes = $state(0);      // total calculés depuis l'ouverture
   let appVersion = $state("");      // version affichée — fin du doute sur le build
+  let signUs = $state(0);           // dernière signature ML-DSA-65 (µs, mesurée côté Rust)
+  let verifyUs = $state(0);         // dernier pipeline d'enveloppe vérifié (µs, mesuré côté Rust)
   const input = new Uint8Array(48); // 32 o (dernier hash bloc) + 8 o nonce + 8 o slot
   // Départ de nonce aléatoire (CSPRNG) : deux lancements ne produisent jamais
   // la même cascade — l'unicité du flux se vérifie d'un regard.
@@ -159,7 +191,7 @@
     // serait une LECTURE trackée de l'état qu'on écrit → boucle réactive
     // infinie (effect_update_depth_exceeded ; le bug historique des gels).
     const prev = untrack(() => lines);
-    lines = [{ id: ++seq, kind, time: stamp(), text }, ...prev].slice(0, 30);
+    lines = [{ id: ++seq, kind, time: stamp(), text }, ...prev].slice(0, 80);
   }
 
   let seenStats = $state(false);
@@ -207,6 +239,7 @@
   let timer: ReturnType<typeof setInterval> | null = null;
   let acc = 0;               // hashs depuis la dernière mesure
   let tMark = 0;             // timestamp de la dernière mesure hps
+  let lastCk = 0;            // dernier checkpoint blake3 poussé au journal (5 s)
   const BATCH = 128;         // hashs réels par lot (~1400/s mesurés) — léger, honnête
 
   function computeBatch() {
@@ -224,6 +257,16 @@
     acc += BATCH;
     const now = performance.now();
     if (now - tMark >= 1000) { hps = Math.round((acc * 1000) / (now - tMark)); acc = 0; tMark = now; }
+    // Checkpoint journal toutes les ~5 s : l'état RÉEL du cœur (total, digest
+    // courant, débit mesuré) coule dans le log — un vrai terminal de mineur.
+    if (now - lastCk >= 5000) {
+      lastCk = now;
+      push("hash", fill(tl("eHashCk"), {
+        t: totalHashes.toLocaleString("fr-FR"),
+        h: coreHash.slice(0, 12) + "…",
+        r: hps.toLocaleString("fr-FR"),
+      }));
+    }
   }
   function play() {
     // Le cœur tourne TOUJOURS quand la carte est à l'écran — même sous
@@ -248,13 +291,13 @@
         const u = p?.amount_micro ?? Math.round(a * 1e6);
         push("reward", fill(tl("eReward"), { u: u.toLocaleString("fr-FR"), a: a.toFixed(6), h: hshort(p?.tx_hash) }));
       });
-      const u2 = await listen<{ index: number; txs: number; mine: boolean; hash?: string; prev?: string }>("quanta://block-sealed", (e) => {
+      const u2 = await listen<{ index: number; txs: number; mine: boolean; hash?: string; prev?: string; seal_us?: number }>("quanta://block-sealed", (e) => {
         const p = e.payload; if (!p) return;
         // Le VRAI hash du bloc + son parent — l'ENCHAÎNEMENT (prev ← hash) est
         // visible ligne à ligne ; le cœur se re-chaîne dessus immédiatement.
         if (p.hash) { lastBlockHash = p.hash; height = Math.max(height, p.index); seedInput(); }
         const vars = { n: p.index, t: p.txs ?? 0, h: hshort(p.hash), p: hshort(p.prev) };
-        if (p.mine) push("sealMine", fill(tl("eSealMine"), vars));
+        if (p.mine) push("sealMine", fill(tl("eSealMine"), { ...vars, d: (p.seal_us ?? 0).toLocaleString("fr-FR") }));
         else {
           push("seal", fill(tl("eSeal"), vars));
           // Honnête : ces vérifications tournent réellement à la réception
@@ -275,9 +318,24 @@
       const u4 = await listen<any>("quanta://engine", (e) => {
         const p = e.payload; if (!p) return;
         if (p.kind === "envelope") {
-          push("env", fill(tl("eEnv"), { m: p.msg ?? "?", s: (p.sender ?? "") + "…", n: p.nonce ?? 0 }));
+          verifyUs = p.us ?? 0;
+          push("env", fill(tl("eEnv"), { m: p.msg ?? "?", s: (p.sender ?? "") + "…", n: p.nonce ?? 0, us: (p.us ?? 0).toLocaleString("fr-FR") }));
         } else if (p.kind === "vote") {
           push("voteCast", fill(tl("eVoteCast"), { e: p.epoch ?? 0, h: p.hash ?? "" }));
+        } else if (p.kind === "sign") {
+          // Durée réelle de la signature ML-DSA-65 de l'enveloppe sortante.
+          signUs = p.us ?? 0;
+          push("sign", fill(tl("eSign"), { m: p.msg ?? "?", b: p.bytes ?? 0, us: (p.us ?? 0).toLocaleString("fr-FR") }));
+        } else if (p.kind === "persist") {
+          // Battement 30 s : l'écriture disque réelle du snapshot d'état.
+          push("persist", fill(tl("ePersist"), { k: p.keys ?? 0, b: Math.max(1, Math.round((p.bytes ?? 0) / 1024)), ms: p.ms ?? 0 }));
+        } else if (p.kind === "elect") {
+          // Verdict réel de l'élection PoS de ce slot.
+          const key = p.verdict === "leader" ? "eElectLead"
+            : p.verdict === "fallback" ? "eElectFall"
+            : p.verdict === "bootstrap" ? "eElectBoot" : "eElectObs";
+          const kind = p.verdict === "leader" || p.verdict === "fallback" ? "electLead" : "elect";
+          push(kind, fill(tl(key), { s: (p.slot ?? 0).toLocaleString("fr-FR"), v: p.validators ?? 0 }));
         }
       });
       if (!alive) { u1(); u2(); u3(); u4(); return; }
@@ -290,6 +348,15 @@
     getVersion().then((v) => (appVersion = v)).catch(() => {});
     poll();
     const iv = setInterval(poll, 3000);
+    // Watchdog du fil UI : si le thread principal bloque > 900 ms, le terminal
+    // l'écrit LUI-MÊME, mesuré — un gel devient une donnée datée, pas un mystère.
+    let lastBeat = performance.now();
+    const wd = setInterval(() => {
+      const nowB = performance.now();
+      const gap = nowB - lastBeat;
+      lastBeat = nowB;
+      if (gap > 900) push("stall", fill(tl("eStall"), { ms: Math.round(gap) }));
+    }, 250);
     // pause hors écran / onglet caché (perf + honnêteté : rien ne tourne caché)
     const onVis = () => { visible = !document.hidden; play(); };
     document.addEventListener("visibilitychange", onVis);
@@ -298,15 +365,17 @@
       io = new IntersectionObserver((es) => { visible = es[0]?.isIntersecting ?? true; play(); }, { threshold: 0.01 });
       io.observe(rootEl);
     }
-    play();
-    // Graine visible immédiate — untrack : sans lui, lire coreHash ici rendrait
-    // l'effet dépendant d'un état réécrit toutes les 90 ms par computeBatch
-    // (→ re-création interval/observers 11×/s).
+    // untrack : play() lit `visible` ($state) — sans lui l'effet entier se
+    // démonterait/reconstruirait (interval de sondage + observers) à chaque
+    // bascule de visibilité. Idem la graine : lire coreHash rendrait l'effet
+    // dépendant d'un état réécrit toutes les 90 ms par computeBatch.
     untrack(() => {
+      play();
       if (!coreHash) { bumpNonce(); coreHash = bytesToHex(blake3(input)); }
     });
     return () => {
       clearInterval(iv);
+      clearInterval(wd);
       document.removeEventListener("visibilitychange", onVis);
       io?.disconnect();
       running = false; if (timer) clearInterval(timer); timer = null;
@@ -347,6 +416,13 @@
     {#if lastBlockHash}
       <div class="anchor">{tl("verified")} #{height.toLocaleString("fr-FR")} · {lastBlockHash.replace(/^0x/, "").slice(0, 16)}…</div>
     {/if}
+    {#if signUs || verifyUs}
+      <!-- Timings RÉELS mesurés côté Rust (Instant autour de l'opération). -->
+      <div class="crypt">
+        {#if signUs}<span>ML-DSA-65 sign <b>{signUs.toLocaleString("fr-FR")}</b> µs</span>{/if}
+        {#if verifyUs}<span>verify <b>{verifyUs.toLocaleString("fr-FR")}</b> µs</span>{/if}
+      </div>
+    {/if}
   </div>
 
   <!-- ── Pipeline de consensus (les vraies étapes) ── -->
@@ -379,13 +455,13 @@
     {#each lines as line (line.id)}
       <div class="ln ln-{line.kind}">
         <span class="lt">{line.time}</span>
-        <span class="lg" aria-hidden="true">{#if line.kind === "sealMine"}◆{:else if line.kind === "reward"}✦{:else if line.kind === "final"}●{:else if line.kind === "vote" || line.kind === "voteCast"}◇{:else if line.kind === "seal"}▪{:else if line.kind === "verify"}✓{:else if line.kind === "env"}⇄{:else if line.kind === "tx"}→{:else if line.kind === "peer"}↺{:else}›{/if}</span>
+        <span class="lg" aria-hidden="true">{#if line.kind === "sealMine"}◆{:else if line.kind === "reward"}✦{:else if line.kind === "final"}●{:else if line.kind === "vote" || line.kind === "voteCast"}◇{:else if line.kind === "seal"}▪{:else if line.kind === "verify"}✓{:else if line.kind === "env"}⇄{:else if line.kind === "tx"}→{:else if line.kind === "peer"}↺{:else if line.kind === "sign"}⬡{:else if line.kind === "persist"}▤{:else if line.kind === "electLead"}▲{:else if line.kind === "elect"}△{:else if line.kind === "hash"}#{:else if line.kind === "stall"}⚠{:else}›{/if}</span>
         <span class="lx">{line.text}</span>
       </div>
     {/each}
   </div>
 
-  <p class="note">{tl("note")}</p>
+  <p class="note">{tl("note")} {tl("cold")}</p>
 </div>
 
 <style>
@@ -431,6 +507,8 @@
   .rate { font-size: 12.5px; color: var(--txt); font-family: var(--font-display); }
   .rate b { color: var(--teal); font-variant-numeric: tabular-nums; }
   .anchor { margin-top: 8px; font-size: 11px; color: var(--dim); }
+  .crypt { margin-top: 6px; display: flex; gap: 18px; flex-wrap: wrap; font-size: 11.5px; color: #8791a3; }
+  .crypt b { color: var(--teal); font-variant-numeric: tabular-nums; }
 
   /* ── Pipeline ── */
   .pipe { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 4px; padding: 4px 22px 16px; }
@@ -455,7 +533,7 @@
   }
 
   /* ── Log ── */
-  .log { padding: 10px 14px; height: 200px; overflow: hidden; -webkit-mask-image: linear-gradient(180deg,#000 80%,transparent 100%); mask-image: linear-gradient(180deg,#000 80%,transparent 100%); }
+  .log { padding: 10px 14px; height: 340px; overflow: hidden; -webkit-mask-image: linear-gradient(180deg,#000 85%,transparent 100%); mask-image: linear-gradient(180deg,#000 85%,transparent 100%); }
   .ln { display: flex; align-items: baseline; gap: 10px; padding: 4px 8px; border-radius: 6px; font-size: 12px; line-height: 1.4; animation: lnin 0.24s ease-out; }
   .reduce .ln { animation: none; }
   @keyframes lnin { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
@@ -470,6 +548,13 @@
   .ln-env .lg { color: #7b849a; } .ln-env .lx { color: #a9b1c0; }
   .ln-voteCast .lg { color: var(--teal); } .ln-voteCast .lx { color: #dff6f3; font-weight: 600; }
   .ln-boot .lx, .ln-boot .lg { color: var(--dim); }
+  .ln-sign .lg { color: var(--teal); } .ln-sign .lx { color: #b8c2d4; }
+  .ln-persist .lg, .ln-persist .lx { color: #8791a3; }
+  .ln-electLead { background: rgba(20,200,184,0.06); border: 1px solid rgba(20,200,184,0.14); }
+  .ln-electLead .lg { color: var(--teal); } .ln-electLead .lx { color: #cdeee9; }
+  .ln-elect .lg { color: #7b849a; } .ln-elect .lx { color: #9aa3b2; }
+  .ln-hash .lg, .ln-hash .lx { color: #737d90; }
+  .ln-stall .lg { color: #f0b429; } .ln-stall .lx { color: #ffd97a; font-weight: 600; }
 
   .note { padding: 14px 22px 18px; font-size: 11.5px; color: var(--dim); line-height: 1.55; border-top: 1px solid var(--line); font-family: var(--font-display); max-width: 78ch; }
 

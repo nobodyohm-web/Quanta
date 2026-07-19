@@ -83,14 +83,33 @@ pub fn spawn_persistence(state: Arc<AppState>) {
 
             // ── 3. One transaction covers every dirty key ──
             if !dirty.is_empty() {
+                let bytes: usize = dirty.iter().map(|(_, j)| j.len()).sum();
+                let save_t = std::time::Instant::now();
                 let db_guard = state.db.lock().await;
                 if let Some(db) = db_guard.as_ref() {
                     match db.save_states(&dirty).await {
-                        Ok(()) => log::debug!(
-                            "◈ [Quanta] persisted {} dirty keys in 1 tx{}",
-                            dirty.len(),
-                            if should_exit { " (final save)" } else { "" }
-                        ),
+                        Ok(()) => {
+                            log::debug!(
+                                "◈ [Quanta] persisted {} dirty keys in 1 tx{}",
+                                dirty.len(),
+                                if should_exit { " (final save)" } else { "" }
+                            );
+                            // Télémétrie moteur : l'écriture disque RÉELLE du
+                            // snapshot (états modifiés, octets, durée mesurée) —
+                            // le battement de cœur 30 s du nœud, best-effort.
+                            if let Some(handle) = state.app_handle.read().await.as_ref() {
+                                use tauri::Emitter;
+                                let _ = handle.emit(
+                                    "quanta://engine",
+                                    serde_json::json!({
+                                        "kind": "persist",
+                                        "keys": dirty.len(),
+                                        "bytes": bytes,
+                                        "ms": save_t.elapsed().as_millis() as u64,
+                                    }),
+                                );
+                            }
+                        }
                         Err(e) => log::warn!("◈ [Quanta] persistence batch failed: {}", e),
                     }
                 }

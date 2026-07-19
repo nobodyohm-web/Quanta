@@ -384,6 +384,9 @@ fn verify_envelope_signature(env: &GossipEnvelope) -> Result<(), String> {
 /// 4. **Ed25519 signature verification** ← NEW
 /// 5. Payload dispatch
 pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
+    // Chronomètre télémétrie : durée réelle du pipeline ①-⑧ (JSON, ban, dedup,
+    // fraîcheur, rate, nonce, vérification ML-DSA) — µs mesurés, hors sécurité.
+    let pipeline_t = std::time::Instant::now();
     // ── DoS guard: reject oversized envelopes BEFORE parsing ──
     // 10 MB is well above our largest legitimate message (ChainSegment of 50
     // blocks ≈ a few hundred KB). Anything bigger is either malicious or buggy.
@@ -543,6 +546,7 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
                         "msg": kind,
                         "sender": short(&env.sender, 16),
                         "nonce": env.nonce,
+                        "us": pipeline_t.elapsed().as_micros() as u64,
                     }),
                 );
             }
