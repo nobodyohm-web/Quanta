@@ -99,7 +99,6 @@ pub async fn get_security_audit(state: tauri::State<'_, Arc<AppState>>) -> Resul
     let node = state.node.get_status().await;
     let has_id = state.crypto.lock().await.get_identity().is_ok();
     Ok(serde_json::json!({
-        "grade": cbom.security_grade(),
         "pq_pending": cbom.pq_migration_count(),
         "signing": cbom.signing,
         "key_exchange": cbom.key_exchange,

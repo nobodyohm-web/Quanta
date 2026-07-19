@@ -182,7 +182,6 @@ export interface SecurityAudit {
   symmetric?: SecurityAuditPrimitive;
   kdf?: SecurityAuditPrimitive;
   hashing?: SecurityAuditPrimitive;
-  grade: string;
 }
 
 // ─── Données vivantes (lues en boucle par les stores / composants) ──────────

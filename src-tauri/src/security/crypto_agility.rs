@@ -80,13 +80,4 @@ impl CryptoBOM {
             .count()
     }
 
-    /// Overall security grade
-    pub fn security_grade(&self) -> &'static str {
-        match self.pq_migration_count() {
-            0 => "A+ (Full PQ)",
-            1 => "A (Near PQ)",
-            2 => "B (Hybrid)",
-            _ => "C (Classical)",
-        }
-    }
 }
