@@ -186,7 +186,7 @@
     <!-- Brand moment -->
     <div class="hero">
       <div class="brand">
-        <QuantaMark size={34} tone="teal" />
+        <QuantaMark size={34} tone="ink" />
         <span class="wordmark">QUANTA</span>
       </div>
       <h1 class="headline">{@html t("welcome.headline")}</h1>

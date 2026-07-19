@@ -31,7 +31,7 @@
   <rect x="1.5" y="1.5" width="1021" height="1021" rx="227.5" fill="none" stroke="#0b4a50" stroke-opacity="0.10" stroke-width="3"/>
   <circle cx="687" cy="687" r="150" fill="url(#jewel)"/>
   <g transform="translate(64 64) scale(18)">
-    <circle cx="24" cy="24" r="15" stroke="url(#aur)" stroke-width="4.4"/>
-    <rect x="28.107" y="31.207" width="13" height="6.8" rx="1.6" transform="rotate(45 34.607 34.607)" fill="url(#aur)"/>
+    <circle cx="24" cy="24" r="15" stroke="#0a0a0b" stroke-width="4.4"/>
+    <rect x="28.107" y="31.207" width="13" height="6.8" rx="1.6" transform="rotate(45 34.607 34.607)" fill="#0BA5A0"/>
   </g>
 </svg>

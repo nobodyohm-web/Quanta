@@ -51,7 +51,7 @@
 
 <nav class="sidebar">
   <div class="sidebar-logo">
-    <QuantaMark size={26} tone="teal" {sealing} />
+    <QuantaMark size={26} tone="ink" {sealing} />
     <span class="logo-text">QUANTA</span>
   </div>
 

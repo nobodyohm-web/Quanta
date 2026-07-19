@@ -206,7 +206,7 @@
 {#if loading}
   <div class="load-screen">
     <div class="load-inner">
-      <div class="load-mark"><QuantaMark size={46} tone="teal" /></div>
+      <div class="load-mark"><QuantaMark size={46} tone="ink" /></div>
       <span class="load-logo">QUANTA</span>
       <span class="load-sub">{t('loading')}</span>
     </div>
@@ -268,7 +268,7 @@
   <div class="setup-screen">
     <div class="setup-box card">
       <div class="setup-brand">
-        <QuantaMark size={32} tone="teal" />
+        <QuantaMark size={32} tone="ink" />
         <div class="setup-brand-txt">
           <div class="setup-wordmark">QUANTA</div>
           <div class="setup-tag">{t('auth.unlock.tag')}</div>
