@@ -119,6 +119,10 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
                 serde_json::json!({
                     "amount": uqta_mined as f64 / p2p::ledger::MICRO as f64,
                     "kwh": kwh,
+                    // Matière unique pour le terminal : le montant EXACT en µQTA
+                    // et le hash BLAKE3 réel de la tx de récompense.
+                    "amount_micro": uqta_mined,
+                    "tx_hash": mining_tx.hash.clone(),
                 }),
             );
         }
@@ -277,8 +281,10 @@ async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
                     "index": b.index,
                     "txs": b.transactions.len(),
                     "mine": true,
-                    // Le VRAI hash du bloc que NOUS venons de sceller.
+                    // Le VRAI hash du bloc que NOUS venons de sceller + son
+                    // parent — l'enchaînement prev ← hash devient visible.
                     "hash": b.hash.clone(),
+                    "prev": b.prev_hash.clone(),
                 }),
             );
         }

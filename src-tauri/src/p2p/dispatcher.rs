@@ -1141,6 +1141,11 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
                         "to": to,
                         "amount": amount as f64 / crate::p2p::ledger::MICRO as f64,
                         "tx_type": format!("{:?}", tx_type),
+                        // Matière unique pour le terminal : µQTA exacts, nonce
+                        // de compte réel, hash BLAKE3 réel de la tx.
+                        "amount_micro": amount,
+                        "nonce": nonce,
+                        "hash": tx_id.clone(),
                     }),
                 );
             }
@@ -1252,6 +1257,7 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
                         // Le VRAI hash du bloc + son scelleur — la preuve
                         // affichable telle quelle dans le moteur de l'UI.
                         "hash": block.hash.clone(),
+                        "prev": block.prev_hash.clone(),
                         "miner": short(&block.miner, 16),
                     }),
                 );
