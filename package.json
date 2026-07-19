@@ -1,6 +1,6 @@
 {
   "name": "quanta",
-  "version": "3.9.0",
+  "version": "3.9.1",
   "description": "Sovereign peer-to-peer value network — no server, no cloud, no intermediary. Native coin: QUANTA.",
   "type": "module",
   "scripts": {

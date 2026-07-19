@@ -192,6 +192,17 @@ async fn ui_beat() {
     LAST_UI_BEAT.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Vrai UNE fois après un rechargement initié par le gardien — le frontend
+/// reprend alors la session sans écran de déverrouillage (le vault Rust est
+/// resté chaud ; l'auto-lock volontaire, lui, ne passe jamais par ici).
+static GUARDIAN_RELOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+async fn was_guardian_reload() -> bool {
+    GUARDIAN_RELOADED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[tauri::command]
 async fn create_identity(
     state: tauri::State<'_, Arc<AppState>>, display_name: String, password: String,
@@ -1484,14 +1495,25 @@ pub fn run() {
                     if last != 0 {
                         let silent = epoch_secs().saturating_sub(last);
                         if silent > 25 {
-                            ui_diag_write(&format!(
-                                "webview muet depuis {} s — rechargement automatique",
-                                silent
-                            ));
-                            // Réarme avant le reload pour ne pas boucler à 5 s.
+                            // Fenêtre repliée = suspension macOS NORMALE, pas un
+                            // webview mort — ne jamais recharger dans ce cas
+                            // (9 rechargements fantômes constatés le 19/07 au soir).
+                            let minimized = guard
+                                .get_webview_window("main")
+                                .and_then(|w| w.is_minimized().ok())
+                                .unwrap_or(false);
                             LAST_UI_BEAT.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
-                            if let Some(w) = guard.get_webview_window("main") {
-                                let _ = w.reload();
+                            if minimized {
+                                log::debug!("◈ [Gardien] fenêtre repliée — silence normal, pas de rechargement");
+                            } else {
+                                ui_diag_write(&format!(
+                                    "webview muet depuis {} s — rechargement automatique",
+                                    silent
+                                ));
+                                GUARDIAN_RELOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+                                if let Some(w) = guard.get_webview_window("main") {
+                                    let _ = w.reload();
+                                }
                             }
                         }
                     }
@@ -1500,7 +1522,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            ui_diag, ui_beat,
+            ui_diag, ui_beat, was_guardian_reload,
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
             get_recovery_phrase, restore_from_phrase,
             get_receive_address, validate_address, resolve_address,

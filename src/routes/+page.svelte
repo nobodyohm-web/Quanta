@@ -113,6 +113,22 @@
   async function init() {
     try {
       await new Promise(r => setTimeout(r, 400));
+      // Reprise après rechargement GARDIEN uniquement (webview ressuscité) :
+      // le vault Rust est resté chaud — pas d'écran de déverrouillage. Un
+      // auto-lock volontaire ou un vrai redémarrage ne passent jamais par ici.
+      const guardianReload = await invoke<boolean>("was_guardian_reload").catch(() => false);
+      if (guardianReload) {
+        try {
+          const a = await invoke<string>("get_public_key");
+          if (a) {
+            note("reprise", "session restaurée après rechargement gardien");
+            pk = a;
+            ready = true;
+            loading = false;
+            return;
+          }
+        } catch { /* vault verrouillé → flux normal */ }
+      }
       const has = await invoke<boolean>("check_identity");
       if (AUTOPILOT) {
         // Un seul essai, jamais de boucle : si le déverrouillage échoue (vault
