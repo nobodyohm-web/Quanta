@@ -21,7 +21,6 @@
 
   const earned = $derived(myReputation.value?.atn_earned ?? 0);
   const uptime = $derived(myReputation.value?.uptime_minutes ?? 0);
-  const peers = $derived(nodeStatus.value?.peer_count ?? 0);
   const mode = $derived(nodeStatus.value?.mode ?? "Actif");
 
   // Offre prouvable (get_chain_overview)
@@ -30,13 +29,16 @@
   const burnedQta = $derived(chainOverview.value?.total_burned_qta ?? 0);
   const circulatingQta = $derived(chainOverview.value?.total_supply_qta ?? 0);
   const pctToCap = $derived(chainOverview.value?.pct_to_cap ?? 0);
+  // Étiquette « % du plafond émis » — même formule que la ligne de la carte
+  // « Monnaie QUANTA », réutilisée aussi près du Total forgé (une seule
+  // source de vérité pour ce chiffre, affiché à deux endroits proches).
+  const capPctLabel = $derived(pctToCap < 0.01 && pctToCap > 0 ? '<0,01' : pctToCap.toFixed(2));
 
   // Émission RÉELLE (get_economy_stats — même fonction que le minage)
   const emissionPerHour = $derived(economyStats.value?.emission_per_hour ?? 0);
 
   // Finalité (gadget Casper-FFG vivant)
   const fin = $derived(finalityStatus.value);
-  const chainHeight = $derived(fin?.height ?? 0);
 
   // ── État de chargement honnête : « — » tant que rien n'est confirmé,
   //    ligne d'erreur discrète si un sondage échoue (agrégat des stores lus).
@@ -64,7 +66,7 @@
     if (!cv) return;
     const pct = Math.min(100, Math.max(0, pctToCap));
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = cv.clientWidth || 320, h = cv.clientHeight || 96;
+    const w = cv.clientWidth || 320, h = cv.clientHeight || 60;
     cv.width = w * dpr; cv.height = h * dpr;
     const ctx = cv.getContext("2d");
     if (!ctx) return;
@@ -110,62 +112,32 @@
   const epochPct = $derived(fin ? (fin.blocks_into_epoch / fin.epoch_length) * 100 : 0);
 
   // ── Explicatif honnête « comprendre ton minage » (dict local 6 langues,
-  //    même patron que ForgeEngine) — répond exactement à : c'est quoi,
-  //    qu'est-ce que ça prouve, est-ce gratuit. ─────────────────────────────
+  //    même patron que ForgeEngine) — une affirmation dense, pas un cours en
+  //    3 colonnes : ce que fait le nœud + ce qu'il reçoit en retour. ───────
   const EX: Record<string, Record<string, string>> = {
     en: {
-      understand: "Understanding your mining",
-      howK: "No hash race",
-      howV: "Quanta is Proof-of-Stake — not Bitcoin's brute-force race. No electricity is wasted, no mining farm needed. Any Mac or PC that stays online earns newly-minted QUANTA, on a schedule that shrinks toward a hard cap of 100M.",
-      workK: "What your node does",
-      workV: "It verifies ML-DSA signatures, validates and relays transactions, seals a block when it is elected leader, and votes on finality. Watch it happen live below — every line is a real event, nothing simulated.",
-      proofK: "What it proves",
-      proofV: "Every block is signed and chained. Once two-thirds of the stake vote, a block is finalized — irreversible forever (Casper-FFG). Your balance is a pure function of the chain that every node re-verifies. Nobody can invent it or erase it.",
+      understand: "How mining works",
+      point: "Your node verifies signatures, seals blocks and votes on their finality — in return it earns its exact share of the emission, computed by Shapley distribution and verified by the whole network.",
     },
     fr: {
-      understand: "Comprendre ton minage",
-      howK: "Pas de course au hash",
-      howV: "Quanta est en Proof-of-Stake — pas la course en force brute du Bitcoin. Aucune électricité gaspillée, aucune ferme de minage. N'importe quel Mac ou PC qui reste en ligne gagne des QUANTA fraîchement émis, selon une cadence qui décroît vers un plafond dur de 100M.",
-      workK: "Ce que fait ton nœud",
-      workV: "Il vérifie les signatures ML-DSA, valide et relaie les transactions, scelle un bloc quand il est élu leader, et vote la finalité. Regarde-le en direct ci-dessous — chaque ligne est un évènement réel, rien de simulé.",
-      proofK: "Ce que ça prouve",
-      proofV: "Chaque bloc est signé et chaîné. Dès que deux tiers de l'enjeu votent, un bloc est finalisé — irréversible à jamais (Casper-FFG). Ton solde est une fonction pure de la chaîne, revérifiée par chaque nœud. Personne ne peut l'inventer ni l'effacer.",
+      understand: "Comment marche ton minage",
+      point: "Ton nœud vérifie les signatures, scelle des blocs et vote leur finalité — en retour, il reçoit sa part exacte de l'émission, calculée par répartition de Shapley et vérifiée par tout le réseau.",
     },
     es: {
-      understand: "Entender tu minería",
-      howK: "Sin carrera de hashes",
-      howV: "Quanta usa Proof-of-Stake — no la carrera de fuerza bruta de Bitcoin. No se gasta electricidad, no hace falta una granja. Cualquier Mac o PC que siga en línea gana QUANTA recién emitidos, con una cadencia que decrece hacia un tope duro de 100M.",
-      workK: "Qué hace tu nodo",
-      workV: "Verifica firmas ML-DSA, valida y retransmite transacciones, sella un bloque cuando es elegido líder, y vota la finalidad. Míralo en vivo abajo — cada línea es un evento real, nada simulado.",
-      proofK: "Qué demuestra",
-      proofV: "Cada bloque va firmado y encadenado. Cuando dos tercios del stake votan, un bloque se finaliza — irreversible para siempre (Casper-FFG). Tu saldo es una función pura de la cadena que cada nodo re-verifica. Nadie puede inventarlo ni borrarlo.",
+      understand: "Cómo funciona tu minería",
+      point: "Tu nodo verifica firmas, sella bloques y vota su finalidad — a cambio, recibe su parte exacta de la emisión, calculada por distribución de Shapley y verificada por toda la red.",
     },
     ru: {
       understand: "Как работает твой майнинг",
-      howK: "Без гонки хэшей",
-      howV: "Quanta работает на Proof-of-Stake — без биткойновской гонки грубой силы. Электричество не тратится, ферма не нужна. Любой Mac или PC, оставаясь в сети, получает свежеэмитированные QUANTA по графику, убывающему к жёсткому потолку 100M.",
-      workK: "Что делает твой узел",
-      workV: "Он проверяет подписи ML-DSA, валидирует и ретранслирует транзакции, запечатывает блок, когда избран лидером, и голосует за финальность. Смотри вживую ниже — каждая строка реальна, ничего не симулировано.",
-      proofK: "Что это доказывает",
-      proofV: "Каждый блок подписан и связан. Как только две трети стейка проголосуют, блок финализирован — необратимо навсегда (Casper-FFG). Твой баланс — чистая функция цепи, перепроверяемая каждым узлом. Никто не может его выдумать или стереть.",
+      point: "Твой узел проверяет подписи, запечатывает блоки и голосует за их финальность — взамен он получает свою точную долю эмиссии, рассчитанную распределением Шепли и проверяемую всей сетью.",
     },
     zh: {
-      understand: "理解你的挖矿",
-      howK: "没有哈希竞赛",
-      howV: "Quanta 采用权益证明（PoS）——不是比特币的暴力竞赛。不浪费电，不需要矿场。任何保持在线的 Mac 或 PC 都能获得新铸造的 QUANTA，其发放速率逐步递减，趋向 1 亿的硬顶。",
-      workK: "你的节点在做什么",
-      workV: "它验证 ML-DSA 签名、校验并转发交易、在被选为出块者时封存区块，并对最终性投票。在下方实时观看——每一行都是真实事件，绝无模拟。",
-      proofK: "它证明了什么",
-      proofV: "每个区块都经签名并链接。一旦三分之二的权益投票，区块即被最终确定——永久不可逆（Casper-FFG）。你的余额是链的纯函数，由每个节点重新验证。没人能凭空捏造或抹除它。",
+      understand: "挖矿是如何运作的",
+      point: "你的节点验证签名、封存区块并为其最终性投票——作为回报，它获得由 Shapley 分配计算、并由全网验证的精确发行份额。",
     },
     ja: {
-      understand: "あなたのマイニングを理解する",
-      howK: "ハッシュ競争なし",
-      howV: "Quanta はプルーフ・オブ・ステーク——ビットコインの力任せの競争ではありません。電力の浪費も、マイニングファームも不要。オンラインを保つ Mac や PC は、1 億の上限へ向けて逓減するペースで新規発行の QUANTA を得ます。",
-      workK: "ノードがすること",
-      workV: "ML-DSA 署名を検証し、取引を検証・中継し、リーダーに選ばれたらブロックを封印し、ファイナリティに投票します。下でライブで見られます——各行は実イベントで、シミュレーションはありません。",
-      proofK: "それが証明すること",
-      proofV: "各ブロックは署名され連鎖します。ステークの三分の二が投票すると、ブロックは確定——永久に不可逆です（Casper-FFG）。残高はチェーンの純粋な関数で、各ノードが再検証します。誰も捏造も消去もできません。",
+      understand: "マイニングの仕組み",
+      point: "あなたのノードは署名を検証し、ブロックを封印し、そのファイナリティに投票します——見返りに、Shapley 分配で計算されネットワーク全体で検証された発行の正確な取り分を受け取ります。",
     },
   };
   function tx(key: string): string {
@@ -193,55 +165,25 @@
     <ForgeEngine />
   </div>
 
-  <!-- ── Comprendre ton minage (honnête, compact) ─────────────────── -->
+  <!-- ── Comprendre ton minage (honnête, compact — une affirmation) ── -->
   <div class="card understand">
     <div class="card-title">{tx('understand')}</div>
-    <div class="ex-grid">
-      <div class="ex">
-        <div class="ex-glyph" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/></svg>
-        </div>
-        <div class="ex-k">{tx('howK')}</div>
-        <div class="ex-v">{tx('howV')}</div>
-      </div>
-      <div class="ex">
-        <div class="ex-glyph" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 4-3 7-7 8-4-1-7-4-7-8V7l7-4z"/><path d="M9.5 12l1.8 1.8L15 10"/></svg>
-        </div>
-        <div class="ex-k">{tx('workK')}</div>
-        <div class="ex-v">{tx('workV')}</div>
-      </div>
-      <div class="ex">
-        <div class="ex-glyph" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></svg>
-        </div>
-        <div class="ex-k">{tx('proofK')}</div>
-        <div class="ex-v">{tx('proofV')}</div>
-      </div>
-    </div>
+    <p class="mine-p">{tx('point')}</p>
   </div>
 
-  <!-- ── Chiffres du nœud (zéro énergie) ───────────────────────────── -->
-  <div class="grid-4 stats-row">
-    <div class="card stat-card">
+  <!-- ── Chiffres du nœud — Total forgé domine (Peers/Height vivent déjà
+       sur l'écran Réseau), la rareté réseau est affichée à proximité ── -->
+  <div class="grid-2 stats-row">
+    <div class="card stat-card stat-hero">
       <div class="stat-label">{t('mine.hero.forged')}</div>
-      <div class="stat-val sm">{loaded ? `+${earned.toFixed(2)}` : '—'}</div>
-      <div class="stat-sub">≈ {(miningRate * 1440).toFixed(2)} {t('db.per_day')}</div>
+      <div class="stat-val lg">{loaded ? `+${earned.toFixed(2)}` : '—'} <span class="stat-unit">{TICKER}</span></div>
+      <div class="stat-sub">≈ {(miningRate * 1440).toFixed(2)} {TICKER} · {t('mine.hero.rate')}</div>
+      <div class="stat-sub dim">{loaded ? `${capPctLabel}${t('db.cap_issued')}` : '—'}</div>
     </div>
     <div class="card stat-card">
       <div class="stat-label">{t('db.uptime')}</div>
-      <div class="stat-val sm">{loaded ? formatUptime(uptime) : '—'}</div>
+      <div class="stat-val">{loaded ? formatUptime(uptime) : '—'}</div>
       <div class="stat-sub">{t('db.node_active')}</div>
-    </div>
-    <div class="card stat-card">
-      <div class="stat-label">{t('db.peers')}</div>
-      <div class="stat-val sm">{loaded ? peers : '—'}</div>
-      <div class="stat-sub">{t('db.connected')}</div>
-    </div>
-    <div class="card stat-card">
-      <div class="stat-label">{t('db.height')}</div>
-      <div class="stat-val sm">{loaded ? chainHeight.toLocaleString('fr-FR') : '—'}</div>
-      <div class="stat-sub">{t('db.blocks')}</div>
     </div>
   </div>
 
@@ -289,7 +231,7 @@
       <div class="card-title">{t('mine.emission.title')}</div>
       <div class="em-now">
         <span class="em-val">{emissionPerHour.toFixed(2)}</span>
-        <span class="em-unit">QUANTA/h · {t('mine.emission.network')}</span>
+        <span class="em-unit">{TICKER}/h · {t('mine.emission.network')}</span>
       </div>
       <canvas bind:this={curveCanvas} class="em-curve" aria-label={t('mine.emission.curveAria')}></canvas>
       <p class="mine-p em-explain">{t('mine.emission.explain')}</p>
@@ -304,8 +246,8 @@
         <div><div class="sup-k">{t('db.burned')}</div><div class="sup-v">{loaded ? fmtQ(burnedQta) : '—'}</div></div>
         <div><div class="sup-k">{t('db.circulating')}</div><div class="sup-v">{loaded ? fmtQ(circulatingQta) : '—'}</div></div>
       </div>
-      <div class="sup-bar"><div class="sup-fill" style="width:{Math.min(100, Math.max(pctToCap, pctToCap > 0 ? 0.5 : 0))}%;"></div></div>
-      <div class="sup-cap-line">{pctToCap < 0.01 && pctToCap > 0 ? '<0,01' : pctToCap.toFixed(2)}{t('db.cap_issued')} · {t('db.deflationary')}</div>
+      <div class="sup-bar"><div class="sup-fill" style="width:{Math.min(100, pctToCap)}%;"></div></div>
+      <div class="sup-cap-line">{capPctLabel}{t('db.cap_issued')} · {t('db.deflationary')}</div>
       <div class="sup-trust">
         <span>{t('db.no_authority')}</span>
         <span>{t('db.no_premine')}</span>
@@ -320,25 +262,17 @@
 
   .load-err { color: var(--color-text-2); font-size: var(--text-sm); margin-top: 4px; }
 
-  /* ── Comprendre ── */
+  /* ── Comprendre (une seule affirmation, plus de cours en 3 colonnes) ── */
   .understand { margin-bottom: 12px; }
-  .ex-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; margin-top: 16px; }
-  @media (max-width: 820px) { .ex-grid { grid-template-columns: 1fr; gap: 18px; } }
-  .ex-glyph {
-    width: 36px; height: 36px; border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    background: var(--cyan-dim); color: var(--color-accent);
-    margin-bottom: 12px;
-  }
-  .ex-k { font-size: var(--text-base); font-weight: 700; color: var(--color-text-0); margin-bottom: 6px; letter-spacing: -0.01em; }
-  .ex-v { font-size: var(--text-sm); color: var(--color-text-2); line-height: 1.55; }
 
   /* ── Forge (terminal) ── */
   .forge { margin-bottom: 12px; }
 
-  /* ── Stats row (zéro énergie) ── */
+  /* ── Stats row — Total forgé domine, Peers/Height vivent sur Réseau ── */
   .stats-row { margin-bottom: 12px; }
   .stat-card { padding: 18px 20px; }
+  .stat-hero .stat-sub.dim { color: var(--color-text-3); }
+  .stat-unit { font-size: var(--text-sm); color: var(--color-text-2); font-weight: 400; }
 
   .dual-row { margin-bottom: 12px; }
 
@@ -346,7 +280,7 @@
   .em-now { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
   .em-val { font-size: 32px; font-weight: 700; color: var(--color-text-0); letter-spacing: -0.02em; font-variant-numeric: tabular-nums lining-nums; }
   .em-unit { font-size: var(--text-sm); color: var(--color-text-2); }
-  .em-curve { width: 100%; height: 110px; display: block; }
+  .em-curve { width: 100%; height: 60px; display: block; }
   .em-explain { margin-top: 12px; }
 
   /* ── Finalité ── */

@@ -6,7 +6,7 @@
   import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { forge, seal, receive } from "./sound";
-  import { shortAddr } from "./quanta";
+  import { shortAddr, TICKER } from "./quanta";
 
   let { myAddress = "" } = $props<{ myAddress?: string }>();
 
@@ -43,7 +43,7 @@
         const a = e.payload?.amount ?? 0;
         if (a <= 0) return;
         forge();
-        push("mined", `+${a.toFixed(4)} QUANTA`, t("toast.mined"));
+        push("mined", `+${a.toFixed(4)} ${TICKER}`, t("toast.mined"));
       });
       const u2 = await listen<{ index: number; txs: number; mine: boolean }>(
         "quanta://block-sealed",
@@ -67,7 +67,7 @@
           receive();
           push(
             "received",
-            `+${p.amount.toFixed(2)} QUANTA`,
+            `+${p.amount.toFixed(2)} ${TICKER}`,
             `${t("toast.receivedFrom")} ${shortAddr(p.from)}`,
           );
         },
@@ -87,7 +87,13 @@
     {#each toasts as toast (toast.id)}
       <button class="toast t-{toast.kind}" onclick={() => dismiss(toast.id)}>
         <span class="toast-ic" aria-hidden="true">
-          {#if toast.kind === "mined"}⚡{:else if toast.kind === "sealed"}◈{:else}↓{/if}
+          {#if toast.kind === "mined"}
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M9 1L3 9h4l-1 6 7-8H8l1-6z"/></svg>
+          {:else if toast.kind === "sealed"}
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2l6 6-6 6-6-6z"/></svg>
+          {:else}
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v8M4.5 7l3.5 3.5L11.5 7"/></svg>
+          {/if}
         </span>
         <span class="toast-body">
           <span class="toast-title mono">{toast.title}</span>
@@ -128,7 +134,7 @@
   .toast-ic {
     width: 28px; height: 28px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 8px; font-size: 13px;
+    border-radius: 8px;
     background: var(--cyan-dim); color: var(--color-accent);
   }
   .t-received .toast-ic { background: rgba(22,163,74,0.1); color: var(--color-green); }
