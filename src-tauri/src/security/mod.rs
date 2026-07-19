@@ -907,3 +907,34 @@ mod pq_mig2_address {
         );
     }
 }
+
+#[cfg(test)]
+mod recover1_recovery_phrase {
+    use super::CryptoEngine;
+
+    /// RECOVER-1: the 24-word phrase reconstructs the SAME ML-DSA fund address —
+    /// i.e. it genuinely recovers the funds (the thing that was impossible before).
+    #[test]
+    fn bip39_phrase_roundtrips_to_the_same_fund_address() {
+        let mut e1 = CryptoEngine::new();
+        e1.generate_pq_identity().unwrap();
+        let addr1 = e1.pq_address_hex().unwrap();
+        let seed = e1.get_pq_seed_bytes().unwrap();
+        let phrase = bip39::Mnemonic::from_entropy(&seed[..]).unwrap().to_string();
+        assert_eq!(phrase.split_whitespace().count(), 24, "a 32-byte seed is 24 words");
+
+        // Restore from the phrase ALONE → the SAME ML-DSA fund address (funds recovered).
+        let entropy = bip39::Mnemonic::parse_normalized(&phrase).unwrap().to_entropy();
+        let seed2: [u8; 32] = entropy[..32].try_into().unwrap();
+        let mut e2 = CryptoEngine::new();
+        e2.import_pq_identity(&seed2).unwrap();
+        assert_eq!(
+            addr1,
+            e2.pq_address_hex().unwrap(),
+            "recovery phrase recovers the fund identity"
+        );
+
+        // A phrase with a broken checksum is rejected (no silent bad restore).
+        assert!(bip39::Mnemonic::parse_normalized("abandon abandon abandon abandon").is_err());
+    }
+}

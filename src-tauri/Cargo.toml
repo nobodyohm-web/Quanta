@@ -88,6 +88,10 @@ rand = "0.8"
 # ─── Encoding ───
 hex = "0.4"
 base64 = "0.22"
+# BIP39 mnemonic (RECOVER-1): the 32-byte ML-DSA fund seed ⇄ a 24-word recovery
+# phrase — the industry-standard wallet backup, far more robust to transcribe than
+# 64 hex chars. `default-features = false` + `std` keeps only the English wordlist.
+bip39 = { version = "2", default-features = false, features = ["std"] }
 
 # ─── Identifiers ───
 uuid = { version = "1", features = ["v4"] }
