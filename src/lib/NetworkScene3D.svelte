@@ -19,9 +19,28 @@
   //     rafraîchie aux événements ; DPR plafonné à 2 ; perte de contexte gérée
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { t } from "./i18n.svelte";
-  import { note } from "./diag";
+  import { note, alertDiag } from "./diag";
 
-  let { peerCount = 0 } = $props<{ peerCount?: number }>();
+  let { peerCount = 0, blocks = [], finalityFloor = 0 } = $props<{
+    peerCount?: number;
+    // Blocs récents RÉELS (du même sondage que la bande 2D) — nourrissent
+    // l'hélice de cristaux : la blockchain qui se forme sous les yeux.
+    blocks?: { index: number }[];
+    finalityFloor?: number;
+  }>();
+
+  // Pont props → boucle GL (variables simples, lues en rAF hors tracking).
+  let pendingCrystals: { index: number }[] = [];
+  let crystalsDirty = true;
+  let headTarget = -1;
+  let floorTarget = 0;
+  $effect(() => {
+    pendingCrystals = blocks ?? [];
+    crystalsDirty = true;
+    const h = pendingCrystals[0]?.index;
+    if (typeof h === "number") headTarget = h;
+  });
+  $effect(() => { floorTarget = finalityFloor ?? 0; });
 
   let canvas = $state<HTMLCanvasElement>();
   let wrap = $state<HTMLDivElement>();
@@ -41,10 +60,11 @@
   let lastEvtAt = 0;
 
   // Kinds (miroir exact du shader)
-  const K_AMBIENT = 0, K_OUT = 1, K_IN = 2, K_SEAL = 3, K_MINE = 4, K_RING = 5, K_PEER = 6;
+  const K_AMBIENT = 0, K_OUT = 1, K_IN = 2, K_SEAL = 3, K_MINE = 4, K_RING = 5, K_PEER = 6, K_BLOCK = 7;
 
   const MAX = 4096;          // slots de particules événementielles
   const AMBIENT = 900;       // courant du tore (présence du nœud)
+  const CRYSTALS = 64;       // hélice des blocs réels (34 affichés max)
   const FLOATS = 7;          // aSeed, aKind, aBirth, aTtl, aDir.xyz
 
   function pushSpawn(kind: number, n: number) {
@@ -91,6 +111,9 @@
     // définitif dans toutes les fermetures de l'effet.
     const cv = canvas, wr = wrap;
     if (!cv) return;
+    // Balise de cycle de vie (directe → ui-diag.log) : mount / première frame.
+    alertDiag("gl-mount", `gen=${glGen}`);
+    let firstFrame = true;
     const gl = cv.getContext("webgl2", { alpha: true, antialias: true, premultipliedAlpha: true });
     if (!gl) { glOk = false; note("gl", "webgl2 indisponible"); return; }
 
@@ -102,7 +125,9 @@
     layout(location=3) in float aTtl;
     layout(location=4) in vec3 aDir;
     uniform float uTime; uniform mat4 uVP; uniform float uDpr;
-    out float vKind; out float vLife; out float vSeed;
+    uniform float uHead;   // tête de chaîne animée (ressort CPU)
+    uniform float uFloor;  // plancher de finalité (index)
+    out float vKind; out float vLife; out float vSeed; out float vAux;
     // Tore de la marque : R majeur 1.0, r mineur 0.38, léger tilt.
     vec3 torusPoint(float u, float v) {
       float R = 1.0, r = 0.38;
@@ -116,6 +141,7 @@
       float life = (aTtl <= 0.0) ? 0.5 : clamp(age / aTtl, 0.0, 1.0);
       vec3 pos = vec3(0.0);
       float size = 2.0;
+      vAux = 0.0;
       int k = int(aKind + 0.5);
       if (k == 0) { // AMBIENT — courant du tore, dérive lente perpétuelle
         float u = aSeed*6.28318 + uTime*0.05 + hash(aSeed*7.0)*0.3;
@@ -131,7 +157,7 @@
         float e = 1.0 - pow(1.0 - life, 2.0);
         pos = aDir * (2.25*(1.0 - e) + 0.10);
         size = 2.6*(1.0 - life*0.35);
-      } else if (k == 3) { // SEAL — condensation en cristal puis envol en chaîne
+      } else if (k == 3) { // SEAL — condensation puis ABSORPTION dans le cristal naissant
         vec3 target = vec3(0.0, 0.62, 0.0);
         if (life < 0.45) {
           float e = 1.0 - pow(1.0 - life/0.45, 2.2);
@@ -139,9 +165,9 @@
           size = 2.2 + e*1.6;
         } else {
           float e2 = (life - 0.45)/0.55;
-          float ee = e2*e2;
-          pos = mix(target + aDir*0.06, vec3(2.6, 0.95, -0.4), ee);
-          size = 3.8*(1.0 - e2*0.7);
+          // Les particules s'effondrent DANS le bloc qui vient de naître.
+          pos = target + aDir*0.06*(1.0 - e2*e2);
+          size = 3.8*(1.0 - e2*0.85);
         }
       } else if (k == 4) { // MINE — fontaine de la récompense
         float g = life*life*2.6;
@@ -152,12 +178,31 @@
         float ang = aSeed*6.28318;
         pos = vec3(cos(ang)*(0.25 + e*1.9), -0.55, sin(ang)*(0.25 + e*1.9));
         size = 2.0*(1.0 - life*0.8);
-      } else { // PEER — sphère en orbite elliptique (pair réel)
+      } else if (k == 6) { // PEER — sphère en orbite elliptique (pair réel)
         float ang = aSeed*6.28318 + uTime*(0.05 + hash(aSeed*11.0)*0.03);
         float rad = 1.55 + hash(aSeed*5.0)*0.55;
         pos = vec3(cos(ang)*rad, sin(ang*0.7)*0.30, sin(ang)*rad*0.82);
         size = 7.0;
         life = 0.5;
+      } else { // BLOCK — cristal d'un bloc RÉEL : l'hélice de la chaîne
+        float t = uHead - aDir.x;          // 0 = le bloc qui vient d'être scellé
+        if (t < -0.5 || t > 34.0) {
+          pos = vec3(0.0); size = 0.0; life = 0.0;
+        } else {
+          float tc = max(t, 0.0);
+          float ang2 = 0.46*tc + 1.25;
+          float rad2 = 1.50 + tc*0.018;
+          vec3 hp = vec3(cos(ang2)*rad2, 0.58 - tc*0.150, sin(ang2)*rad2*0.85);
+          hp.y += sin(uTime*0.6 + aDir.x*0.7)*0.012;          // respiration
+          // Naît au POINT DE FORGE (où les particules du scellement convergent)
+          // puis glisse vers sa place dans l'hélice.
+          float pop = clamp((uTime - aBirth)/0.9, 0.0, 1.0);
+          float e3 = 1.0 - pow(1.0 - pop, 3.0);
+          pos = mix(vec3(0.0, 0.62, 0.0), hp, e3);
+          size = (24.0 - tc*0.42) * (0.6 + 0.4*e3);
+          life = (aDir.x <= uFloor + 0.5) ? 1.0 : 0.0;        // 1 = finalisé
+          vAux = 1.0 - clamp(tc/2.5, 0.0, 1.0);              // fraîcheur (éclat)
+        }
       }
       vKind = aKind; vLife = life; vSeed = aSeed;
       vec4 clip = uVP * vec4(pos, 1.0);
@@ -168,17 +213,40 @@
 
     const FS = `#version 300 es
     precision mediump float;
-    in float vKind; in float vLife; in float vSeed;
+    in float vKind; in float vLife; in float vSeed; in float vAux;
+    // highp EXPLICITE : le VS déclare uTime en highp (précision par défaut de
+    // son étage) — une précision différente ici = échec de LINK silencieux.
+    uniform highp float uTime;
     out vec4 frag;
     void main() {
-      vec2 d = gl_PointCoord - vec2(0.5);
-      float r = length(d);
-      if (r > 0.5) discard;
-      float soft = smoothstep(0.5, 0.12, r);
       int k = int(vKind + 0.5);
       vec3 teal = vec3(0.043, 0.647, 0.627);   // #0BA5A0
       vec3 deep = vec3(0.031, 0.498, 0.549);   // #087F8C
       vec3 ink  = vec3(0.114, 0.114, 0.122);   // #1d1d1f
+      if (k == 7) {
+        // Cristal de bloc : losange facetté en rotation lente.
+        // Finalisé (vLife=1) = pierre teal massive ; en attente = verre givré.
+        float ang = uTime*0.22 + vSeed*0.9;
+        mat2 R = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
+        vec2 p = R * (gl_PointCoord - vec2(0.5));
+        float d7 = abs(p.x) + abs(p.y);
+        if (d7 > 0.47) discard;
+        float body = smoothstep(0.47, 0.42, d7);
+        float rim  = smoothstep(0.36, 0.45, d7);
+        float facet = 0.72 + 0.28*smoothstep(-0.18, 0.22, p.x + p.y*0.6);
+        vec3 stone = deep;
+        vec3 frost = vec3(0.62, 0.86, 0.84);
+        vec3 col7 = mix(frost, stone, vLife);
+        col7 = mix(col7, vec3(0.078, 0.784, 0.722), vAux*0.65);   // éclat du neuf
+        float a7 = mix(0.42, 0.94, vLife);
+        a7 = (a7 + rim*0.25) * body * (0.85 + vAux*0.15);
+        frag = vec4(col7*facet*a7, a7);
+        return;
+      }
+      vec2 d = gl_PointCoord - vec2(0.5);
+      float r = length(d);
+      if (r > 0.5) discard;
+      float soft = smoothstep(0.5, 0.12, r);
       vec3 col; float a;
       if (k == 0)      { col = ink;  a = 0.10*soft; }
       else if (k == 3) { col = deep; a = (0.85 - vLife*0.5)*soft; }
@@ -197,7 +265,7 @@
       if (!s) return null;
       gl!.shaderSource(s, src); gl!.compileShader(s);
       if (!gl!.getShaderParameter(s, gl!.COMPILE_STATUS)) {
-        note("gl", `shader: ${gl!.getShaderInfoLog(s) ?? "?"}`.slice(0, 120));
+        alertDiag("gl-compile", `${type === gl!.VERTEX_SHADER ? "VS" : "FS"}: ${gl!.getShaderInfoLog(s) ?? "?"}`.slice(0, 200));
         return null;
       }
       return s;
@@ -207,14 +275,22 @@
     if (!vs || !fs) { glOk = false; return; }
     const prog = gl.createProgram()!;
     gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { glOk = false; return; }
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      // Un échec de link était SILENCIEUX (glOk=false et rien d'autre) —
+      // maintenant il se voit dans l'anneau et le rapport de gel suivant.
+      alertDiag("gl-link", (gl.getProgramInfoLog(prog) ?? "?").slice(0, 200));
+      glOk = false;
+      return;
+    }
     gl.useProgram(prog);
     const uTime = gl.getUniformLocation(prog, "uTime");
     const uVP = gl.getUniformLocation(prog, "uVP");
     const uDpr = gl.getUniformLocation(prog, "uDpr");
+    const uHead = gl.getUniformLocation(prog, "uHead");
+    const uFloor = gl.getUniformLocation(prog, "uFloor");
 
-    // ── VBO : ambiance + événements + pairs, un seul buffer ──
-    const TOTAL = AMBIENT + MAX + 64;
+    // ── VBO : ambiance + événements + pairs + cristaux de blocs, un seul buffer ──
+    const TOTAL = AMBIENT + MAX + 64 + CRYSTALS;
     const data = new Float32Array(TOTAL * FLOATS);
     for (let i = 0; i < AMBIENT; i++) {
       const o = i * FLOATS;
@@ -270,8 +346,40 @@
       gl!.bufferSubData(gl!.ARRAY_BUFFER, (AMBIENT + MAX) * stride, buf);
     }
 
+    // ── Cristaux : les blocs RÉELS de la chaîne (mis à jour au sondage) ──
+    const CRYSTAL_BASE = AMBIENT + MAX + 64;
+    const crystalBuf = new Float32Array(CRYSTALS * FLOATS);
+    let knownBirth = new Map<number, number>();
+    let headCur = -1e9; // saute à la première synchro (pas d'animation fantôme)
+    function syncCrystals(list: { index: number }[], now: number) {
+      crystalBuf.fill(0);
+      for (let i = 0; i < CRYSTALS; i++) {
+        const o = i * FLOATS;
+        const b = list[i];
+        if (!b || i >= 34) {
+          // Slot éteint (même pattern que les pairs).
+          crystalBuf[o + 1] = K_OUT; crystalBuf[o + 2] = -1e9; crystalBuf[o + 3] = 0.001;
+          continue;
+        }
+        let birth = knownBirth.get(b.index);
+        if (birth === undefined) {
+          // Nouveau pour la scène : le bloc de tête naît au point de forge ;
+          // les blocs d'historique (premier chargement) arrivent déjà posés.
+          birth = i === 0 && knownBirth.size > 0 ? now : now - 10;
+          knownBirth.set(b.index, birth);
+        }
+        crystalBuf[o] = b.index;          // aSeed → rotation propre
+        crystalBuf[o + 1] = K_BLOCK;
+        crystalBuf[o + 2] = birth;
+        crystalBuf[o + 3] = 0;            // éternel
+        crystalBuf[o + 4] = b.index;      // aDir.x → position dans l'hélice
+      }
+      if (knownBirth.size > 512) knownBirth = new Map(); // borne mémoire
+      gl!.bufferSubData(gl!.ARRAY_BUFFER, CRYSTAL_BASE * stride, crystalBuf);
+    }
+
     // ── Caméra : orbite douce, glisser pour tourner — variables simples ──
-    let yaw = 0.6, pitch = 0.42, dist = 4.6;
+    let yaw = 0.6, pitch = 0.36, dist = 4.6;
     let tYaw = yaw, tPitch = pitch;
     let dragging = false, lx = 0, ly = 0, userHold = 0;
     const onDown = (e: PointerEvent) => { dragging = true; lx = e.clientX; ly = e.clientY; };
@@ -287,8 +395,10 @@
 
     const proj = new Float32Array(16), vp = new Float32Array(16);
     function computeVP(w: number, h: number, now: number) {
-      if (now - userHold > 4000) tYaw += 0.0012; // reprise de l'orbite douce
+      if (now - userHold > 4000) tYaw += 0.0007; // orbite lente, hypnotique
       yaw += (tYaw - yaw) * 0.06; pitch += (tPitch - pitch) * 0.06;
+      // Respiration de la caméra : très lent travelling avant/arrière.
+      dist = 4.6 + Math.sin(now * 0.00022) * 0.24;
       const f = 1 / Math.tan(0.45), asp = w / h, near = 0.1, far = 30;
       proj.fill(0);
       proj[0] = f / asp; proj[5] = f; proj[10] = (far + near) / (near - far); proj[11] = -1;
@@ -352,15 +462,25 @@
         if (s.n <= 0) queue.shift();
       }
       syncPeers(peerCount);
+      // Cristaux : synchro sur nouveau sondage + ressort de tête de chaîne —
+      // à chaque bloc, TOUTE l'hélice glisse d'un cran, en douceur.
+      if (crystalsDirty) { crystalsDirty = false; syncCrystals(pendingCrystals, now); }
+      if (headTarget >= 0) {
+        if (Math.abs(headTarget - headCur) > 40) headCur = headTarget - 1.5;
+        headCur += (headTarget - headCur) * 0.035;
+      }
       computeVP(cv.width, cv.height, performance.now());
       gl!.clear(gl!.COLOR_BUFFER_BIT);
       gl!.uniform1f(uTime, now);
       gl!.uniform1f(uDpr, dpr);
+      gl!.uniform1f(uHead, headCur);
+      gl!.uniform1f(uFloor, floorTarget);
       gl!.uniformMatrix4fv(uVP, false, vp);
       gl!.drawArrays(gl!.POINTS, 0, TOTAL);
       // Battement de scène : la forensique par bloc lit cet horodatage —
       // « la scène était-elle VIVANTE au scellement ? » devient mesurable.
       (window as unknown as { __quantaSceneBeat?: number }).__quantaSceneBeat = performance.now();
+      if (firstFrame) { firstFrame = false; alertDiag("gl-frame1", `${Math.round(performance.now() - t0)}ms`); }
       // Coût de frame anormal → dans l'anneau (visible en forensique).
       const cost = performance.now() - t0;
       if (cost > 40) note("gl-frame", `${Math.round(cost)}ms`);
@@ -374,7 +494,9 @@
       try {
         frame();
       } catch (err) {
-        note("gl-err", String(err).slice(0, 120));
+        // Canal direct : une exception de frame évincée de l'anneau nous a
+        // déjà caché ce bug — maintenant elle arrive en clair dans ui-diag.log.
+        alertDiag("gl-frame-err", `${(err as Error)?.stack ?? String(err)}`.slice(0, 300));
         running = false;
         raf = 0;
       }
@@ -446,9 +568,10 @@
       <canvas bind:this={canvas} class="scene-canvas" aria-label={t('net3d.aria')}></canvas>
     {/key}
     <div class="scene-legend">
+      <span class="lg"><span class="sw sw-final"></span>{t('net3d.legFinal')}</span>
+      <span class="lg"><span class="sw sw-frost"></span>{t('net3d.legPending')}</span>
       <span class="lg"><span class="sw sw-evt"></span>{t('net3d.legendEvent')}</span>
       <span class="lg"><span class="sw sw-peer"></span>{peerCount} {peerCount === 1 ? t('wallet.peer') : t('wallet.peers')}</span>
-      <span class="lg"><span class="sw sw-amb"></span>{t('net3d.legendAmbient')}</span>
       <span class="lg lg-count">{evtCount.toLocaleString('fr-FR')} {t('net3d.evtReal')}{lastEvtAgo >= 0 ? ` · ${lastEvtAgo}s` : ''}</span>
     </div>
     {#if peerCount === 0}
@@ -481,7 +604,8 @@
   .sw { width: 8px; height: 8px; border-radius: 50%; }
   .sw-evt { background: var(--color-accent); }
   .sw-peer { background: var(--color-accent-hover); box-shadow: inset 0 0 0 2px #fff; border: 1px solid var(--color-accent-hover); }
-  .sw-amb { background: var(--color-text-3); opacity: 0.5; }
+  .sw-final { background: #087F8C; border-radius: 2px; transform: rotate(45deg); }
+  .sw-frost { background: rgba(11,165,160,0.28); border: 1px solid rgba(11,165,160,0.5); border-radius: 2px; transform: rotate(45deg); }
   .scene-solo {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, 92px);
     font-size: 12px; color: var(--color-text-3);

@@ -28,6 +28,7 @@
       hps: "hashes/s", computed: "computed live on your device", verified: "chained on block",
       pBeacon: "Beacon", pElect: "Leader election", pSeal: "Block seal", pSig: "ML-DSA signature", pFinal: "Finality",
       sHeight: "Height", sEpoch: "Epoch", sFloor: "Finalized", sVals: "Validators", sStake: "Staked", sPeers: "Peers",
+      sTotal: "Total hashes", sEvt: "Events/min", fAll: "All", fBlocks: "Blocks", fCrypto: "Crypto", fNetwork: "Network", fAlerts: "Alerts",
       youVal: "You are a validator — you can be elected to seal blocks.",
       becomeVal: "Stake ≥ 1 QUANTA to become a validator and seal blocks.",
       note: "Proof-of-Stake: no hash race, no mining farm. These are real BLAKE3 hashes — the primitive that hashes and links every block — computed live to prove integrity, not to win a power contest.",
@@ -45,6 +46,7 @@
       hps: "hashs/s", computed: "calculés en direct sur ton appareil", verified: "chaînés sur le bloc",
       pBeacon: "Beacon", pElect: "Élection du leader", pSeal: "Scellement", pSig: "Signature ML-DSA", pFinal: "Finalité",
       sHeight: "Hauteur", sEpoch: "Époque", sFloor: "Finalisé", sVals: "Validateurs", sStake: "Enjeu", sPeers: "Pairs",
+      sTotal: "Hashs totaux", sEvt: "Évènements/min", fAll: "Tout", fBlocks: "Blocs", fCrypto: "Crypto", fNetwork: "Réseau", fAlerts: "Alertes",
       youVal: "Tu es validateur — tu peux être élu pour sceller des blocs.",
       becomeVal: "Stake ≥ 1 QUANTA pour devenir validateur et sceller des blocs.",
       note: "Proof-of-Stake : pas de course au hash, pas de ferme de minage. Ce sont de vrais BLAKE3 — la primitive qui hache et lie chaque bloc — calculés en direct pour prouver l'intégrité, pas pour gagner une course à la puissance.",
@@ -62,6 +64,7 @@
       hps: "hashes/s", computed: "calculados en vivo en tu dispositivo", verified: "encadenados en el bloque",
       pBeacon: "Beacon", pElect: "Elección de líder", pSeal: "Sellado", pSig: "Firma ML-DSA", pFinal: "Finalidad",
       sHeight: "Altura", sEpoch: "Época", sFloor: "Finalizado", sVals: "Validadores", sStake: "Stake", sPeers: "Pares",
+      sTotal: "Hashes totales", sEvt: "Eventos/min", fAll: "Todo", fBlocks: "Bloques", fCrypto: "Cripto", fNetwork: "Red", fAlerts: "Alertas",
       youVal: "Eres validador — puedes ser elegido para sellar bloques.",
       becomeVal: "Haz stake ≥ 1 QUANTA para ser validador y sellar bloques.",
       note: "Proof-of-Stake: sin carrera de hashes, sin granja. Son BLAKE3 reales — la primitiva que hashea y enlaza cada bloque — calculados en vivo para probar integridad, no para ganar una carrera de potencia.",
@@ -79,6 +82,7 @@
       hps: "хэшей/с", computed: "вычислено вживую на вашем устройстве", verified: "сцеплены с блоком",
       pBeacon: "Маяк", pElect: "Выбор лидера", pSeal: "Запечатывание", pSig: "Подпись ML-DSA", pFinal: "Финальность",
       sHeight: "Высота", sEpoch: "Эпоха", sFloor: "Финализ.", sVals: "Валидаторы", sStake: "Стейк", sPeers: "Пиры",
+      sTotal: "Всего хэшей", sEvt: "Событий/мин", fAll: "Все", fBlocks: "Блоки", fCrypto: "Крипто", fNetwork: "Сеть", fAlerts: "Оповещения",
       youVal: "Вы валидатор — вас могут выбрать запечатывать блоки.",
       becomeVal: "Застейкайте ≥ 1 QUANTA, чтобы стать валидатором.",
       note: "Proof-of-Stake: без гонки хэшей и ферм. Это настоящие BLAKE3 — примитив, что хэширует и связывает каждый блок — вычисляемые вживую для доказательства целостности, а не ради гонки мощности.",
@@ -96,6 +100,7 @@
       hps: "哈希/秒", computed: "在你的设备上实时计算", verified: "链接于区块",
       pBeacon: "信标", pElect: "出块者选举", pSeal: "封存", pSig: "ML-DSA 签名", pFinal: "最终性",
       sHeight: "高度", sEpoch: "纪元", sFloor: "已最终确定", sVals: "验证者", sStake: "质押", sPeers: "节点",
+      sTotal: "哈希总数", sEvt: "事件/分", fAll: "全部", fBlocks: "区块", fCrypto: "加密", fNetwork: "网络", fAlerts: "警报",
       youVal: "你是验证者——可被选为出块者封存区块。",
       becomeVal: "质押 ≥ 1 QUANTA 即可成为验证者并封存区块。",
       note: "权益证明：没有哈希竞赛，没有矿场。这些是真实的 BLAKE3——哈希并链接每个区块的原语——实时计算以证明完整性，而非争夺算力。",
@@ -113,6 +118,7 @@
       hps: "ハッシュ/秒", computed: "あなたの端末でライブ計算", verified: "ブロックに連鎖",
       pBeacon: "ビーコン", pElect: "リーダー選出", pSeal: "封印", pSig: "ML-DSA 署名", pFinal: "ファイナリティ",
       sHeight: "高さ", sEpoch: "エポック", sFloor: "確定", sVals: "検証者", sStake: "ステーク", sPeers: "ピア",
+      sTotal: "総ハッシュ数", sEvt: "イベント/分", fAll: "すべて", fBlocks: "ブロック", fCrypto: "暗号", fNetwork: "ネットワーク", fAlerts: "アラート",
       youVal: "あなたは検証者です — 選ばれてブロックを封印できます。",
       becomeVal: "1 QUANTA 以上ステークすると検証者になれます。",
       note: "プルーフ・オブ・ステーク：ハッシュ競争もマイニングファームもありません。これは本物の BLAKE3 — 各ブロックをハッシュし連結する原語 — を整合性証明のためにライブ計算しています。力の競争のためではありません。",
@@ -180,7 +186,7 @@
   }
 
   // ── Flux d'évènements réels ──────────────────────────────────────
-  interface Line { id: number; kind: string; time: string; text: string; }
+  interface Line { id: number; kind: string; time: string; ts: number; text: string; }
   let lines = $state<Line[]>([]);
   let seq = 0;
   function stamp(): string {
@@ -192,7 +198,44 @@
     // serait une LECTURE trackée de l'état qu'on écrit → boucle réactive
     // infinie (effect_update_depth_exceeded ; le bug historique des gels).
     const prev = untrack(() => lines);
-    lines = [{ id: ++seq, kind, time: stamp(), text }, ...prev].slice(0, 80);
+    // Buffer 200 lignes (le tableau garde TOUT ; les filtres n'affectent que
+    // l'affichage — voir filteredLines plus bas).
+    lines = [{ id: ++seq, kind, time: stamp(), ts: Date.now(), text }, ...prev].slice(0, 200);
+  }
+
+  // ── Filtres d'affichage (le buffer `lines` reste complet) ────────
+  type FilterKey = "all" | "blocks" | "crypto" | "network" | "alerts";
+  let activeFilter = $state<FilterKey>("all");
+  const FILTERS: FilterKey[] = ["all", "blocks", "crypto", "network", "alerts"];
+  const FILTER_LABEL: Record<FilterKey, string> = { all: "fAll", blocks: "fBlocks", crypto: "fCrypto", network: "fNetwork", alerts: "fAlerts" };
+  function kindCategory(kind: string): FilterKey {
+    // blocs : le squelette de la chaîne (scellement, vérification, finalité,
+    // + la forensique par-scellement qui vient de quanta.lastSeal)
+    if (kind === "seal" || kind === "sealMine" || kind === "verify" || kind === "final" || kind === "forensic") return "blocks";
+    // crypto : la primitive brute (cœur BLAKE3, signatures ML-DSA, récompense minée)
+    if (kind === "hash" || kind === "sign" || kind === "reward") return "crypto";
+    // alertes : anomalies mesurées (fil UI bloqué)
+    if (kind === "stall") return "alerts";
+    // réseau : tout le reste — gossip, élection, votes, tx appliquées, persistance, boot
+    return "network";
+  }
+  const filteredLines = $derived(
+    activeFilter === "all" ? lines : lines.filter((l) => kindCategory(l.kind) === activeFilter),
+  );
+  // Compteur simple sur les 60 dernières secondes — recalculé au rythme des
+  // push() existants (lines change), AUCUN nouveau polling.
+  const eventsPerMin = $derived(lines.filter((l) => Date.now() - l.ts <= 60000).length);
+
+  // ── Copie d'une ligne au clic (presse-papiers + flash bref) ──────
+  let flashId = $state<number | null>(null);
+  let flashTimer: ReturnType<typeof setTimeout> | null = null;
+  function copyLine(line: Line) {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(`${line.time} ${line.text}`).catch(() => {});
+    }
+    if (flashTimer) clearTimeout(flashTimer);
+    flashId = line.id;
+    flashTimer = setTimeout(() => { flashId = null; flashTimer = null; }, 420);
   }
 
   let seenStats = $state(false);
@@ -372,7 +415,7 @@
       if (s && s !== seenStall) { seenStall = s; push("stall", s.slice(0, 220)); }
       try {
         const f = localStorage.getItem("quanta.lastSeal");
-        if (f && f !== seenSeal) { seenSeal = f; push("hash", f.slice(25, 245)); }
+        if (f && f !== seenSeal) { seenSeal = f; push("forensic", f.slice(25, 245)); }
       } catch { /* best-effort */ }
       // Garde-vie : si `visible` est resté bloqué à faux alors que le moteur
       // est réellement à l'écran (état stale d'observer), on répare et relance.
@@ -411,6 +454,7 @@
       document.removeEventListener("visibilitychange", onVis);
       io?.disconnect();
       running = false; if (timer) clearInterval(timer); timer = null;
+      if (flashTimer) { clearTimeout(flashTimer); flashTimer = null; }
     };
   });
 
@@ -482,12 +526,36 @@
     <div class="solo">{tl("solo")}</div>
   {/if}
 
+  <!-- ── Bandeau de stats — lecture d'un coup d'œil au-dessus du journal ── -->
+  <div class="tbar">
+    <span class="tb"><span class="tbk">{tl("sHeight")}</span><span class="tbv">{height.toLocaleString("fr-FR")}</span></span>
+    <span class="tb"><span class="tbk">{tl("sFloor")}</span><span class="tbv">{floor.toLocaleString("fr-FR")}</span></span>
+    <span class="tb"><span class="tbk">{tl("sVals")}</span><span class="tbv">{validators}</span></span>
+    <span class="tb"><span class="tbk">{tl("hps")}</span><span class="tbv">{hps.toLocaleString("fr-FR")}</span></span>
+    <span class="tb"><span class="tbk">{tl("sTotal")}</span><span class="tbv">{totalHashes.toLocaleString("fr-FR")}</span></span>
+    <span class="tb"><span class="tbk">{tl("sEvt")}</span><span class="tbv">{eventsPerMin}</span></span>
+  </div>
+
+  <!-- ── Filtres — l'affichage seul change, le buffer garde tout ── -->
+  <div class="chips" role="group" aria-label={tl("fAll")}>
+    {#each FILTERS as f}
+      <button type="button" class="chip" class:active={activeFilter === f} onclick={() => (activeFilter = f)}>{tl(FILTER_LABEL[f])}</button>
+    {/each}
+  </div>
+
   <!-- ── Flux d'évènements réels ── -->
   <div class="log" role="log">
-    {#each lines as line (line.id)}
-      <div class="ln ln-{line.kind}">
+    {#each filteredLines as line (line.id)}
+      <div
+        class="ln ln-{line.kind}"
+        class:flash={flashId === line.id}
+        role="button"
+        tabindex="0"
+        onclick={() => copyLine(line)}
+        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); copyLine(line); } }}
+      >
         <span class="lt">{line.time}</span>
-        <span class="lg" aria-hidden="true">{#if line.kind === "sealMine"}◆{:else if line.kind === "reward"}✦{:else if line.kind === "final"}●{:else if line.kind === "vote" || line.kind === "voteCast"}◇{:else if line.kind === "seal"}▪{:else if line.kind === "verify"}✓{:else if line.kind === "env"}⇄{:else if line.kind === "tx"}→{:else if line.kind === "peer"}↺{:else if line.kind === "sign"}⬡{:else if line.kind === "persist"}▤{:else if line.kind === "electLead"}▲{:else if line.kind === "elect"}△{:else if line.kind === "hash"}#{:else if line.kind === "stall"}⚠{:else}›{/if}</span>
+        <span class="lg" aria-hidden="true">{#if line.kind === "sealMine"}◆{:else if line.kind === "reward"}✦{:else if line.kind === "final"}●{:else if line.kind === "vote" || line.kind === "voteCast"}◇{:else if line.kind === "seal"}▪{:else if line.kind === "verify"}✓{:else if line.kind === "env"}⇄{:else if line.kind === "tx"}→{:else if line.kind === "peer"}↺{:else if line.kind === "sign"}⬡{:else if line.kind === "persist"}▤{:else if line.kind === "electLead"}▲{:else if line.kind === "elect"}△{:else if line.kind === "hash"}#{:else if line.kind === "forensic"}∴{:else if line.kind === "stall"}⚠{:else}›{/if}</span>
         <span class="lx">{line.text}</span>
       </div>
     {/each}
@@ -564,17 +632,48 @@
     border: 1px solid var(--line); border-radius: var(--radius-sm);
   }
 
+  /* ── Bandeau de stats (au-dessus du journal) ── */
+  .tbar {
+    display: flex; flex-wrap: wrap; gap: 2px 18px; padding: 10px 22px;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    background: #08090d;
+  }
+  .tb { display: inline-flex; align-items: baseline; gap: 6px; font-size: 11.5px; }
+  .tbk { color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--font-display); font-size: 10px; }
+  .tbv { color: var(--teal); font-weight: 700; font-variant-numeric: tabular-nums lining-nums; font-family: var(--font-display); }
+
+  /* ── Filtres (affichage seul — le buffer garde tout) ── */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0; }
+  .chip {
+    font-family: var(--font-display); font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--dim); background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 12px; cursor: pointer; transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .chip:hover { color: var(--txt); }
+  .chip.active { color: #06110f; background: var(--teal); border-color: var(--teal); }
+  .chip:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+
   /* ── Log ── */
-  .log { padding: 10px 14px; height: 340px; overflow: hidden; -webkit-mask-image: linear-gradient(180deg,#000 85%,transparent 100%); mask-image: linear-gradient(180deg,#000 85%,transparent 100%); }
-  .ln { display: flex; align-items: baseline; gap: 10px; padding: 4px 8px; border-radius: 6px; font-size: 12px; line-height: 1.4; animation: lnin 0.24s ease-out; }
+  .log { padding: 10px 14px; height: max(340px, 46vh); overflow: hidden; -webkit-mask-image: linear-gradient(180deg,#000 85%,transparent 100%); mask-image: linear-gradient(180deg,#000 85%,transparent 100%); }
+  .ln { display: flex; align-items: baseline; gap: 10px; padding: 4px 8px; border-radius: 6px; font-size: 12px; line-height: 1.4; animation: lnin 0.24s ease-out; cursor: pointer; }
+  .ln:hover { background: rgba(255,255,255,0.035); }
+  .ln:focus-visible { outline: 2px solid var(--teal); outline-offset: -1px; }
   .reduce .ln { animation: none; }
   @keyframes lnin { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-  .lt { color: #495060; flex-shrink: 0; }
+  /* Flash bref de confirmation de copie (presse-papiers). */
+  .ln.flash { animation: lnflash 0.42s ease; }
+  .reduce .ln.flash { animation: lnflash-reduce 0.6s ease; }
+  @keyframes lnflash { 0% { background: rgba(20,200,184,0.4); } 100% { background: transparent; } }
+  @keyframes lnflash-reduce { 0% { background: rgba(20,200,184,0.28); } 100% { background: transparent; } }
+  .lt { color: #495060; opacity: 0.62; flex-shrink: 0; font-variant-numeric: tabular-nums; }
   .lg { color: var(--dim); width: 12px; text-align: center; flex-shrink: 0; }
   .lx { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .ln-reward .lg, .ln-vote .lg { color: var(--teal); } .ln-reward .lx { color: #dff6f3; }
-  .ln-sealMine { background: rgba(20,200,184,0.09); border: 1px solid rgba(20,200,184,0.22); }
+  /* Hiérarchie : les lignes de scellement scandent la chaîne bloc par bloc. */
+  .ln-sealMine, .ln-seal { border-top: 2px solid rgba(20,200,184,0.4); margin-top: 7px; padding-top: 9px; }
+  .ln-sealMine { background: rgba(20,200,184,0.09); border-left: 1px solid rgba(20,200,184,0.22); border-right: 1px solid rgba(20,200,184,0.22); border-bottom: 1px solid rgba(20,200,184,0.22); }
   .ln-sealMine .lg { color: var(--teal); } .ln-sealMine .lx { color: #d6f5f1; font-weight: 600; }
+  .ln-seal .lg { color: var(--teal); } .ln-seal .lx { color: #c4cbd8; font-weight: 500; }
   .ln-final .lg { color: var(--teal); } .ln-final .lx { color: #cdeee9; }
   .ln-verify .lg { color: var(--teal); } .ln-verify .lx { color: #9aa3b2; }
   .ln-env .lg { color: #7b849a; } .ln-env .lx { color: #a9b1c0; }
@@ -586,6 +685,9 @@
   .ln-electLead .lg { color: var(--teal); } .ln-electLead .lx { color: #cdeee9; }
   .ln-elect .lg { color: #7b849a; } .ln-elect .lx { color: #9aa3b2; }
   .ln-hash .lg, .ln-hash .lx { color: #737d90; }
+  /* Forensique par-scellement (quanta.lastSeal) : discret, en retrait, italique. */
+  .ln-forensic { opacity: 0.72; }
+  .ln-forensic .lg, .ln-forensic .lx { color: #616a7d; font-style: italic; font-size: 11px; }
   .ln-stall .lg { color: #f0b429; } .ln-stall .lx { color: #ffd97a; font-weight: 600; }
 
   .note { padding: 14px 22px 18px; font-size: 11.5px; color: var(--dim); line-height: 1.55; border-top: 1px solid var(--line); font-family: var(--font-display); max-width: 78ch; }

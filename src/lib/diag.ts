@@ -109,6 +109,14 @@ export function lastStall(): string | null {
   try { return localStorage.getItem("quanta.lastStall"); } catch { return null; }
 }
 
+/** Alerte directe : anneau + envoi IMMÉDIAT au log Rust (`ui-diag.log`).
+ *  Pour les échecs uniques au boot (compile/link GL…) que l'éviction de
+ *  l'anneau rendait invisibles au rapport suivant. */
+export function alertDiag(kind: string, detail: string): void {
+  note(kind, detail);
+  try { void rawInvoke?.("ui_diag", { msg: `ALERTE ${kind}: ${detail}` }); } catch { /* best-effort */ }
+}
+
 /** Démarre la sonde (idempotent). À appeler une fois au boot du shell. */
 export function startDiag(): void {
   if (started) return;

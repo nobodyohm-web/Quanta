@@ -278,7 +278,7 @@
        (signature, vérification, scellement, minage, snapshot) ; les sphères
        en orbite sont les pairs mesurés. WebGL2 pur, zéro dépendance. -->
   <div class="card net-live">
-    <NetworkScene3D {peerCount} />
+    <NetworkScene3D {peerCount} {blocks} {finalityFloor} />
   </div>
 
   <!-- La Forge — QUANTA forgés en direct (rareté + possession) -->

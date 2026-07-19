@@ -541,6 +541,31 @@
     <div class="card w-panel">
       <div class="section-label">{t('wallet.stake.title')}</div>
 
+      <!-- Pourquoi staker — le rôle réel dans le protocole (pas de rendement) -->
+      <div class="stk-why-title">{t('stk.why.title')}</div>
+      <div class="stk-fn-grid">
+        <div class="stk-fn-card">
+          <svg class="stk-fn-ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2z"/></svg>
+          <div class="stk-fn-title">{t('stk.fn.seal.title')}</div>
+          <div class="stk-fn-desc">{t('stk.fn.seal.desc')}</div>
+        </div>
+        <div class="stk-fn-card">
+          <svg class="stk-fn-ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>
+          <div class="stk-fn-title">{t('stk.fn.vote.title')}</div>
+          <div class="stk-fn-desc">{t('stk.fn.vote.desc')}</div>
+        </div>
+        <div class="stk-fn-card">
+          <svg class="stk-fn-ic" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3.2v5.3c0 4.6-3 7.7-7 8.8-4-1.1-7-4.2-7-8.8V6.2L12 3z"/></svg>
+          <div class="stk-fn-title">{t('stk.fn.bond.title')}</div>
+          <div class="stk-fn-desc">{t('stk.fn.bond.desc')}</div>
+        </div>
+      </div>
+
+      <div class="stk-honesty">
+        <div class="stk-honesty-title">{t('stk.honesty.title')}</div>
+        <div class="stk-honesty-body">{t('stk.honesty.body')}</div>
+      </div>
+
       <div class="w-staked-row">
         <span>{t('wallet.stake.bonded')}</span>
         <span class="mono">
@@ -600,7 +625,7 @@
         </div>
       </div>
 
-      <div class="stk-warn">
+      <div class="stk-warn stk-warn-amber">
         <span class="stk-warn-ic">!</span>
         <span>{t('wallet.stake.warn')}</span>
       </div>
@@ -1000,6 +1025,31 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 11px; font-weight: 700;
   }
+  .stk-warn-amber { border-color: rgba(232,129,12,0.32); background: rgba(232,129,12,0.06); }
+  .stk-warn-amber .stk-warn-ic { background: var(--color-amber); }
+
+  /* Pourquoi staker — 3 fonctions réelles du protocole, compactes */
+  .stk-why-title {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--color-text-3); margin-bottom: 10px;
+  }
+  .stk-fn-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-bottom: var(--space-5); }
+  @media (max-width: 640px) { .stk-fn-grid { grid-template-columns: 1fr; } }
+  .stk-fn-card { padding: 12px; background: var(--color-bg-1); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+  .stk-fn-ic { color: var(--teal-700); margin-bottom: 6px; }
+  .stk-fn-title { font-size: 12.5px; font-weight: 600; color: var(--color-text-0); margin-bottom: 3px; }
+  .stk-fn-desc { font-size: 11.5px; color: var(--color-text-2); line-height: 1.45; }
+
+  /* Honnêteté — pas d'intérêt aujourd'hui, pièces déplacées jamais brûlées */
+  .stk-honesty {
+    padding: 10px 12px; background: var(--color-bg-2); border-radius: var(--radius-sm);
+    margin-bottom: var(--space-4);
+  }
+  .stk-honesty-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    color: var(--color-text-2); margin-bottom: 4px;
+  }
+  .stk-honesty-body { font-size: 12px; color: var(--color-text-1); line-height: 1.5; }
 
   /* Sections — le canevas respire entre les cartes */
   .w-section { margin: 20px 0 12px; }
