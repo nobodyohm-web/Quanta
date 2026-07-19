@@ -5,6 +5,7 @@
   // (Vite `?raw`) and rendered by a tiny inline parser — no external markdown
   // dependency, and the view can never drift from the file on disk.
   import source from "../../docs/WHITEPAPER.md?raw";
+  import { t } from "./i18n.svelte";
 
   // ── Tiny, dependency-free markdown → HTML (headings, paragraphs, lists,
   //    blockquotes, fenced code, **bold**, *italic*, `code`). Faithful only:
@@ -208,13 +209,13 @@
 <div class="page">
   <div class="wp-top">
     <div class="wp-lede">
-      <div class="section-label">Documentation</div>
-      <h1 class="page-title">Livre blanc</h1>
-      <div class="page-sub">Quanta — architecture, cryptographie et doctrine, fidèle au code.</div>
+      <div class="section-label">{t('wp.doc')}</div>
+      <h1 class="page-title">{t('wp.title')}</h1>
+      <div class="page-sub">{t('wp.subtitle')}</div>
     </div>
     <div class="wp-actions">
-      <span class="wp-read">≈&nbsp;{readMin}&nbsp;min de lecture</span>
-      <button class="btn btn-ghost btn-sm" onclick={download} title="Télécharger le fichier source (.md)">
+      <span class="wp-read">{t('wp.readTime').replace('{n}', String(readMin))}</span>
+      <button class="btn btn-ghost btn-sm" onclick={download} title={t('wp.downloadTitle')}>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
           <path d="M8 2v8m0 0L4.8 6.8M8 10l3.2-3.2" stroke-linecap="round" stroke-linejoin="round" />
           <path d="M2.6 12.6h10.8" stroke-linecap="round" />
@@ -229,7 +230,7 @@
     <article class="wp-body">{@html html}</article>
 
     <aside class="wp-toc">
-      <div class="section-label">Sommaire</div>
+      <div class="section-label">{t('wp.toc')}</div>
       <nav class="wp-toc-nav">
         {#each toc as s}
           <button

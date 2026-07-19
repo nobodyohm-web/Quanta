@@ -2,7 +2,7 @@
   import { listen } from "@tauri-apps/api/event";
   import QuantaMark from "./brand/QuantaMark.svelte";
   import { t, type TKey } from "./i18n.svelte";
-  import { myUsername } from "./stores.svelte";
+  import { myUsername, nodeStatus } from "./stores.svelte";
 
   let { activeView = 'wallet', onNavigate, nodeMode = 'Actif' } = $props<{
     activeView: string;
@@ -13,6 +13,15 @@
   // Pseudo unique @handle — store partagé (un seul sondage app-wide).
   $effect(() => myUsername.subscribe());
   const username = $derived(myUsername.value);
+
+  // État réel du nœud — le point de statut ne ment plus : teal quand vraiment
+  // en ligne ET connecté à au moins un pair, gris neutre en solo/démarrage
+  // (jamais de rouge alarmiste pour un simple solo, cf. .claude/rules).
+  $effect(() => nodeStatus.subscribe());
+  const peerCount = $derived(nodeStatus.value?.peer_count ?? 0);
+  const nodeConnected = $derived(
+    nodeStatus.loaded && (nodeStatus.value?.is_online ?? false) && peerCount > 0,
+  );
 
   // The nav mark pulses its seam when WE seal a real block (not during sync).
   let sealing = $state(false);
@@ -93,8 +102,13 @@
         @{username}
       </button>
     {/if}
-    <div class="node-status">
-      <div class="pulse-dot"></div>
+    <div
+      class="node-status"
+      title={nodeConnected
+        ? `${peerCount} ${peerCount === 1 ? t('wallet.peer') : t('wallet.peers')}`
+        : t('wallet.offline')}
+    >
+      <div class="pulse-dot" class:is-idle={!nodeConnected}></div>
       <div class="node-txt">
         <div class="node-k">{t('node.label')}</div>
         <div class="node-v">{MODE_KEY[nodeMode] ? t(MODE_KEY[nodeMode]) : nodeMode}</div>
@@ -110,4 +124,11 @@
   .node-txt { font-size: 11px; min-width: 0; }
   .node-k { color: var(--color-text-2); font-size: 10px; }
   .node-v { color: var(--color-green); font-weight: 600; }
+  /* Solo/starting = neutral, never a false "connected" green (nor an
+     alarmist red — being alone on the network is normal, not an error). */
+  .pulse-dot.is-idle {
+    background: var(--color-text-3);
+    animation: none;
+    box-shadow: none;
+  }
 </style>
