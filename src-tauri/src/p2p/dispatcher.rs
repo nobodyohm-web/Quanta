@@ -516,6 +516,39 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
     }
 
+    // ── Télémétrie moteur (« sous le capot ») : chaque enveloppe AUTHENTIFIÉE
+    // (pipeline ①-⑧ passé : taille, JSON, ban, dedup, fraîcheur, rate, nonce,
+    // signature ML-DSA) est annoncée à l'UI telle quelle — type réel, expéditeur
+    // réel, nonce réel. Ping/Pong tus (bruit de liveness). Best-effort, hors du
+    // chemin de sécurité.
+    {
+        let msg_kind = match &env.payload {
+            GossipMessage::Hello { .. } => Some("Hello"),
+            GossipMessage::NewBlock { .. } => Some("NewBlock"),
+            GossipMessage::BroadcastTx { .. } => Some("BroadcastTx"),
+            GossipMessage::RequestChain { .. } => Some("RequestChain"),
+            GossipMessage::ChainSegment { .. } => Some("ChainSegment"),
+            GossipMessage::PublishUsername { .. } => Some("PublishUsername"),
+            GossipMessage::FinalityVote { .. } => Some("FinalityVote"),
+            GossipMessage::ReportPeer { .. } => Some("ReportPeer"),
+            _ => None,
+        };
+        if let Some(kind) = msg_kind {
+            if let Some(handle) = state.app_handle.read().await.as_ref() {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "quanta://engine",
+                    serde_json::json!({
+                        "kind": "envelope",
+                        "msg": kind,
+                        "sender": short(&env.sender, 16),
+                        "nonce": env.nonce,
+                    }),
+                );
+            }
+        }
+    }
+
     match env.payload {
         GossipMessage::Hello {
             heads,
@@ -1216,6 +1249,10 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
                         "index": block.index,
                         "txs": block.transactions.len(),
                         "mine": false,
+                        // Le VRAI hash du bloc + son scelleur — la preuve
+                        // affichable telle quelle dans le moteur de l'UI.
+                        "hash": block.hash.clone(),
+                        "miner": short(&block.miner, 16),
                     }),
                 );
             }

@@ -247,6 +247,20 @@ async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
         state.node.gossip.write().await.mark_seen(&env.id);
         let _ = state.node.gossip_tx.send(env);
         log::info!("◈ [Finality] cast vote for epoch {}", vote.target.epoch);
+        // Télémétrie moteur : NOTRE vote de finalité réel (époque + checkpoint
+        // cible réels, signé ML-DSA) — best-effort, hors chemin de sécurité.
+        if let Some(handle) = state.app_handle.read().await.as_ref() {
+            use tauri::Emitter;
+            let _ = handle.emit(
+                "quanta://engine",
+                serde_json::json!({
+                    "kind": "vote",
+                    "epoch": vote.target.epoch,
+                    "height": vote.target.height,
+                    "hash": p2p::ledger::short(&vote.target.hash, 16),
+                }),
+            );
+        }
     }
 }
 
@@ -263,6 +277,8 @@ async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
                     "index": b.index,
                     "txs": b.transactions.len(),
                     "mine": true,
+                    // Le VRAI hash du bloc que NOUS venons de sceller.
+                    "hash": b.hash.clone(),
                 }),
             );
         }

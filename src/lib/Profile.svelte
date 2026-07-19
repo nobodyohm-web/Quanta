@@ -10,7 +10,7 @@
   let staked = $state(0);
   let trustScore = $state(0);
   let uptime = $state(0);
-  let mode = $state("Actif");
+  let mode = $state("Active");
   let peers = $state(0);
   let joined = $state("");
   let copied = $state(false);
@@ -117,8 +117,14 @@
     } catch {}
     try {
       const s = await invoke<any>("get_node_status");
-      mode = s?.mode ?? "Actif";
       peers = s?.peer_count ?? 0;
+    } catch {}
+    try {
+      // `mode` is NOT a field of NodeStatus — it lives in `get_node_mode`
+      // ({ mode: "Active"|"Guardian"|"Research", watts, label }). Reading it off
+      // get_node_status silently pinned the pill to the fallback forever.
+      const m = await invoke<any>("get_node_mode");
+      mode = m?.mode ?? "Active";
     } catch {}
     try {
       username = await invoke<string | null>("get_my_username");
@@ -158,8 +164,8 @@
     try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return d; }
   }
 
-  const modeColors: Record<string, string> = { 'Actif': 'tag-green', 'Guardian': 'tag-cyan', 'Recherche': 'tag-orange' };
-  const badgeLabel: Record<string, string> = { 'Actif': t('pf.mode.miner'), 'Guardian': t('pf.mode.guardian'), 'Recherche': t('pf.mode.research') };
+  const modeColors: Record<string, string> = { 'Active': 'tag-green', 'Guardian': 'tag-cyan', 'Research': 'tag-orange' };
+  const badgeLabel: Record<string, string> = { 'Active': t('pf.mode.miner'), 'Guardian': t('pf.mode.guardian'), 'Research': t('pf.mode.research') };
 </script>
 
 <div class="page">

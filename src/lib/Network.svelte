@@ -10,9 +10,6 @@
   let myPeerId = $state("");
   let isOnline = $state(false);
   let protocol = $state("");
-  let totalMined = $state(0);
-  let totalBurned = $state(0);
-  let supply = $state(0);
   let copied = $state(false);
 
   // ─── La Forge — blockchain en direct + rareté ──────────────────
@@ -103,12 +100,6 @@
       myPeerId = s?.peer_id ?? "";
       isOnline = s?.is_online ?? false;
       protocol = s?.protocol ?? "";
-    } catch {}
-    try {
-      const l = await invoke<any>("get_ledger_stats");
-      totalMined = l?.total_mined ?? 0;
-      totalBurned = l?.total_burned ?? 0;
-      supply = totalMined - totalBurned;
     } catch {}
     // NET-9/10: pull per-peer metrics every refresh tick
     try {
