@@ -243,6 +243,7 @@ const METHODS: &[&str] = &[
     "getfinalityinfo",
     "getvalidators",
     "getmempool",
+    "getmultisigaddress",
     "sendrawtransaction",
     "getwalletinfo",
     "getnewaddress",
@@ -330,6 +331,31 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 })
                 .collect();
             Ok(json!({ "count": list.len(), "validators": list }))
+        }
+
+        // MSIG-1: compute the address of an M-of-N multisig policy. Pure derivation
+        // from public keys — no secrets, no state — so it's a safe public method and
+        // lets a wallet/integrator show the shared account address before funding it.
+        "getmultisigaddress" => {
+            let pubkeys: Vec<String> = params
+                .get("pubkeys")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .ok_or((-32602, "missing 'pubkeys' array".to_string()))?;
+            let threshold = param_u64(params, "threshold")? as u32;
+            let mut canon = pubkeys;
+            canon.sort();
+            canon.dedup();
+            if canon.is_empty() || threshold == 0 || threshold as usize > canon.len() {
+                return Err((-32602, "invalid policy (need 1 ≤ threshold ≤ distinct keys)".into()));
+            }
+            let bytes = crate::security::multisig_address_bytes(&canon, threshold);
+            Ok(json!({
+                "address": address::encode(&bytes),
+                "address_hex": hex::encode(bytes),
+                "threshold": threshold,
+                "keys": canon.len(),
+            }))
         }
 
         // Pending (mempool) transactions not yet sealed into a block.
@@ -772,5 +798,23 @@ mod tests {
         let mp = dispatch(&state, "getmempool", &json!({})).await.unwrap();
         assert!(mp["transactions"].is_array());
         assert_eq!(mp["count"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn getmultisigaddress_matches_onchain_derivation() {
+        let state = test_state().await;
+        let keys = vec!["aa".to_string(), "bb".to_string(), "cc".to_string()];
+        let r = dispatch(&state, "getmultisigaddress", &json!({ "pubkeys": keys, "threshold": 2 }))
+            .await
+            .unwrap();
+        assert!(r["address"].as_str().unwrap().starts_with("qta1"));
+        assert_eq!(r["keys"], json!(3));
+        assert_eq!(r["threshold"], json!(2));
+        // Must equal the exact derivation the consensus authority check uses.
+        assert_eq!(r["address_hex"], json!(crate::security::multisig_address_hex(&keys, 2)));
+
+        // Invalid policy (threshold > distinct keys) → error.
+        let bad = dispatch(&state, "getmultisigaddress", &json!({ "pubkeys": keys, "threshold": 9 })).await;
+        assert_eq!(bad.unwrap_err().0, -32602);
     }
 }
