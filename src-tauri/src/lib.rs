@@ -72,10 +72,7 @@ impl UnlockGuard {
             let now = std::time::Instant::now();
             if now < t {
                 let secs = (t - now).as_secs().max(1);
-                return Err(format!(
-                    "Trop de tentatives — réessayez dans {} s",
-                    secs
-                ));
+                return Err(crate::commands::error::CmdError::RateLimited(secs).into());
             }
         }
         Ok(())

@@ -3,6 +3,7 @@
   import QuantaMark from "./brand/QuantaMark.svelte";
   import LanguageSelect from "./LanguageSelect.svelte";
   import { t } from "./i18n.svelte";
+  import { translateError } from "./errors";
   import { isUsernameAvailable, createIdentity, getRecoveryPhrase, claimUsername, restoreFromPhrase } from "./api";
 
   let {
@@ -95,7 +96,7 @@
       savedAck = false;
       step = "backup";
     } catch (e) {
-      err = (e as Error)?.toString() || t("welcome.errCreate");
+      err = translateError(e, t("welcome.errCreate"));
     } finally {
       loading = false;
     }
@@ -160,7 +161,7 @@
       restorePhrase = "";
       onCreated(id.public_key_hex);
     } catch (e) {
-      err = t("restore.errInvalid");
+      err = translateError(e, t("restore.errInvalid"));
     } finally {
       loading = false;
     }

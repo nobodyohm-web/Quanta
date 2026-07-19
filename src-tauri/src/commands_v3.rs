@@ -6,6 +6,7 @@
 //!   3. mettre à jour le registre local
 //!   4. broadcaster en gossip via `wrap_broadcast()`
 
+use crate::commands::error::CmdError;
 use crate::p2p;
 use crate::p2p::gossip::{GossipMessage, GossipRouter};
 use crate::AppState;
@@ -38,7 +39,7 @@ async fn my_address(state: &Arc<AppState>) -> Result<String, String> {
         .lock()
         .await
         .pq_address_hex()
-        .ok_or_else(|| "Identité ML-DSA absente".to_string())
+        .ok_or_else(|| CmdError::IdentityMissing.into())
 }
 
 /// La clé publique ML-DSA **révélée** (se lie à l'adresse via `lie()`).
@@ -48,7 +49,7 @@ async fn my_pq_key(state: &Arc<AppState>) -> Result<String, String> {
         .lock()
         .await
         .pq_identity_hex()
-        .ok_or_else(|| "Identité ML-DSA absente".to_string())
+        .ok_or_else(|| CmdError::IdentityMissing.into())
 }
 
 /// Wrap + signe + envoie une enveloppe gossip (pipeline B/C/D).
@@ -78,9 +79,7 @@ pub async fn claim_username(
     username: String,
 ) -> Result<serde_json::Value, String> {
     let name = p2p::username::normalize_username(&username);
-    p2p::username::validate_username(&name).map_err(|_| {
-        "Pseudo invalide : 3 à 20 caractères, minuscules / chiffres / _ , doit commencer par une lettre.".to_string()
-    })?;
+    p2p::username::validate_username(&name).map_err(|_| CmdError::InvalidUsername)?;
     // PQ-MIG-3B: the wallet identity `@pseudo` resolves to is the ML-DSA
     // **address** (a spendable account), and the claim is authenticated by the
     // revealed ML-DSA key bound to that address — not the Ed25519 transport key.
@@ -90,7 +89,7 @@ pub async fn claim_username(
     // Disponibilité (vue locale) : déjà pris par quelqu'un d'autre → refus.
     if let Some(existing) = state.node.usernames.read().await.get(&name) {
         if existing.owner_pk != addr {
-            return Err(format!("@{name} est déjà pris."));
+            return Err(CmdError::UsernameTaken.into());
         }
     }
 
@@ -165,7 +164,7 @@ pub async fn get_my_connection_code(
     // PQ-MIG-3B: the safety number is derived from the ML-DSA address, so it
     // matches `verify_connection` (which resolves @pseudo → address → code).
     let addr = my_address(&state).await?;
-    p2p::username::connection_code(&addr).ok_or_else(|| "Clé invalide".to_string())
+    p2p::username::connection_code(&addr).ok_or_else(|| CmdError::InvalidKey.into())
 }
 
 #[derive(Serialize)]
@@ -192,10 +191,10 @@ pub async fn verify_connection(
         .read()
         .await
         .resolve(&name)
-        .ok_or_else(|| format!("Pseudo introuvable : @{name}"))?;
-    let expected = p2p::username::connection_code(&pk).ok_or("Clé invalide")?;
+        .ok_or(CmdError::UsernameNotFound)?;
+    let expected = p2p::username::connection_code(&pk).ok_or(CmdError::InvalidKey)?;
     if p2p::username::normalize_code(&code) != p2p::username::normalize_code(&expected) {
-        return Err("Le code ne correspond pas à ce pseudo. Revérifiez auprès de la personne.".into());
+        return Err(CmdError::CodeMismatch.into());
     }
     Ok(VerifiedContact {
         username: name,

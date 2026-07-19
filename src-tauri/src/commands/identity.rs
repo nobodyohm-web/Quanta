@@ -4,6 +4,7 @@
 //! shared by these Tauri commands and the headless `quanta-node` daemon
 //! (`crate::node_runtime`).
 
+use crate::commands::error::CmdError;
 use crate::security;
 use crate::security::pq_vault::PQVault;
 use crate::AppState;
@@ -23,8 +24,8 @@ pub async fn create_identity(
     state: tauri::State<'_, Arc<AppState>>, display_name: String, password: String,
 ) -> Result<security::pq_vault::QuantaIdentity, String> {
     let display_name = display_name.trim().to_string();
-    if display_name.is_empty() { return Err("Le nom d'affichage est requis".into()); }
-    if password.len() < 8 { return Err("Mot de passe trop court (min. 8)".into()); }
+    if display_name.is_empty() { return Err(CmdError::DisplayNameRequired.into()); }
+    if password.len() < 8 { return Err(CmdError::WeakPassword.into()); }
 
     create_wallet(state.inner(), &display_name, &password).await
 }
@@ -40,10 +41,10 @@ pub(crate) async fn create_wallet(
 ) -> Result<security::pq_vault::QuantaIdentity, String> {
     let display_name = display_name.trim().to_string();
     if display_name.is_empty() {
-        return Err("Le nom d'affichage est requis".into());
+        return Err(CmdError::DisplayNameRequired.into());
     }
     if password.len() < 8 {
-        return Err("Mot de passe trop court (min. 8)".into());
+        return Err(CmdError::WeakPassword.into());
     }
     let mut engine = state.crypto.lock().await;
     let (id, pk_bytes, enc_sk, nonce) = PQVault::create_identity(&mut engine, &display_name, password)?;
@@ -142,7 +143,7 @@ pub async fn get_recovery_phrase(state: tauri::State<'_, Arc<AppState>>) -> Resu
     // Self-wiping 32-byte ML-DSA root seed (the fund-controlling secret).
     let seed = engine.get_pq_seed_bytes()?;
     let mnemonic = bip39::Mnemonic::from_entropy(&seed[..])
-        .map_err(|_| "Impossible de générer la phrase de récupération".to_string())?;
+        .map_err(|_| CmdError::RecoveryPhraseUnavailable)?;
     Ok(mnemonic.to_string())
 }
 
@@ -170,20 +171,20 @@ pub(crate) async fn restore_wallet(
 ) -> Result<security::pq_vault::QuantaIdentity, String> {
     let display_name = display_name.trim().to_string();
     if display_name.is_empty() {
-        return Err("Le nom d'affichage est requis".into());
+        return Err(CmdError::DisplayNameRequired.into());
     }
     if password.len() < 8 {
-        return Err("Mot de passe trop court (min. 8)".into());
+        return Err(CmdError::WeakPassword.into());
     }
     // Decode the phrase → the 32-byte fund seed (validates the checksum).
     let parsed = bip39::Mnemonic::parse_normalized(mnemonic.trim())
-        .map_err(|_| "Phrase de récupération invalide".to_string())?;
+        .map_err(|_| CmdError::InvalidRecoveryPhrase)?;
     let mut entropy = parsed.to_entropy();
     if entropy.len() != 32 {
         entropy.zeroize();
-        return Err("Phrase de récupération invalide (doit faire 24 mots)".into());
+        return Err(CmdError::RecoveryPhraseLength.into());
     }
-    let mut seed: [u8; 32] = entropy[..32].try_into().map_err(|_| "Phrase invalide".to_string())?;
+    let mut seed: [u8; 32] = entropy[..32].try_into().map_err(|_| CmdError::InvalidRecoveryPhrase)?;
     entropy.zeroize();
 
     let mut engine = state.crypto.lock().await;
@@ -248,7 +249,7 @@ pub async fn enable_biometric_unlock(
     let pq_json = dbref
         .load_state(PQ_IDENTITY_KEY)
         .await?
-        .ok_or("Identité PQ absente — déverrouillez d'abord une fois")?;
+        .ok_or(CmdError::UnlockFirst)?;
     let v: serde_json::Value =
         serde_json::from_str(&pq_json).map_err(|_| "PQ identity corrompue".to_string())?;
     let pq_pk = v["pq_public_key"].as_str().ok_or("PQ identity invalide")?;
@@ -262,10 +263,10 @@ pub async fn enable_biometric_unlock(
     let ed_key = PQVault::derive_ed_vault_key(&password, &kp.public_key)?;
     let pq_key = PQVault::derive_pq_vault_key(&password, pq_pk)?;
     let mut probe = security::cipher::decrypt(&kp.encrypted_secret_key, &ed_key, &kp.nonce)
-        .map_err(|_| "Mot de passe invalide".to_string())?;
+        .map_err(|_| CmdError::WrongPassword)?;
     probe.zeroize();
     let mut probe = security::cipher::decrypt(&pq_enc, &pq_key, &pq_nonce)
-        .map_err(|_| "Mot de passe invalide".to_string())?;
+        .map_err(|_| CmdError::WrongPassword)?;
     probe.zeroize();
 
     // Random KEK → Keychain (biometry-gated); KEK-wrapped derived keys → disk.
@@ -329,7 +330,7 @@ pub async fn unlock_biometric(
         .load_state(BIOMETRIC_WRAP_KEY)
         .await?
         .filter(|s| !s.is_empty())
-        .ok_or("Touch ID non activé")?;
+        .ok_or(CmdError::BiometricNotEnabled)?;
     let w: serde_json::Value =
         serde_json::from_str(&wrap_json).map_err(|_| "Wrap biométrique corrompu".to_string())?;
     let wrapped: Vec<u8> = serde_json::from_value(w["wrapped"].clone())
@@ -365,13 +366,13 @@ pub async fn unlock_biometric(
         Ok(k) => k,
         Err(_) => {
             state.unlock_guard.on_failure().await;
-            return Err("Déverrouillage refusé".to_string());
+            return Err(CmdError::UnlockRefused.into());
         }
     };
     if keys.len() != 64 {
         keys.zeroize();
         state.unlock_guard.on_failure().await;
-        return Err("Déverrouillage refusé".to_string());
+        return Err(CmdError::UnlockRefused.into());
     }
     let mut ed_key = [0u8; 32];
     let mut pq_key = [0u8; 32];
@@ -403,7 +404,7 @@ pub async fn unlock_biometric(
         Err(_) => {
             state.unlock_guard.on_failure().await;
             // Opaque: don't reveal which layer failed.
-            Err("Déverrouillage refusé".to_string())
+            Err(CmdError::UnlockRefused.into())
         }
     }
 }

@@ -7,6 +7,7 @@
   import LanguageSelect from "./LanguageSelect.svelte";
   import QuantaMark from "./brand/QuantaMark.svelte";
   import { t } from "./i18n.svelte";
+  import { translateError } from "./errors";
 
   // Reachable steps: identity creation lives entirely in Welcome.svelte (step
   // "welcome"); this gate only unlocks an existing vault ("unlock") or prompts
@@ -57,8 +58,11 @@
       await proceedAfterAuth();
     } catch (e) {
       // Cancel/backoff → stay on the password form, show the reason quietly.
-      const msg = String(e);
-      if (!msg.includes("refusé")) err = msg.replace(/^Error: /, "");
+      // A refused/cancelled Touch ID (`err.unlockRefused`, or the raw "Touch ID
+      // refusé" from the Keychain) stays silent; a real reason (e.g. the
+      // brute-force backoff `err.rateLimited:n`) is shown, translated.
+      const raw = String(e).replace(/^Error:\s*/, "");
+      if (raw !== "err.unlockRefused" && !raw.includes("refusé")) err = translateError(e);
     } finally { bioBusy = false; }
   }
 
@@ -79,7 +83,7 @@
       const id = await unlockIdentity(pass);
       pk = id.public_key_hex;
       await proceedAfterAuth();
-    } catch { err = "Mot de passe invalide"; }
+    } catch (e) { err = translateError(e, t("err.wrongPassword")); }
   }
 
   // Une fois l'identité prête : si l'utilisateur n'a pas encore de @pseudo,
@@ -125,7 +129,7 @@
       await apiClaimUsername(u);
       onReady(pk);
     } catch (e) {
-      usernameErr = String(e);
+      usernameErr = translateError(e);
     } finally {
       claimingUsername = false;
     }

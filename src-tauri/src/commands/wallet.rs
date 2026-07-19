@@ -4,6 +4,7 @@
 //! every user-authored tx leg propagates identically (AUDIT-TX-2).
 
 use crate::broadcast_signed_tx;
+use crate::commands::error::CmdError;
 use crate::p2p;
 use crate::AppState;
 use std::sync::Arc;
@@ -48,11 +49,11 @@ pub async fn get_my_reputation(state: tauri::State<'_, Arc<AppState>>) -> Result
 /// Rejects negatives, NaN, infinities, and values that would overflow u64.
 fn quanta_to_uqta(amount: f64) -> Result<u64, String> {
     if !amount.is_finite() || amount < 0.0 {
-        return Err("Montant invalide".into());
+        return Err(CmdError::InvalidAmount.into());
     }
     let uqta_f = amount * p2p::ledger::MICRO as f64;
     if uqta_f >= u64::MAX as f64 {
-        return Err("Montant trop grand".into());
+        return Err(CmdError::AmountTooLarge.into());
     }
     Ok(uqta_f.round() as u64)
 }
@@ -73,9 +74,9 @@ pub async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String,
     // address is rejected here instead of sending to a valid-looking wrong account.
     let to = crate::security::address::parse(&to)
         .map(hex::encode)
-        .map_err(|_| "Adresse destinataire invalide".to_string())?;
+        .map_err(|_| CmdError::InvalidRecipient)?;
     if amount <= 0.0 || amount > 1_000_000.0 {
-        return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
+        return Err(CmdError::AmountOutOfRange.into());
     }
     let uqta = quanta_to_uqta(amount)?;
     let crypto = state.crypto.lock().await;
@@ -84,12 +85,14 @@ pub async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String,
     // sender is the ML-DSA **primary public key**. `to` is already an address (64-hex).
     let from = crypto
         .pq_address_hex()
-        .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
+        .ok_or(CmdError::IdentityMissing)?;
     let sender_pk = crypto
         .pq_identity_hex()
-        .ok_or("Identité ML-DSA absente")?;
+        .ok_or(CmdError::IdentityMissing)?;
     let mut ledger = state.node.ledger.write().await;
-    let (tx, burn_tx, burn_uqta) = ledger.transfer_with_burn(&from, &to, uqta, &crypto)?;
+    let (tx, burn_tx, burn_uqta) = ledger
+        .transfer_with_burn(&from, &to, uqta, &crypto)
+        .map_err(CmdError::from_ledger)?;
     let net_uqta = uqta - burn_uqta;
     drop(ledger);
     // REPUT-ID-1: the reputation mirror is keyed by the ML-DSA **address** (the
@@ -130,16 +133,16 @@ pub async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String,
 #[tauri::command]
 pub async fn ledger_stake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Result<serde_json::Value, String> {
     if amount <= 0.0 || amount > 1_000_000.0 {
-        return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
+        return Err(CmdError::AmountOutOfRange.into());
     }
     let uqta = quanta_to_uqta(amount)?;
     let crypto = state.crypto.lock().await;
     let from = crypto
         .pq_address_hex()
-        .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
+        .ok_or(CmdError::IdentityMissing)?;
     let sender_pk = crypto.pq_identity_hex().ok_or("Identité ML-DSA absente")?;
     let mut ledger = state.node.ledger.write().await;
-    let tx = ledger.stake_tx(&from, uqta, &crypto)?;
+    let tx = ledger.stake_tx(&from, uqta, &crypto).map_err(CmdError::from_ledger)?;
     drop(ledger);
     broadcast_signed_tx(&state, &crypto, &sender_pk, &tx).await;
     log::info!("◈ [Stake] Broadcast {} QUANTA → bonded at next seal", amount);
@@ -153,16 +156,16 @@ pub async fn ledger_stake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -
 #[tauri::command]
 pub async fn ledger_unstake(state: tauri::State<'_, Arc<AppState>>, amount: f64) -> Result<serde_json::Value, String> {
     if amount <= 0.0 || amount > 1_000_000.0 {
-        return Err("Montant invalide (0 < x ≤ 1 000 000)".into());
+        return Err(CmdError::AmountOutOfRange.into());
     }
     let uqta = quanta_to_uqta(amount)?;
     let crypto = state.crypto.lock().await;
     let from = crypto
         .pq_address_hex()
-        .ok_or("Identité ML-DSA absente (impossible de dériver l'adresse de valeur)")?;
+        .ok_or(CmdError::IdentityMissing)?;
     let sender_pk = crypto.pq_identity_hex().ok_or("Identité ML-DSA absente")?;
     let mut ledger = state.node.ledger.write().await;
-    let tx = ledger.unstake_tx(&from, uqta, &crypto)?;
+    let tx = ledger.unstake_tx(&from, uqta, &crypto).map_err(CmdError::from_ledger)?;
     drop(ledger);
     broadcast_signed_tx(&state, &crypto, &sender_pk, &tx).await;
     log::info!("◈ [Unstake] Broadcast {} QUANTA → unbonding at next seal", amount);

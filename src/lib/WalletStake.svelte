@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from "./i18n.svelte";
+  import { translateError } from "./errors";
   import { blocksToEta, TICKER } from "./quanta";
   import { ledgerStake, ledgerUnstake } from "./api";
   import { walletOverview as walletStore, recentTxs as recentTxsStore } from "./stores.svelte";
@@ -35,7 +36,7 @@
       stakeAmount = "";
       await refreshWallet();
     } catch (e: unknown) {
-      onFeedback({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+      onFeedback({ ok: false, msg: translateError(e) });
     } finally { stakeBusy = false; }
   }
 
@@ -52,7 +53,7 @@
       unstakeAmount = "";
       await refreshWallet();
     } catch (e: unknown) {
-      onFeedback({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+      onFeedback({ ok: false, msg: translateError(e) });
     } finally { unstakeBusy = false; }
   }
 

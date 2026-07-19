@@ -2,6 +2,7 @@
   import Identicon from "./Identicon.svelte";
   import EmptyState from "./EmptyState.svelte";
   import { t } from "./i18n.svelte";
+  import { translateError } from "./errors";
   import { FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
   import { requestSend } from "./intents.svelte";
   import { verifyConnection } from "./api";
@@ -63,7 +64,7 @@
         setTimeout(() => (addOk = ""), FEEDBACK_OK_MS);
       }
     } catch (e) {
-      addErr = String(e);
+      addErr = translateError(e);
     } finally {
       adding = false;
     }

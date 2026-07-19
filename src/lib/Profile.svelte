@@ -1,6 +1,7 @@
 <script lang="ts">
   import Identicon from "./Identicon.svelte";
   import { t } from "./i18n.svelte";
+  import { translateError } from "./errors";
   import { copySensitive, FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
   import {
     getNodeMode, getReceiveAddress, getDisplayName, setDisplayName,
@@ -66,7 +67,7 @@
       bioOk = true;
       setTimeout(() => (bioOk = false), 3000);
     } catch (e) {
-      bioErr = String(e).replace(/^Error: /, "");
+      bioErr = translateError(e);
     } finally { bioBusy = false; }
   }
 
@@ -76,7 +77,7 @@
       await disableBiometricUnlock();
       bioEnabled = false;
     } catch (e) {
-      bioErr = String(e).replace(/^Error: /, "");
+      bioErr = translateError(e);
     } finally { bioBusy = false; }
   }
 
@@ -92,8 +93,8 @@
       await unlockIdentity(recoveryPass);   // re-vérifie le mot de passe
       recoveryPhrase = await getRecoveryKey();
       recoveryPass = "";
-    } catch {
-      recoveryErr = t('pf.recoveryErr.invalid');
+    } catch (e) {
+      recoveryErr = translateError(e, t('pf.recoveryErr.invalid'));
     } finally {
       revealing = false;
     }

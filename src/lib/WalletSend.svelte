@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack, tick } from "svelte";
   import { t } from "./i18n.svelte";
+  import { translateError } from "./errors";
   import {
     parsePaymentUri, splitTransfer, fmtQ, shortAddr, isAddress, TICKER,
   } from "./quanta";
@@ -100,7 +101,7 @@
       }
       preview = { toLabel: label, to, amount: amt, net, burn, balanceAfter: bal - amt };
     } catch (e: unknown) {
-      onFeedback({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+      onFeedback({ ok: false, msg: translateError(e) });
     } finally { preparing = false; }
   }
 
@@ -114,7 +115,7 @@
       toAddress = ""; sendAmount = ""; preview = null; onDone();
       await refreshWallet();
     } catch (e: unknown) {
-      onFeedback({ ok: false, msg: e instanceof Error ? e.message : String(e) });
+      onFeedback({ ok: false, msg: translateError(e) });
     } finally { sendBusy = false; }
   }
 
