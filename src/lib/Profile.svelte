@@ -1,22 +1,27 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
   import { t } from "./i18n.svelte";
   import { copySensitive, FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
+  import {
+    getNodeMode, getReceiveAddress, getDisplayName, setDisplayName,
+    biometricStatus, enableBiometricUnlock, disableBiometricUnlock,
+    unlockIdentity, getRecoveryKey,
+  } from "./api";
+  import { myReputation, myUsername, myConnectionCode } from "./stores.svelte";
 
-  let pk = $state("");
+  // Identité + réputation = stores partagés (un seul sondage app-wide).
+  const pk = $derived(myReputation.value?.public_key ?? "");
+  const joined = $derived(myReputation.value?.joined_at ?? "");
+  const username = $derived(myUsername.value);
+  const myCode = $derived(myConnectionCode.value ?? "");
+
+  // Données propres au Profil (quasi statiques) — chargées une fois au montage.
+  // Le Profil est remonté à chaque navigation ({#key view}), donc une revisite
+  // les rafraîchit ; inutile de sonder en boucle un mode/adresse qui ne bougent pas.
   let mode = $state("Active");
-  let joined = $state("");
-  let copied = $state(false);
-
-  // Adresse de réception publique — `qta1…` (Bech32m, checksummée), la forme
-  // à partager/mettre en QR (voir `get_receive_address`). Distincte de la clé
-  // publique hex ci-dessus, qui reste l'identité on-chain brute.
   let receiveAddr = $state("");
   let addrCopied = $state(false);
-
-  // Pseudo unique @handle (adresse de wallet lisible)
-  let username = $state<string | null>(null);
+  let copied = $state(false);
 
   // ─── Surnom public (NET-15, éditeur repris de Réseau — identitaire, pas social) ──
   let myDisplayName = $state<string | null>(null);
@@ -25,7 +30,6 @@
   let nicknameSaved = $state(false);
 
   // ─── Sécurité & Récupération ───────────────────────────────────
-  let myCode = $state("");
   let recoveryOpen = $state(false);
   let recoveryPass = $state("");
   let recoveryPhrase = $state("");
@@ -45,7 +49,7 @@
 
   async function loadBioStatus() {
     try {
-      const st = await invoke<{ supported: boolean; enabled: boolean }>("biometric_status");
+      const st = await biometricStatus();
       bioSupported = st.supported;
       bioEnabled = st.enabled;
     } catch { bioSupported = false; }
@@ -55,7 +59,7 @@
     if (!bioPass) return;
     bioBusy = true; bioErr = "";
     try {
-      await invoke("enable_biometric_unlock", { password: bioPass });
+      await enableBiometricUnlock(bioPass);
       bioPass = "";
       bioForm = false;
       bioEnabled = true;
@@ -69,7 +73,7 @@
   async function disableBio() {
     bioBusy = true; bioErr = "";
     try {
-      await invoke("disable_biometric_unlock");
+      await disableBiometricUnlock();
       bioEnabled = false;
     } catch (e) {
       bioErr = String(e).replace(/^Error: /, "");
@@ -85,8 +89,8 @@
     if (!recoveryPass.trim()) { recoveryErr = t('pf.recoveryErr.required'); return; }
     revealing = true;
     try {
-      await invoke("unlock_identity", { password: recoveryPass });   // re-vérifie le mot de passe
-      recoveryPhrase = await invoke<string>("get_recovery_key");
+      await unlockIdentity(recoveryPass);   // re-vérifie le mot de passe
+      recoveryPhrase = await getRecoveryKey();
       recoveryPass = "";
     } catch {
       recoveryErr = t('pf.recoveryErr.invalid');
@@ -110,33 +114,23 @@
     recoveryOpen = false;
   }
 
-  async function refresh() {
+  // Données propres au Profil, quasi statiques → chargées une fois au montage.
+  // `mode` n'est PAS un champ de NodeStatus — il vit dans `get_node_mode`
+  // ({ mode: "Active"|"Guardian"|"Research" }). Le lire sur get_node_status
+  // épinglait autrefois la pastille au repli à jamais.
+  async function loadProfileLocal() {
     try {
-      const r = await invoke<any>("get_my_reputation");
-      pk = r?.public_key ?? "";
-      joined = r?.joined_at ?? "";
-    } catch {}
-    try {
-      // `mode` is NOT a field of NodeStatus — it lives in `get_node_mode`
-      // ({ mode: "Active"|"Guardian"|"Research", watts, label }). Reading it off
-      // get_node_status silently pinned the pill to the fallback forever.
-      const m = await invoke<any>("get_node_mode");
+      const m = await getNodeMode();
       mode = m?.mode ?? "Active";
     } catch {}
     try {
-      username = await invoke<string | null>("get_my_username");
-    } catch {}
-    try {
-      myCode = await invoke<string>("get_my_connection_code");
-    } catch {}
-    try {
-      receiveAddr = await invoke<string>("get_receive_address");
+      receiveAddr = await getReceiveAddress();
     } catch {}
   }
 
   async function loadDisplayName() {
     try {
-      myDisplayName = await invoke<string | null>("get_display_name");
+      myDisplayName = await getDisplayName();
       displayNameDraft = myDisplayName ?? "";
     } catch {}
   }
@@ -146,7 +140,7 @@
     try {
       const trimmed = displayNameDraft.trim();
       const arg = trimmed.length === 0 ? null : trimmed;
-      myDisplayName = await invoke<string | null>("set_display_name", { name: arg });
+      myDisplayName = await setDisplayName(arg);
       displayNameDraft = myDisplayName ?? "";
       nicknameSaved = true;
       setTimeout(() => (nicknameSaved = false), FEEDBACK_OK_MS);
@@ -156,13 +150,17 @@
     displayNameSaving = false;
   }
 
+  // Stores partagés (réputation + identité) — un seul sondage app-wide.
+  $effect(() => myReputation.subscribe());
+  $effect(() => myUsername.subscribe());
+  $effect(() => myConnectionCode.subscribe());
+  // Chargement local une fois (pas d'interval : ces champs ne bougent pas
+  // pendant une session, et le Profil est remonté à chaque navigation).
   $effect(() => {
     loadLocal();
-    refresh();
+    loadProfileLocal();
     loadBioStatus();
     loadDisplayName();
-    const iv = setInterval(refresh, 10000);
-    return () => clearInterval(iv);
   });
 
   function copyPk() {

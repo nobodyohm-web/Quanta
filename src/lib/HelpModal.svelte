@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { t } from "./i18n.svelte";
+  import { getSecurityAudit, type SecurityAudit } from "./api";
 
   let { isOpen, onClose }: { isOpen: boolean; onClose: () => void } = $props();
   let tab = $state<"start" | "economy" | "security" | "shortcuts">("start");
-  let audit = $state<any>(null);
+  let audit = $state<SecurityAudit | null>(null);
 
   $effect(() => {
     if (isOpen && !audit) {
-      invoke("get_security_audit").then(a => audit = a).catch(() => {});
+      getSecurityAudit().then(a => audit = a).catch(() => {});
     }
     if (isOpen) {
       const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };

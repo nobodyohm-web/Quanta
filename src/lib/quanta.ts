@@ -120,6 +120,13 @@ export function shortAddr(s: string): string {
   return s.length > 14 ? s.slice(0, 6) + "…" + s.slice(-4) : s;
 }
 
+/** Uptime in minutes → one canonical `3h05` shape (hours + zero-padded minutes). */
+export function formatUptime(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = Math.floor(min % 60);
+  return `${h}h${m.toString().padStart(2, "0")}`;
+}
+
 /**
  * Copy a SENSITIVE string (recovery phrase, private material) and schedule a
  * best-effort clipboard wipe: after `ttlMs`, if the clipboard still holds

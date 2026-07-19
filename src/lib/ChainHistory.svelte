@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { t } from "./i18n.svelte";
+  import { getChainHistory } from "./api";
 
   // Histoire complète de la chaîne, depuis la genèse. Les anciens blocs sont
   // regroupés en « gros blocs » (agrégats) pour tout voir d'un coup ; les blocs
@@ -19,7 +19,7 @@
 
   async function load() {
     try {
-      const h = await invoke<any>("get_chain_history");
+      const h = await getChainHistory();
       const wasEnd = scroller ? (scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 40) : true;
       height = h.height ?? 0;
       bucketSize = h.bucket_size ?? 10;

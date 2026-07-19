@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import QuantaMark from "./brand/QuantaMark.svelte";
   import { t, type TKey } from "./i18n.svelte";
+  import { myUsername } from "./stores.svelte";
 
   let { activeView = 'wallet', onNavigate, nodeMode = 'Actif' } = $props<{
     activeView: string;
@@ -10,17 +10,9 @@
     nodeMode?: string;
   }>();
 
-  // Pseudo unique @handle — affiché comme identité dans la sidebar.
-  let username = $state<string | null>(null);
-  $effect(() => {
-    let alive = true;
-    const load = () => invoke<string | null>("get_my_username")
-      .then((u) => { if (alive) username = u; })
-      .catch(() => {});
-    load();
-    const iv = setInterval(load, 10000);
-    return () => { alive = false; clearInterval(iv); };
-  });
+  // Pseudo unique @handle — store partagé (un seul sondage app-wide).
+  $effect(() => myUsername.subscribe());
+  const username = $derived(myUsername.value);
 
   // The nav mark pulses its seam when WE seal a real block (not during sync).
   let sealing = $state(false);

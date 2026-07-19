@@ -693,8 +693,9 @@ Ce livre blanc ne vaut que s'il distingue le réel du cap.
 vivant (LIVE-1→4), la cryptographie post-quantique de l'argent, de la finalité et du transport, le
 plafond dur et l'émission décroissante vérifiés au consensus, la conservation et la couverture
 symétrique, le multisig PQ, l'écosystème de nœud (daemon + 17 méthodes RPC + explorateur). Le tout
-couvert par **441 tests + 1 intégration** (dont un échange gossip réel à 2 nœuds et l'invariant de
-déterminisme C1 sur 128 runs), clippy propre.
+couvert par une **suite de tests exhaustive** (unitaires, intégration, simulation déterministe
+multi-graines — dont un échange gossip réel à 2 nœuds et l'invariant de déterminisme C1 sur 128
+runs), clippy propre ; le compte exact et leur exécution vivent dans le dépôt public.
 
 **Ce qui reste — sans maquillage :**
 
@@ -753,6 +754,7 @@ aucune référence académique ni URL.
 ---
 
 *Document vivant. Les affirmations « réel » sont vérifiables dans `src-tauri/src/` à la date de
-rédaction (`TORUS_PROTOCOL_VERSION = 6`, 441 tests + 1 intégration). Le roadmap décrit des
+rédaction (`TORUS_PROTOCOL_VERSION = 6`, couvert par une suite de tests exhaustive dont le compte
+exact vit dans le dépôt public). Le roadmap décrit des
 intentions, pas des livraisons. Statut du projet : alpha, non audité par un tiers. QUANTA n'a
 aucun marché ni prix.*

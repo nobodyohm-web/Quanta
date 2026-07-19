@@ -1,86 +1,61 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ChainHistory from "./ChainHistory.svelte";
   import NetworkScene3D from "./NetworkScene3D.svelte";
   import { t } from "./i18n.svelte";
-  import { note } from "./diag";
   import { FEEDBACK_OK_MS, FEEDBACK_COPY_MS } from "./quanta";
+  import { connectPeer as apiConnectPeer } from "./api";
+  import { nodeStatus, chainOverview, finalityStatus, peerMetrics as peerMetricsStore } from "./stores.svelte";
 
   let chainView = $state<"history" | "2d">("history");
 
-  let peerCount = $state(0);
-  let myPeerId = $state("");
-  let isOnline = $state(false);
-  let protocol = $state("");
-  let copied = $state(false);
+  // ── Statut du nœud · chaîne vive · finalité · métriques par pair : stores
+  //    partagés (UN sondage par donnée). Le Wallet et le Minage partagent
+  //    nodeStatus ; le Minage partage chaîne + finalité. Plus d'interval local. ──
+  $effect(() => nodeStatus.subscribe());
+  $effect(() => chainOverview.subscribe());
+  $effect(() => finalityStatus.subscribe());
+  $effect(() => peerMetricsStore.subscribe());
+
+  const peerCount = $derived(nodeStatus.value?.peer_count ?? 0);
+  const myPeerId = $derived(nodeStatus.value?.peer_id ?? "");
+  const isOnline = $derived(nodeStatus.value?.is_online ?? false);
+  const protocol = $derived(nodeStatus.value?.protocol ?? "");
 
   // ─── Blockchain en direct ──────────────────────────────────────
-  let chainHeight = $state(0);
-  let pendingTx = $state(0);
-  let blocks = $state<any[]>([]);
-  // Halo « flash » au nouveau bloc : minuterie propre (l'ancienne expression
-  // `Date.now() - newBlockFlash < 1200` ne se réévaluait qu'au bloc SUIVANT
-  // → le halo restait allumé ~2 min au lieu de 1,2 s).
-  let flashOn = $state(false);
-  let flashTo: ReturnType<typeof setTimeout> | undefined;
-  let finalityFloor = $state(0);     // ms epoch du dernier bloc reçu → animation
+  const chainHeight = $derived(chainOverview.value?.height ?? 0);
+  const pendingTx = $derived(chainOverview.value?.pending ?? 0);
+  const blocks = $derived(chainOverview.value?.blocks ?? []);
+  const finalityFloor = $derived(finalityStatus.value?.finalized_floor ?? 0);
+  const peerMetrics = $derived(peerMetricsStore.value ?? []);
 
   // États de chargement — tant que !loaded, le résumé affiche « — » (pas 0) ;
-  // loadError s'allume au premier échec de refresh et s'éteint au succès suivant.
-  let loaded = $state(false);
-  let loadError = $state(false);
+  // loadError s'allume dès qu'un sondage échoue et s'éteint au succès suivant.
+  const loaded = $derived(nodeStatus.loaded && chainOverview.loaded && finalityStatus.loaded);
+  const loadError = $derived(nodeStatus.error || chainOverview.error || finalityStatus.error);
 
-  async function loadChain() {
-    const t0 = performance.now(); // sonde : durée réelle du sondage 1,5 s
-    try {
-      const o = await invoke<any>("get_chain_overview", { limit: 22 });
-      const prev = chainHeight;
-      chainHeight = o.height ?? 0;
-      pendingTx = o.pending ?? 0;
-      blocks = o.blocks ?? [];
-      loaded = true;
-      loadError = false;
-      if (prev && chainHeight > prev) {
-        flashOn = true;
-        clearTimeout(flashTo);
-        flashTo = setTimeout(() => (flashOn = false), 1600);
-      }
-    } catch {
-      loadError = true;
+  let copied = $state(false);
+
+  // Halo « flash » au nouveau bloc : détecté sur la HAUSSE de hauteur, avec sa
+  // minuterie propre (l'ancienne expression ne se réévaluait qu'au bloc suivant
+  // → halo bloqué ~2 min ; ici il retombe à 1,6 s).
+  let flashOn = $state(false);
+  let prevHeight = 0;
+  let flashTo: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const h = chainHeight;
+    if (prevHeight && h > prevHeight) {
+      flashOn = true;
+      clearTimeout(flashTo);
+      flashTo = setTimeout(() => (flashOn = false), 1600);
     }
-    try {
-      const f = await invoke<any>("get_finality_status");
-      finalityFloor = f?.finalized_floor ?? 0;
-      loaded = true;
-      loadError = false;
-    } catch {
-      loadError = true;
-    }
-    note("net.loadChain", `${Math.round(performance.now() - t0)}ms h=${chainHeight}`);
-  }
+    prevHeight = h;
+  });
+
   let connectInput = $state("");
   let connectErr = $state("");
   let connectSuccess = $state(false);
   let connecting = $state(false);
-
-  // NET-9/NET-10: Per-peer metrics
-  type PeerMetric = {
-    public_key: string;
-    display_name: string | null;
-    country: string;
-    last_rtt_ms: number | null;
-    smoothed_rtt_ms: number | null;
-    bytes_in: number;
-    messages_in: number;
-    pings_sent: number;
-    pongs_received: number;
-    loss_ratio: number;
-    uptime_secs: number;
-    quality_score: number | null;
-    last_seen_secs_ago: number;
-  };
-  let peerMetrics = $state<PeerMetric[]>([]);
 
   // NET-16: Chain-sync progress event payload + freshness gate
   type SyncProgress = {
@@ -92,37 +67,6 @@
   };
   let syncProgress = $state<SyncProgress | null>(null);
   let syncProgressAt = $state(0); // ms epoch — used to fade banner
-
-
-  async function refresh() {
-    const t0 = performance.now(); // sonde : durée réelle du sondage 5 s
-    try {
-      const s = await invoke<any>("get_node_status");
-      peerCount = s?.peer_count ?? 0;
-      myPeerId = s?.peer_id ?? "";
-      isOnline = s?.is_online ?? false;
-      protocol = s?.protocol ?? "";
-      loaded = true;
-      loadError = false;
-    } catch {
-      loadError = true;
-    }
-    // NET-9/10: pull per-peer metrics every refresh tick
-    try {
-      peerMetrics = await invoke<PeerMetric[]>("get_peer_metrics");
-    } catch {
-      loadError = true;
-    }
-    note("net.refresh", `${Math.round(performance.now() - t0)}ms peers=${peerCount}`);
-  }
-
-  $effect(() => {
-    refresh();
-    loadChain();
-    const iv = setInterval(refresh, 5000);
-    const tc = setInterval(loadChain, 1500);
-    return () => { clearInterval(iv); clearInterval(tc); };
-  });
 
   // NET-16: subscribe to chain-sync progress events from the backend.
   $effect(() => {
@@ -162,11 +106,11 @@
     if (!connectInput.trim()) { connectErr = t('net.peerIdRequired'); return; }
     connecting = true;
     try {
-      await invoke("connect_peer", { peerId: connectInput.trim() });
+      await apiConnectPeer(connectInput.trim());
       connectInput = "";
       connectSuccess = true;
       setTimeout(() => connectSuccess = false, FEEDBACK_OK_MS);
-      refresh();
+      nodeStatus.refresh();
     } catch (e) {
       connectErr = String(e);
     }

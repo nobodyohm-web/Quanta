@@ -679,9 +679,10 @@ This whitepaper is only worth something if it separates the real from the aspira
 **Real today, verifiable by reading and testing** — the live PoS consensus + Casper-FFG
 finality (LIVE-1→4), post-quantum cryptography for money, finality, and transport, the hard
 cap and decreasing emission verified at consensus, conservation and symmetric coverage, PQ
-multisig, the node ecosystem (daemon + 17 RPC methods + explorer). All covered by **441 tests
-+ 1 integration** (including a real 2-node gossip exchange and the C1 determinism invariant
-over 128 runs), clean clippy.
+multisig, the node ecosystem (daemon + 17 RPC methods + explorer). All covered by an
+**exhaustive test suite** (unit, integration, multi-seed deterministic simulation — including a
+real 2-node gossip exchange and the C1 determinism invariant over 128 runs), clean clippy; the
+exact count and their execution live in the public repo.
 
 **What remains — without dressing it up:**
 
@@ -740,6 +741,7 @@ academic reference or URL.
 ---
 
 *Living document. "Real" claims are verifiable in `src-tauri/src/` as of the date of writing
-(`TORUS_PROTOCOL_VERSION = 6`, 441 tests + 1 integration). The roadmap describes intentions,
+(`TORUS_PROTOCOL_VERSION = 6`, covered by an exhaustive test suite whose exact count lives in
+the public repo). The roadmap describes intentions,
 not deliveries. Project status: alpha, not third-party audited. QUANTA has no market and no
 price.*

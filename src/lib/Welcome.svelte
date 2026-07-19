@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import StrengthMeter from "./StrengthMeter.svelte";
   import QuantaMark from "./brand/QuantaMark.svelte";
   import LanguageSelect from "./LanguageSelect.svelte";
   import { t } from "./i18n.svelte";
+  import { isUsernameAvailable, createIdentity, getRecoveryPhrase, claimUsername, restoreFromPhrase } from "./api";
 
   let {
     onCreated = (_pk: string) => {},
@@ -64,7 +64,7 @@
     pseudoStatus = "checking";
     checkTimer = setTimeout(async () => {
       try {
-        const free = await invoke<boolean>("is_username_available", { username: p });
+        const free = await isUsernameAvailable(p);
         // Guard against a stale check if the user kept typing.
         if (pseudo.trim().toLowerCase() === p) pseudoStatus = free ? "free" : "taken";
       } catch {
@@ -85,13 +85,10 @@
     loading = true;
     try {
       const name = pseudo.trim().toLowerCase();
-      const id = await invoke<{ public_key_hex: string }>("create_identity", {
-        displayName: name,
-        password: pass,
-      });
+      const id = await createIdentity(name, pass);
       pendingPk = id.public_key_hex;
       // The recovery phrase — the ONLY backup of the funds. Must be saved.
-      phrase = await invoke<string>("get_recovery_phrase");
+      phrase = await getRecoveryPhrase();
       // Pick 3 distinct random positions to verify later.
       checkIdx = pickThree(phraseWords.length);
       checkVals = ["", "", ""];
@@ -130,7 +127,7 @@
       try {
         // Claim the @pseudo now that the identity exists (best-effort — the wallet
         // is already usable even if the claim races another node).
-        await invoke("claim_username", { username: pseudo.trim().toLowerCase() }).catch(() => {});
+        await claimUsername(pseudo.trim().toLowerCase()).catch(() => {});
       } finally {
         // Scrub the phrase from memory.
         phrase = "";
@@ -155,11 +152,11 @@
     }
     loading = true;
     try {
-      const id = await invoke<{ public_key_hex: string }>("restore_from_phrase", {
-        mnemonic: words.join(" ").toLowerCase(),
-        displayName: pseudo.trim().toLowerCase() || "restored",
-        password: pass,
-      });
+      const id = await restoreFromPhrase(
+        words.join(" ").toLowerCase(),
+        pseudo.trim().toLowerCase() || "restored",
+        pass,
+      );
       restorePhrase = "";
       onCreated(id.public_key_hex);
     } catch (e) {

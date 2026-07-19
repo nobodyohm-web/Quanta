@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import {
+    wasGuardianReload, getPublicKey, checkIdentity, createIdentity, unlockIdentity,
+    biometricStatus, unlockBiometric, getMyUsername, isUsernameAvailable,
+    claimUsername as apiClaimUsername,
+  } from "$lib/api";
   import Sidebar from "$lib/Sidebar.svelte";
   import Wallet from "$lib/Wallet.svelte";
   import Dashboard from "$lib/Dashboard.svelte";
@@ -116,10 +120,10 @@
       // Reprise après rechargement GARDIEN uniquement (webview ressuscité) :
       // le vault Rust est resté chaud — pas d'écran de déverrouillage. Un
       // auto-lock volontaire ou un vrai redémarrage ne passent jamais par ici.
-      const guardianReload = await invoke<boolean>("was_guardian_reload").catch(() => false);
+      const guardianReload = await wasGuardianReload().catch(() => false);
       if (guardianReload) {
         try {
-          const a = await invoke<string>("get_public_key");
+          const a = await getPublicKey();
           if (a) {
             note("reprise", "session restaurée après rechargement gardien");
             pk = a;
@@ -129,15 +133,15 @@
           }
         } catch { /* vault verrouillé → flux normal */ }
       }
-      const has = await invoke<boolean>("check_identity");
+      const has = await checkIdentity();
       if (AUTOPILOT) {
         // Un seul essai, jamais de boucle : si le déverrouillage échoue (vault
         // réel ≠ vault jetable), on s'arrête net — pas de brute-force accidentel.
         try {
           const password = "quanta-dev-autopilot";
           const id = has
-            ? await invoke<{ public_key_hex: string }>("unlock_identity", { password })
-            : await invoke<{ public_key_hex: string }>("create_identity", { displayName: "probe", password });
+            ? await unlockIdentity(password)
+            : await createIdentity("probe", password);
           pk = id.public_key_hex;
           ready = true;
           view = import.meta.env.VITE_QUANTA_AUTOPILOT_VIEW || "network";
@@ -165,7 +169,7 @@
       step = has ? "unlock" : "welcome";
       if (has) {
         try {
-          const st = await invoke<{ supported: boolean; enabled: boolean }>("biometric_status");
+          const st = await biometricStatus();
           bioEnabled = st.supported && st.enabled;
         } catch { /* biometry optional */ }
       }
@@ -177,7 +181,7 @@
     if (bioBusy) return;
     bioBusy = true; err = "";
     try {
-      const id = await invoke<{ public_key_hex: string }>("unlock_biometric");
+      const id = await unlockBiometric();
       pk = id.public_key_hex;
       await proceedAfterAuth();
     } catch (e) {
@@ -199,7 +203,7 @@
   // Load the value address once unlocked — feeds the live toasts layer.
   $effect(() => {
     if (!ready) return;
-    invoke<string>("get_public_key").then((a) => { myAddr = a; }).catch(() => {});
+    getPublicKey().then((a) => { myAddr = a; }).catch(() => {});
     // Pré-chauffe la route audio maintenant (geste utilisateur = déverrouillage)
     // — le réveil d'une interface externe (Universal Audio…) peut bloquer ~1-2 s
     // s'il arrive au moment du carillon de scellement.
@@ -210,7 +214,7 @@
     err = "";
     if (!pass.trim()) { err = "Mot de passe requis"; return; }
     try {
-      const id = await invoke<{ public_key_hex: string }>("unlock_identity", { password: pass });
+      const id = await unlockIdentity(pass);
       pk = id.public_key_hex;
       await proceedAfterAuth();
     } catch { err = "Mot de passe invalide"; }
@@ -220,7 +224,7 @@
   // on l'invite à en choisir un (se retrouver facilement). Sinon, on entre.
   async function proceedAfterAuth() {
     try {
-      const u = await invoke<string | null>("get_my_username");
+      const u = await getMyUsername();
       if (u) { ready = true; }
       else { usernameInput = ""; usernameStatus = ""; usernameErr = ""; step = "username"; }
     } catch {
@@ -245,7 +249,7 @@
     usernameStatus = "checking";
     usernameTimer = setTimeout(async () => {
       try {
-        const ok = await invoke<boolean>("is_username_available", { username: u });
+        const ok = await isUsernameAvailable(u);
         usernameStatus = ok ? "available" : "taken";
       } catch { usernameStatus = "invalid"; }
     }, 300);
@@ -256,7 +260,7 @@
     if (!localValidUsername(u)) { usernameStatus = "invalid"; return; }
     claimingUsername = true; usernameErr = "";
     try {
-      await invoke("claim_username", { username: u });
+      await apiClaimUsername(u);
       ready = true;
     } catch (e) {
       usernameErr = String(e);

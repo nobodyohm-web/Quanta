@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import ForgeEngine from "./ForgeEngine.svelte";
   import { t, locale } from "./i18n.svelte";
-  import { TICKER, TEAL } from "./quanta";
+  import { TICKER, TEAL, formatUptime } from "./quanta";
+  import { myReputation, nodeStatus, chainOverview, finalityStatus, economyStats } from "./stores.svelte";
 
   // Alpha variants of TEAL derived from the single brand constant — no
   // duplicated rgba() literals for the canvas gradient/halo.
@@ -10,93 +10,50 @@
   const TEAL_TRANSPARENT = TEAL + "00";
   const TEAL_GLOW = TEAL + "59"; // ≈ rgba(11,165,160,0.35)
 
-  // ── Données vivantes du nœud (ZÉRO énergie, ZÉRO 3D) ────────────
-  let earned = $state(0);
-  let trustScore = $state(0);
-  let uptime = $state(0);
-  let peers = $state(0);
-  let chainHeight = $state(0);
-  let mode = $state("Actif");
+  // ── Données vivantes du nœud (ZÉRO énergie, ZÉRO 3D) — stores partagés,
+  //    UN sondage par donnée (cf. stores.svelte.ts). Le Réseau partage nodeStatus
+  //    + chaîne/finalité ; on n'ouvre plus d'interval local ici.
+  $effect(() => myReputation.subscribe());
+  $effect(() => nodeStatus.subscribe());
+  $effect(() => chainOverview.subscribe());
+  $effect(() => finalityStatus.subscribe());
+  $effect(() => economyStats.subscribe());
 
-  // Offre prouvable
-  let maxSupply = $state(100_000_000);
-  let minedQta = $state(0);
-  let burnedQta = $state(0);
-  let circulatingQta = $state(0);
-  let pctToCap = $state(0);
+  const earned = $derived(myReputation.value?.atn_earned ?? 0);
+  const uptime = $derived(myReputation.value?.uptime_minutes ?? 0);
+  const peers = $derived(nodeStatus.value?.peer_count ?? 0);
+  const mode = $derived(nodeStatus.value?.mode ?? "Actif");
+
+  // Offre prouvable (get_chain_overview)
+  const maxSupply = $derived(chainOverview.value?.max_supply_qta ?? 100_000_000);
+  const minedQta = $derived(chainOverview.value?.total_mined_qta ?? 0);
+  const burnedQta = $derived(chainOverview.value?.total_burned_qta ?? 0);
+  const circulatingQta = $derived(chainOverview.value?.total_supply_qta ?? 0);
+  const pctToCap = $derived(chainOverview.value?.pct_to_cap ?? 0);
 
   // Émission RÉELLE (get_economy_stats — même fonction que le minage)
-  let emissionPerHour = $state(0);
+  const emissionPerHour = $derived(economyStats.value?.emission_per_hour ?? 0);
 
   // Finalité (gadget Casper-FFG vivant)
-  interface Finality {
-    height: number;
-    finalized_floor: number;
-    epoch: number;
-    epoch_length: number;
-    blocks_into_epoch: number;
-    validators: number;
-    total_staked: number;
-    my_stake: number;
-    i_am_validator: boolean;
-  }
-  let fin = $state<Finality | null>(null);
+  const fin = $derived(finalityStatus.value);
+  const chainHeight = $derived(fin?.height ?? 0);
 
   // ── État de chargement honnête : « — » tant que rien n'est confirmé,
-  //    ligne d'erreur discrète si un refresh échoue (jamais de catch muet).
-  let loaded = $state(false);
-  let loadError = $state(false);
+  //    ligne d'erreur discrète si un sondage échoue (agrégat des stores lus).
+  const loaded = $derived(
+    myReputation.loaded && nodeStatus.loaded && chainOverview.loaded &&
+    finalityStatus.loaded && economyStats.loaded,
+  );
+  const loadError = $derived(
+    myReputation.error || nodeStatus.error || chainOverview.error ||
+    finalityStatus.error || economyStats.error,
+  );
 
   let miningRate = $derived(uptime > 0 ? earned / uptime : 0);
 
+  // Formateur d'offre : entiers seuls (grands nombres) — distinct de `fmtQ`
+  // de quanta.ts (2..6 décimales, pour les montants du portefeuille).
   function fmtQ(n: number) { return n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }); }
-
-  async function refresh() {
-    try {
-      const r = await invoke<any>("get_my_reputation");
-      earned = r?.atn_earned ?? 0;
-      trustScore = r?.trust_score ?? 0;
-      uptime = r?.uptime_minutes ?? 0;
-      loaded = true;
-      loadError = false;
-    } catch { loadError = true; }
-    try {
-      const s = await invoke<any>("get_node_status");
-      peers = s?.peer_count ?? 0;
-      mode = s?.mode ?? "Actif";
-      loaded = true;
-      loadError = false;
-    } catch { loadError = true; }
-    try {
-      const o = await invoke<any>("get_chain_overview", { limit: 0 });
-      maxSupply = o.max_supply_qta ?? 100_000_000;
-      minedQta = o.total_mined_qta ?? 0;
-      burnedQta = o.total_burned_qta ?? 0;
-      circulatingQta = o.total_supply_qta ?? 0;
-      pctToCap = o.pct_to_cap ?? 0;
-      loaded = true;
-      loadError = false;
-    } catch { loadError = true; }
-    try {
-      const e = await invoke<any>("get_economy_stats");
-      emissionPerHour = e?.emission_per_hour ?? 0;
-      loaded = true;
-      loadError = false;
-    } catch { loadError = true; }
-    try {
-      const f = await invoke<Finality>("get_finality_status");
-      fin = f;
-      chainHeight = f.height;
-      loaded = true;
-      loadError = false;
-    } catch { loadError = true; }
-  }
-
-  $effect(() => {
-    refresh();
-    const iv = setInterval(refresh, 5000);
-    return () => clearInterval(iv);
-  });
 
   // ── Courbe d'émission : QUANTA/h en fonction de l'offre émise ────
   // emission_for_tick(m) = (MAX − m) / DIVISOR → droite décroissante vers 0 au
@@ -148,12 +105,6 @@
     const cap = "100 %";
     ctx.fillText(cap, x1 - ctx.measureText(cap).width, h - 5);
   });
-
-  function formatUptime(min: number) {
-    const h = Math.floor(min / 60);
-    const m = min % 60;
-    return `${h}h${m.toString().padStart(2, "0")}`;
-  }
 
   const modeColors: Record<string, string> = { Actif: "tag-cyan", Guardian: "tag-cyan", Recherche: "tag-dim" };
   const epochPct = $derived(fin ? (fin.blocks_into_epoch / fin.epoch_length) * 100 : 0);

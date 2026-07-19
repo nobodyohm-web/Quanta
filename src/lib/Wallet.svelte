@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
   import Qr from "./Qr.svelte";
   import EmptyState from "./EmptyState.svelte";
@@ -11,51 +10,44 @@
     parsePaymentUri, formatPaymentUri, splitTransfer, fmtQ, shortAddr, blocksToEta, isAddress,
     TICKER, FEEDBACK_COPY_MS,
   } from "./quanta";
-
-  // ── Vérité on-chain du portefeuille (get_wallet_overview) ──────
-  interface UnbondingEntry { amount: number; unlock_height: number; blocks_remaining: number }
-  interface WalletOverview {
-    address: string;          // canonical on-chain hex (ledger key, tx from/to)
-    address_bech32: string;   // public checksummed `qta1…` form (share/QR/send)
-    height: number;
-    spendable: number;
-    staked: number;
-    unbonding: number;
-    unbonding_entries: UnbondingEntry[];
-    pending_stake: number;
-    pending_unstake: number;
-    earned: number;
-    min_validator_stake: number;
-    unbonding_period_blocks: number;
-  }
-  interface LedgerTx {
-    id: string;
-    from: string;
-    to: string;
-    amount: number;
-    tx_type: string;
-    timestamp: string;
-    hash: string;
-  }
+  import { resolveUsername, validateAddress, ledgerTransfer, ledgerStake, ledgerUnstake, type LedgerTx } from "./api";
+  import {
+    walletOverview as walletStore, recentTxs as recentTxsStore,
+    nodeStatus as nodeStatusStore, myUsername as myUsernameStore,
+    myConnectionCode as myConnectionCodeStore,
+  } from "./stores.svelte";
 
   type Filter = "all" | "out" | "in" | "mining" | "stakeOps" | "burn";
   const PAGE_SIZE = 10;
 
-  let ov = $state<WalletOverview | null>(null);
-  let txs = $state<LedgerTx[]>([]);
-  let myUsername = $state<string | null>(null);
-  let connectionCode = $state("");
+  // ── Données du portefeuille : stores partagés (le solde reste CHAUD entre les
+  //    navigations — plus de « 0 » au retour). nodeStatus/identité sont partagés
+  //    avec les autres écrans (un seul sondage app-wide). ──
+  $effect(() => walletStore.subscribe());
+  $effect(() => recentTxsStore.subscribe());
+  $effect(() => nodeStatusStore.subscribe());
+  $effect(() => myUsernameStore.subscribe());
+  $effect(() => myConnectionCodeStore.subscribe());
+
+  const ov = $derived(walletStore.value);
+  const txs = $derived(recentTxsStore.value ?? []);
+  const myUsername = $derived(myUsernameStore.value);
+  const connectionCode = $derived(myConnectionCodeStore.value ?? "");
+  const loading = $derived(!walletStore.loaded);
   let codeCopied = $state(false);
-  let loading = $state(true);
-  let nodeStatus = $state<any>(null);
+
+  /** Re-fetch impératif du portefeuille après une action signée (envoi/stake). */
+  function refreshWallet() {
+    return Promise.all([walletStore.refresh(), recentTxsStore.refresh()]);
+  }
 
   const myPk = $derived(ov?.address ?? "");
   // Public, human-facing receive address (`qta1…`, checksummed). `myPk` (hex) stays
   // the identity used for tx-direction checks and the identicon; `myAddress` is what
   // we show, copy, QR and put in the payment URI. Falls back to hex until loaded.
   const myAddress = $derived(ov?.address_bech32 || ov?.address || "");
-  const peers = $derived(nodeStatus?.peer_count ?? 0);
-  const online = $derived(nodeStatus?.is_online ?? false);
+  const peers = $derived(nodeStatusStore.value?.peer_count ?? 0);
+  const online = $derived(nodeStatusStore.value?.is_online ?? false);
 
   let panel = $state<"send" | "receive" | "stake" | null>(null);
 
@@ -116,12 +108,6 @@
     return () => cancelAnimationFrame(raf);
   });
 
-  $effect(() => {
-    refresh();
-    const iv = setInterval(refresh, 15_000);
-    return () => clearInterval(iv);
-  });
-
   // Cross-view send intent (Contacts « Envoyer » → single send engine). The
   // {#key view} wrapper in +page remounts this component on each navigation, so
   // a one-shot mount effect is enough — the Wallet is never kept alive in the
@@ -137,17 +123,6 @@
     sendAmount = "";
     tick().then(() => document.getElementById("w-amt")?.focus());
   });
-
-  async function refresh() {
-    try {
-      ov = await invoke<WalletOverview>("get_wallet_overview");
-    } catch { /* ignore */ }
-    try { txs = await invoke<LedgerTx[]>("get_recent_txs"); } catch { /* ignore */ }
-    try { myUsername = await invoke<string | null>("get_my_username"); } catch { /* ignore */ }
-    try { connectionCode = await invoke<string>("get_my_connection_code"); } catch { /* ignore */ }
-    try { nodeStatus = await invoke<any>("get_node_status"); } catch { /* ignore */ }
-    loading = false;
-  }
 
   function togglePanel(p: "send" | "receive" | "stake") {
     panel = panel === p ? null : p;
@@ -187,7 +162,7 @@
       let label = shortAddr(to);
       if (!isAddress(to)) {
         const uname = to.replace(/^@/, "");
-        const resolved = await invoke<string | null>("resolve_username", { username: uname });
+        const resolved = await resolveUsername(uname);
         if (!resolved) {
           feedback = { ok: false, msg: t("wallet.err.usernameNotFound") + " : @" + uname };
           return;
@@ -196,7 +171,7 @@
       } else if (to.toLowerCase().startsWith("qta1")) {
         // Public `qta1…` address — verify the Bech32m checksum now, so a mistyped
         // character is caught at preview instead of after signing.
-        const okAddr = await invoke<boolean>("validate_address", { address: to });
+        const okAddr = await validateAddress(to);
         if (!okAddr) {
           feedback = { ok: false, msg: t("wallet.err.badRecipient") };
           return;
@@ -219,10 +194,10 @@
     if (!preview) return;
     sendBusy = true; feedback = null;
     try {
-      await invoke("ledger_transfer", { to: preview.to, amount: preview.amount });
+      await ledgerTransfer(preview.to, preview.amount);
       feedback = { ok: true, msg: preview.amount.toFixed(2) + " QUANTA " + t("wallet.ok.sentTo") + " " + preview.toLabel };
       toAddress = ""; sendAmount = ""; preview = null; panel = null;
-      await refresh();
+      await refreshWallet();
     } catch (e: unknown) {
       feedback = { ok: false, msg: e instanceof Error ? e.message : String(e) };
     } finally { sendBusy = false; }
@@ -239,10 +214,10 @@
     }
     stakeBusy = true; feedback = null;
     try {
-      await invoke("ledger_stake", { amount: amt });
+      await ledgerStake(amt);
       feedback = { ok: true, msg: amt.toFixed(2) + " QUANTA " + t("wallet.ok.staked") };
       stakeAmount = "";
-      await refresh();
+      await refreshWallet();
     } catch (e: unknown) {
       feedback = { ok: false, msg: e instanceof Error ? e.message : String(e) };
     } finally { stakeBusy = false; }
@@ -256,10 +231,10 @@
     }
     unstakeBusy = true; feedback = null;
     try {
-      await invoke("ledger_unstake", { amount: amt });
+      await ledgerUnstake(amt);
       feedback = { ok: true, msg: amt.toFixed(2) + " QUANTA " + t("wallet.ok.unstaked") };
       unstakeAmount = "";
-      await refresh();
+      await refreshWallet();
     } catch (e: unknown) {
       feedback = { ok: false, msg: e instanceof Error ? e.message : String(e) };
     } finally { unstakeBusy = false; }

@@ -119,9 +119,9 @@ pub async fn establish_wallet(state: &Arc<AppState>, password: Option<&str>) -> 
                 }
             };
             if has_wallet {
-                crate::unlock_wallet(state, pw).await.map(|_| ())
+                crate::commands::identity::unlock_wallet(state, pw).await.map(|_| ())
             } else {
-                crate::create_wallet(state, "quanta-node", pw).await.map(|_| ())
+                crate::commands::identity::create_wallet(state, "quanta-node", pw).await.map(|_| ())
             }
         }
     }

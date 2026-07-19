@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
   import EmptyState from "./EmptyState.svelte";
   import { t } from "./i18n.svelte";
   import { FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
   import { requestSend } from "./intents.svelte";
+  import { verifyConnection } from "./api";
+  import { myUsername, myConnectionCode } from "./stores.svelte";
 
   // Navigation callback from +page — money-send routes through the Wallet's
   // 2-step review flow (no direct transfer here). Single send engine.
@@ -13,8 +14,9 @@
   type Contact = { username: string; pk: string; code: string; addedAt: number };
   const STORE = "quanta-contacts";
 
-  let myUsername = $state<string | null>(null);
-  let myCode = $state("");
+  // Identité partagée (stores) — un seul sondage app-wide au lieu d'un local.
+  const myUname = $derived(myUsername.value);
+  const myCode = $derived(myConnectionCode.value ?? "");
   let copied = $state<"" | "pseudo" | "code">("");
   let contacts = $state<Contact[]>([]);
 
@@ -35,20 +37,12 @@
     try { localStorage.setItem(STORE, JSON.stringify(contacts)); } catch {}
   }
 
-  $effect(() => {
-    load();
-    refreshMe();
-    const iv = setInterval(refreshMe, 8000);
-    return () => clearInterval(iv);
-  });
-
-  async function refreshMe() {
-    try { myUsername = await invoke<string | null>("get_my_username"); } catch {}
-    try { myCode = await invoke<string>("get_my_connection_code"); } catch {}
-  }
+  $effect(() => { load(); });
+  $effect(() => myUsername.subscribe());
+  $effect(() => myConnectionCode.subscribe());
 
   async function copy(kind: "pseudo" | "code") {
-    const text = kind === "pseudo" ? "@" + (myUsername ?? "") : myCode;
+    const text = kind === "pseudo" ? "@" + (myUname ?? "") : myCode;
     try { await navigator.clipboard.writeText(text); copied = kind; setTimeout(() => (copied = ""), FEEDBACK_COPY_MS); } catch {}
   }
 
@@ -58,9 +52,7 @@
     if (!u || !addCode.trim()) { addErr = t('ct.errFields'); return; }
     adding = true;
     try {
-      const v = await invoke<{ username: string; pk: string; connection_code: string }>(
-        "verify_connection", { username: u, code: addCode.trim() }
-      );
+      const v = await verifyConnection(u, addCode.trim());
       if (contacts.some(c => c.pk === v.pk)) {
         addErr = `${t('ct.alreadyPre')}@${v.username}${t('ct.alreadyPost')}`;
       } else {
@@ -105,8 +97,8 @@
     <div class="cc-grid">
       <div class="cc-item">
         <div class="stat-label">{t('ct.pseudo')}</div>
-        <div class="cc-v mono">{myUsername ? "@" + myUsername : "—"}</div>
-        <button class="copy-btn" onclick={() => copy("pseudo")} disabled={!myUsername}>
+        <div class="cc-v mono">{myUname ? "@" + myUname : "—"}</div>
+        <button class="copy-btn" onclick={() => copy("pseudo")} disabled={!myUname}>
           {copied === "pseudo" ? t('ct.copied') : t('ct.copy')}
         </button>
       </div>
@@ -118,7 +110,7 @@
         </button>
       </div>
     </div>
-    {#if !myUsername}
+    {#if !myUname}
       <div class="cc-note">{t('ct.reserveFirst')}</div>
     {/if}
   </div>

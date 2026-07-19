@@ -10,7 +10,7 @@
   //  écran / onglet caché, cleanup au démontage → jamais de gel.
   // ═══════════════════════════════════════════════════════════════════
   import { untrack } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { getNodeStatus, getFinalityStatus, getChainHistory } from "./api";
   import { getVersion } from "@tauri-apps/api/app";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { blake3 } from "@noble/hashes/blake3.js";
@@ -242,13 +242,13 @@
   let statePushed = false;
   async function poll() {
     try {
-      const s = await invoke<any>("get_node_status");
+      const s = await getNodeStatus();
       const p = s?.peer_count ?? 0;
       if (seenStats && p !== peers && p > 0) push("peer", fill(tl("ePeer"), { n: p }));
       peers = p;
     } catch {}
     try {
-      const f = await invoke<any>("get_finality_status");
+      const f = await getFinalityStatus();
       if (f) {
         if (seenStats && f.epoch > epoch) push("vote", fill(tl("eVote"), { n: f.epoch }));
         if (seenStats && f.finalized_floor > floor && f.finalized_floor > 0)
@@ -265,7 +265,7 @@
       }
     } catch {}
     try {
-      const c = await invoke<any>("get_chain_history");
+      const c = await getChainHistory();
       const rec = c?.recent;
       if (Array.isArray(rec) && rec.length) {
         const top = rec[rec.length - 1];
