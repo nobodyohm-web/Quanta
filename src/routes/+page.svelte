@@ -20,19 +20,18 @@
   import { getPrefs, applyTheme } from "$lib/prefs";
   import "../app.css";
 
-  type Step = "check" | "welcome" | "create" | "unlock" | "recovery" | "confirm" | "username";
+  // Reachable steps after the onboarding consolidation: identity creation lives
+  // entirely in Welcome.svelte (step "welcome"); this page only boots ("check"),
+  // unlocks an existing vault ("unlock"), or prompts for a @pseudo ("username").
+  type Step = "check" | "welcome" | "unlock" | "username";
 
   let view = $state("wallet");
   let ready = $state(false);
   let loading = $state(true);
   let step = $state<Step>("check");
-  let name = $state("");
   let pass = $state("");
   let err = $state("");
   let pk = $state("");
-  let recoveryKey = $state("");
-  let confirmInput = $state("");
-  let keyCopied = $state(false);
   let cmdOpen = $state(false);
   let helpOpen = $state(false);
   let profilePk = $state<string | null>(null);
@@ -49,8 +48,6 @@
   let usernameErr = $state("");
   let claimingUsername = $state(false);
   let usernameTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const lastBlock = $derived(recoveryKey ? recoveryKey.split("-").slice(-1)[0] : "");
 
   $effect(() => { init(); });
   $effect(() => {
@@ -142,18 +139,6 @@
     invoke<string>("get_public_key").then((a) => { myAddr = a; }).catch(() => {});
   });
 
-  async function create() {
-    err = "";
-    if (!name.trim() || !pass.trim()) { err = "Les deux champs sont requis"; return; }
-    if (pass.length < 8) { err = t('su.err.min8'); return; }
-    try {
-      const id = await invoke<{ public_key_hex: string }>("create_identity", { displayName: name.trim(), password: pass });
-      pk = id.public_key_hex;
-      recoveryKey = await invoke<string>("get_recovery_key");
-      step = "recovery";
-    } catch (e) { err = (e as Error)?.toString() || "Erreur"; }
-  }
-
   async function unlock() {
     err = "";
     if (!pass.trim()) { err = "Mot de passe requis"; return; }
@@ -215,27 +200,6 @@
 
   function skipUsername() { ready = true; }
 
-  async function copyKey() {
-    await navigator.clipboard.writeText(recoveryKey);
-    keyCopied = true;
-    setTimeout(() => keyCopied = false, 2000);
-  }
-
-  function goToConfirm() {
-    confirmInput = "";
-    err = "";
-    step = "confirm";
-  }
-
-  async function finishConfirm() {
-    err = "";
-    if (confirmInput.trim().toLowerCase() !== lastBlock.toLowerCase()) {
-      err = t('su.err.charsMismatch');
-      return;
-    }
-    await proceedAfterAuth();
-  }
-
   function nav(v: string) { view = v; }
   function handleCmd(id: string) { nav(id); }
 </script>
@@ -252,61 +216,14 @@
   <Welcome
     onCreated={async (created_pk) => {
       pk = created_pk;
-      try {
-        recoveryKey = await invoke<string>("get_recovery_key");
-        // Force the backup gate: the user must see and confirm their recovery
-        // key before entering. Losing it means losing the account for good.
-        step = "recovery";
-      } catch {
-        // If the key can't be fetched (rare), don't lock the user out of the
-        // account they just created — they can still back up later via Profile.
-        recoveryKey = "";
-        ready = true;
-      }
+      // Welcome.svelte already ran the full secure flow — create → 24-word
+      // BIP39 backup → verify (and, on the create path, claimed the @pseudo).
+      // So go straight in; proceedAfterAuth only prompts for a handle if the
+      // restore path left the account without one.
+      await proceedAfterAuth();
     }}
     onSwitchToUnlock={() => step = "unlock"}
   />
-
-{:else if !ready && step === "recovery"}
-  <div class="setup-screen">
-    <QuantumField density={1.1} />
-    <div class="setup-box card card-hero">
-      <h1 class="setup-title">{t('su.rec.title')}</h1>
-      <p class="setup-sub">{t('su.rec.intro')}</p>
-      <div class="recovery-box">
-        <code class="recovery-key">{recoveryKey}</code>
-      </div>
-      <div class="recovery-warn">
-        <span class="rw-icon">!</span>
-        {t('su.rec.warn')}
-      </div>
-      <div class="setup-form">
-        <button class="btn btn-ghost sb" onclick={copyKey}>{keyCopied ? t('su.copied') : t('su.rec.copyKey')}</button>
-        <button class="btn btn-primary sb" onclick={goToConfirm}>{t('su.rec.saved')}</button>
-      </div>
-    </div>
-  </div>
-
-{:else if !ready && step === "confirm"}
-  <div class="setup-screen">
-    <QuantumField density={1.1} />
-    <div class="setup-box card card-hero">
-      <h1 class="setup-title">{t('su.confirm.title')}</h1>
-      <p class="setup-sub">{@html t('su.confirm.intro')}</p>
-      <div class="setup-form">
-        <div class="fg">
-          <label for="confirm-input">{t('su.confirm.label')}</label>
-          <input class="input mono" id="confirm-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
-            bind:value={confirmInput} placeholder="ex: a3f7b2c4"
-            onkeydown={(e) => e.key === 'Enter' && finishConfirm()} />
-          <span class="fg-hint">{t('su.confirm.hint')}</span>
-        </div>
-        {#if err}<div class="setup-err">{err}</div>{/if}
-        <button class="btn btn-primary sb" onclick={finishConfirm}>{t('su.confirm.enter')}</button>
-        <button class="btn btn-ghost sb" onclick={() => step = "recovery"}>{t('su.confirm.review')}</button>
-      </div>
-    </div>
-  </div>
 
 {:else if !ready && step === "username"}
   <div class="setup-screen">
@@ -347,6 +264,9 @@
   </div>
 
 {:else if !ready}
+  <!-- Unlock screen. Identity creation lives entirely in Welcome.svelte (step
+       "welcome"); this screen only ever unlocks an existing vault. "Nouvelle
+       identité" routes back to the secure onboarding. -->
   <div class="setup-screen">
     <QuantumField density={1.1} />
     <div class="setup-box card card-hero">
@@ -354,52 +274,32 @@
         <QuantaMark size={32} tone="aurora" />
         <div class="setup-brand-txt">
           <div class="setup-wordmark">QUANTA</div>
-          <div class="setup-tag">{step === "create" ? t('auth.create.tag') : t('auth.unlock.tag')}</div>
+          <div class="setup-tag">{t('auth.unlock.tag')}</div>
         </div>
       </div>
-      <h1 class="setup-title">{step === "create" ? t('auth.create.title') : t('auth.unlock.title')}</h1>
-      <p class="setup-sub">
-        {step === "create" ? t('auth.create.sub') : t('auth.unlock.sub')}
-      </p>
-      {#if step === "create"}
-        <div class="setup-form">
-          <div class="fg">
-            <label for="name-input">{t('auth.displayName')}</label>
-            <input class="input" id="name-input" type="text" bind:value={name} placeholder={t('auth.displayNamePh')} maxlength="64" />
-          </div>
-          <div class="fg">
-            <label for="pass-input">{t('auth.password')}</label>
-            <input class="input" id="pass-input" type="password" bind:value={pass} placeholder={t('auth.passwordPh8')} />
-            <StrengthMeter password={pass} />
-            <span class="fg-hint">{t('auth.hint')}</span>
-          </div>
-          {#if err}<div class="setup-err">{err}</div>{/if}
-          <button class="btn btn-primary sb" onclick={create}>{t('auth.createBtn')}</button>
-          <button class="btn btn-ghost sb" onclick={() => step = "unlock"}>{t('auth.haveIdentity')}</button>
+      <h1 class="setup-title">{t('auth.unlock.title')}</h1>
+      <p class="setup-sub">{t('auth.unlock.sub')}</p>
+      <div class="setup-form">
+        {#if bioEnabled}
+          <button class="bio-btn" onclick={unlockBio} disabled={bioBusy}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+              <path d="M12 11v3.5M8.5 9.5a3.5 3.5 0 017 0v4a3.5 3.5 0 01-.6 2"/>
+              <path d="M5.5 8a6.5 6.5 0 0113 0v5a6.5 6.5 0 01-1.4 4"/>
+              <path d="M8.6 18.2A3.5 3.5 0 018.5 17v-2"/>
+            </svg>
+            {bioBusy ? t('auth.bioBusy') : t('auth.bioUnlock')}
+          </button>
+          <div class="bio-sep"><span>{t('auth.bioOr')}</span></div>
+        {/if}
+        <div class="fg">
+          <label for="unlock-pass">{t('auth.password')}</label>
+          <input class="input" id="unlock-pass" type="password" bind:value={pass} placeholder={t('auth.passwordPh')}
+            onkeydown={(e) => e.key === 'Enter' && unlock()} />
         </div>
-      {:else}
-        <div class="setup-form">
-          {#if bioEnabled}
-            <button class="bio-btn" onclick={unlockBio} disabled={bioBusy}>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-                <path d="M12 11v3.5M8.5 9.5a3.5 3.5 0 017 0v4a3.5 3.5 0 01-.6 2"/>
-                <path d="M5.5 8a6.5 6.5 0 0113 0v5a6.5 6.5 0 01-1.4 4"/>
-                <path d="M8.6 18.2A3.5 3.5 0 018.5 17v-2"/>
-              </svg>
-              {bioBusy ? t('auth.bioBusy') : t('auth.bioUnlock')}
-            </button>
-            <div class="bio-sep"><span>{t('auth.bioOr')}</span></div>
-          {/if}
-          <div class="fg">
-            <label for="unlock-pass">{t('auth.password')}</label>
-            <input class="input" id="unlock-pass" type="password" bind:value={pass} placeholder={t('auth.passwordPh')}
-              onkeydown={(e) => e.key === 'Enter' && unlock()} />
-          </div>
-          {#if err}<div class="setup-err">{err}</div>{/if}
-          <button class="btn btn-primary sb" onclick={unlock}>{t('auth.unlockBtn')}</button>
-          <button class="btn btn-ghost sb" onclick={() => { step = "welcome"; pass = ""; err = ""; }}>{t('auth.newIdentity')}</button>
-        </div>
-      {/if}
+        {#if err}<div class="setup-err">{err}</div>{/if}
+        <button class="btn btn-primary sb" onclick={unlock}>{t('auth.unlockBtn')}</button>
+        <button class="btn btn-ghost sb" onclick={() => { step = "welcome"; pass = ""; err = ""; }}>{t('auth.newIdentity')}</button>
+      </div>
       <div class="lang-row"><LanguageSelect /></div>
     </div>
   </div>
@@ -511,19 +411,6 @@
   }
   .sb { width: 100%; }
 
-  .recovery-box {
-    padding: 20px;
-    margin-bottom: 16px;
-    background: var(--color-bg-2);
-    border-radius: var(--radius-sm);
-    word-break: break-all;
-  }
-  .recovery-key {
-    font-family: var(--font-mono);
-    font-size: 13px; font-weight: 500;
-    color: var(--color-text-0);
-    letter-spacing: 0.04em; line-height: 1.8;
-  }
   /* Touch ID — the fast path, visually first-class on the unlock card. */
   .bio-btn {
     display: flex; align-items: center; justify-content: center; gap: 10px;
@@ -548,23 +435,6 @@
   }
   .bio-sep::before, .bio-sep::after {
     content: ""; flex: 1; height: 1px; background: var(--color-border);
-  }
-
-  .recovery-warn {
-    display: flex; align-items: flex-start; gap: 10px;
-    font-size: 12px; color: var(--color-text-1);
-    margin-bottom: 24px; padding: 12px 16px;
-    background: var(--color-bg-1);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    line-height: 1.6;
-  }
-  .rw-icon {
-    width: 18px; height: 18px; min-width: 18px;
-    border-radius: 50%;
-    background: var(--color-amber); color: #000;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700;
   }
 
   /* Layout handled by app.css .app-shell and .main-content */
