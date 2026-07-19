@@ -47,7 +47,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// has staked (deterministic, clock-free); (c) **PQ-ENVELOPE-1** — gossip
 /// envelopes are signed with ML-DSA-65, not Ed25519. A v4 node neither builds nor
 /// validates any of these, so v4↔v5 nodes are incompatible from block 0.
-pub const TORUS_PROTOCOL_VERSION: u8 = 5;
+///
+/// MSIG-1: bumped **5 → 6** — native post-quantum **M-of-N multisig** authority. A
+/// tx flagged `pq_public_key == "msig1"` is authorized by ≥ threshold valid ML-DSA
+/// signatures from distinct registered keys over its pre-image (verified on-chain,
+/// no threshold cryptography), and its `from` is the address that commits to the
+/// policy `{keys, threshold}`. A v5 node has no multisig path — it would run the
+/// single-key checks, fail the key↔address binding, and reject the tx (and any block
+/// containing it). The change is otherwise **additive**: single-key txs are
+/// byte-identical (no new `Transaction` wire field — the authority rides the existing
+/// optional fields), so genesis and all prior history are UNCHANGED; v5↔v6 nodes only
+/// diverge once a multisig tx is sealed.
+pub const TORUS_PROTOCOL_VERSION: u8 = 6;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 

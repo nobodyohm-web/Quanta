@@ -71,6 +71,39 @@ pub struct CryptoEngine {
 /// NE JAMAIS modifier : changerait l'adresse de **toutes** les identités existantes.
 pub const ADDR_DOMAIN: &[u8] = b"QUANTA-ADDR-V1";
 
+/// MSIG-1 — domain tag for **multisig account** address derivation, distinct from
+/// [`ADDR_DOMAIN`] so a multisig address can never collide with a single-key one.
+pub const MSIG_DOMAIN: &[u8] = b"QUANTA-MSIG-V1";
+
+/// MSIG-1 — derive the 32-byte address of an **M-of-N multisig account** from its
+/// policy (the registered ML-DSA public keys + the threshold).
+///
+/// The keys are **canonicalized** — sorted and de-duplicated — so the address is
+/// independent of key order and of accidental duplicates, and the encoding is
+/// **injective** (length-prefixed) so no two distinct policies collide. The account
+/// address therefore *commits* to `{keys, threshold}`: a spend reveals them and they
+/// cannot be swapped without changing the address (rebind-proof), exactly as a
+/// single-key address commits to its one key. Pure & deterministic (C1-safe).
+pub fn multisig_address_bytes(pubkeys: &[String], threshold: u32) -> [u8; 32] {
+    let mut keys: Vec<&str> = pubkeys.iter().map(|s| s.as_str()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut h = blake3::Hasher::new();
+    h.update(MSIG_DOMAIN);
+    h.update(&(keys.len() as u32).to_le_bytes());
+    for k in &keys {
+        h.update(&(k.len() as u32).to_le_bytes());
+        h.update(k.as_bytes());
+    }
+    h.update(&threshold.to_le_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// MSIG-1 — hex form of [`multisig_address_bytes`] (the on-chain `from`/`to` value).
+pub fn multisig_address_hex(pubkeys: &[String], threshold: u32) -> String {
+    hex::encode(multisig_address_bytes(pubkeys, threshold))
+}
+
 impl CryptoEngine {
     pub fn new() -> Self { Self { key_pair: None, ml_dsa: None, ml_dsa_primary: None } }
 

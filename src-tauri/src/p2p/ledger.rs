@@ -113,6 +113,32 @@ impl VerifiedTx {
     }
 }
 
+/// MSIG-1 — native post-quantum **M-of-N multisig** authority, carried as JSON in a
+/// multisig tx's `pq_signature` field (the tx is flagged by `pq_public_key ==
+/// MSIG_TAG`). No new `Transaction` wire field, so every single-key tx is byte-for-
+/// byte unchanged (mainnet frozen genesis intact).
+///
+/// The differentiator: institutional custodians have **no threshold/MPC scheme for
+/// ML-DSA**, so quorum custody of a post-quantum account looked impossible. This
+/// closes it with **on-chain** multisig — N independent ML-DSA keys, each signing the
+/// same pre-image, verified on-chain — needing *no* threshold cryptography on the
+/// lattice signature. The account address commits to `{keys, threshold}`
+/// ([`crate::security::multisig_address_bytes`]), so the policy is revealed at spend
+/// and cannot be swapped (rebind-proof).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MultisigAuth {
+    /// The N registered ML-DSA-65 public keys (hex).
+    pub pubkeys: Vec<String>,
+    /// The quorum M: at least this many DISTINCT registered keys must sign.
+    pub threshold: u32,
+    /// ML-DSA signatures over the tx pre-image (≥ threshold valid, distinct keys).
+    pub signatures: Vec<String>,
+}
+
+/// MSIG-1 — the `pq_public_key` value that discriminates a multisig tx (also the
+/// value bound into its signing pre-image).
+const MSIG_TAG: &str = "msig1";
+
 /// The ATN distributed ledger
 ///
 /// `Clone` backs GADGET-5B's **validate-before-commit** fork reconciliation: a
@@ -1779,6 +1805,13 @@ impl Ledger {
         if tx.tx_type == TxType::Slash {
             return Ok(true);
         }
+        // MSIG-1: a multisig tx is flagged by `pq_public_key == MSIG_TAG`. Its
+        // authority is a QUORUM of independent ML-DSA signatures, not a single one,
+        // so it takes a distinct path *before* the single-key requirements below
+        // (it carries no Ed25519 `signature` and no single `pq_signature`).
+        if tx.pq_public_key.as_deref() == Some(MSIG_TAG) {
+            return Self::verify_multisig(tx);
+        }
         // Any other from value must carry a valid signature, regardless of
         // destination (BURN included).
         if tx.signature.is_empty() {
@@ -1831,6 +1864,63 @@ impl Ledger {
         // Ed25519 signature for wire-compat; it is NOT consulted for authority.)
         let pq_sig = hex::decode(pq_sig_hex).map_err(|_| "PQ signature invalide")?;
         Ok(CryptoEngine::verify_pq(pq_pk_hex, payload.as_bytes(), &pq_sig))
+    }
+
+    /// MSIG-1 — verify an M-of-N multisig authority. `Ok(true)` iff ALL hold:
+    /// 1. `from` == the address derived from the revealed policy `{keys, threshold}`
+    ///    ([`crate::security::multisig_address_hex`]) — the rebind-proof binding: a
+    ///    different key set or threshold yields a different `from`, so an attacker
+    ///    cannot substitute their own keys onto someone else's multisig account.
+    /// 2. The wire `hash` equals the recomputed pre-image hash (no malleability).
+    /// 3. At least `threshold` **distinct** registered keys each carry a valid
+    ///    ML-DSA-65 signature over that pre-image (duplicate signatures from one key
+    ///    cannot inflate the count — verification is per-distinct-key).
+    ///
+    /// Pure (no ledger state) and deterministic — same inputs ⇒ same verdict on
+    /// every node (C1), like the single-key `verify_tx`.
+    fn verify_multisig(tx: &Transaction) -> Result<bool, String> {
+        let auth: MultisigAuth = match tx.pq_signature.as_deref() {
+            Some(json) => match serde_json::from_str(json) {
+                Ok(a) => a,
+                Err(_) => return Ok(false),
+            },
+            None => return Ok(false),
+        };
+        // Canonicalize exactly as the address derivation does (sorted, de-duplicated)
+        // so counting is per-DISTINCT-key and independent of order/duplicates.
+        let mut keys = auth.pubkeys.clone();
+        keys.sort();
+        keys.dedup();
+        if keys.is_empty() || auth.threshold == 0 || auth.threshold as usize > keys.len() {
+            return Ok(false);
+        }
+        // (1) Binding — `from` must be the address of exactly this policy.
+        if crate::security::multisig_address_hex(&keys, auth.threshold) != tx.from {
+            return Ok(false);
+        }
+        // (2) Pre-image + hash integrity. The pq_pk slot signed is the MSIG tag.
+        let payload = Self::tx_signing_preimage(
+            &tx.id, &tx.from, &tx.to, tx.amount, &tx.timestamp, &tx.tx_type, tx.nonce, MSIG_TAG,
+        );
+        if tx.hash != hex::encode(blake3::hash(payload.as_bytes()).as_bytes()) {
+            return Ok(false);
+        }
+        // (3) Count distinct registered keys carrying ≥1 valid signature.
+        let mut sigs: Vec<Vec<u8>> = Vec::with_capacity(auth.signatures.len());
+        for s in &auth.signatures {
+            match hex::decode(s) {
+                Ok(b) => sigs.push(b),
+                Err(_) => return Ok(false),
+            }
+        }
+        let valid_signers = keys
+            .iter()
+            .filter(|pk| {
+                sigs.iter()
+                    .any(|sig| CryptoEngine::verify_pq(pk, payload.as_bytes(), sig))
+            })
+            .count();
+        Ok(valid_signers as u32 >= auth.threshold)
     }
 
     /// Verify the integrity of the entire chain:
@@ -3293,6 +3383,67 @@ impl Ledger {
             nonce,
             pq_signature: Some(hex::encode(&quantum)),
             pq_public_key: Some(pq_pk),
+            fault_proof: None,
+            slash_unbonding: None,
+        })
+    }
+
+    /// MSIG-1 — build a signed M-of-N multisig transaction. `signers` is the subset
+    /// (≥ `threshold`) of the registered keys that sign now; each signs the SAME
+    /// pre-image **independently** (no threshold cryptography). The result verifies
+    /// through [`Self::verify_multisig`]. `pub(crate)` for tests + the future wallet
+    /// multisig flow. Fails on an invalid policy (empty keys, threshold out of range).
+    ///
+    /// `#[cfg(test)]` for now: the only caller is the test suite. The production
+    /// multi-party signing flow (each holder signs offline, signatures combined)
+    /// lands with the wallet UX; the on-chain verification path is already live.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_multisig_tx(
+        &mut self,
+        to: &str,
+        amount: u64,
+        tx_type: TxType,
+        pubkeys: &[String],
+        threshold: u32,
+        signers: &[&CryptoEngine],
+    ) -> Result<Transaction, String> {
+        let mut keys = pubkeys.to_vec();
+        keys.sort();
+        keys.dedup();
+        if keys.is_empty() || threshold == 0 || threshold as usize > keys.len() {
+            return Err("politique multisig invalide".into());
+        }
+        let from = crate::security::multisig_address_hex(&keys, threshold);
+        let nonce = self.get_nonce(&from);
+        self.increment_nonce(&from);
+        let (id, ts, payload, hash) = self.next_tx_at(
+            &from,
+            to,
+            amount,
+            tx_type.clone(),
+            Utc::now().to_rfc3339(),
+            nonce,
+            MSIG_TAG,
+        );
+        let mut signatures = Vec::with_capacity(signers.len());
+        for s in signers {
+            signatures.push(hex::encode(s.sign_pq(payload.as_bytes())?));
+        }
+        let auth = MultisigAuth { pubkeys: keys, threshold, signatures };
+        let auth_json = serde_json::to_string(&auth).map_err(|_| "sérialisation multisig")?;
+        Ok(Transaction {
+            id,
+            from,
+            to: to.into(),
+            amount,
+            tx_type,
+            timestamp: ts,
+            signature: String::new(),
+            hash,
+            nonce,
+            pq_signature: Some(auth_json),
+            pq_public_key: Some(MSIG_TAG.to_string()),
             fault_proof: None,
             slash_unbonding: None,
         })
@@ -5955,5 +6106,91 @@ mod tests {
             CryptoEngine::address_hex_binds_key_hex(&tx.from, tx.pq_public_key.as_deref().unwrap()),
             "the revealed key intrinsically hashes to `from` (the address IS the binding)"
         );
+    }
+
+    // ── MSIG-1 — native post-quantum M-of-N multisig ─────────────────────────
+
+    fn msig_signer() -> CryptoEngine {
+        let mut c = CryptoEngine::new();
+        c.generate_pq_identity().unwrap();
+        c
+    }
+
+    #[test]
+    fn msig1_address_is_deterministic_order_free_and_policy_bound() {
+        let s: Vec<CryptoEngine> = (0..3).map(|_| msig_signer()).collect();
+        let keys: Vec<String> = s.iter().map(|c| c.pq_identity_hex().unwrap()).collect();
+
+        let a = crate::security::multisig_address_hex(&keys, 2);
+        assert_eq!(a, crate::security::multisig_address_hex(&keys, 2), "deterministic");
+        let mut reordered = keys.clone();
+        reordered.reverse();
+        assert_eq!(a, crate::security::multisig_address_hex(&reordered, 2), "order-independent");
+        assert_ne!(a, crate::security::multisig_address_hex(&keys, 3), "threshold-bound");
+        // A different key set ⇒ a different address.
+        let other = msig_signer().pq_identity_hex().unwrap();
+        let swapped = vec![keys[0].clone(), keys[1].clone(), other];
+        assert_ne!(a, crate::security::multisig_address_hex(&swapped, 2), "key-set-bound");
+        // A multisig address never collides with a single-key address (domain sep).
+        assert_ne!(a, CryptoEngine::ml_dsa_address_hex(keys[0].as_bytes()));
+    }
+
+    #[test]
+    fn msig1_quorum_accept_and_reject() {
+        let s: Vec<CryptoEngine> = (0..3).map(|_| msig_signer()).collect();
+        let keys: Vec<String> = s.iter().map(|c| c.pq_identity_hex().unwrap()).collect();
+        let addr = crate::security::multisig_address_hex(&keys, 2);
+
+        // 2-of-3 with two DISTINCT signers → accepted. Any valid pair works.
+        for pair in [[0usize, 1], [0, 2], [1, 2]] {
+            let mut l = Ledger::new();
+            let tx = l
+                .build_multisig_tx("recipient", 100, TxType::Transfer, &keys, 2, &[&s[pair[0]], &s[pair[1]]])
+                .unwrap();
+            assert_eq!(tx.from, addr, "from is the policy address");
+            assert!(VerifiedTx::new(tx).is_some(), "2-of-3 pair {pair:?} accepted");
+        }
+
+        // Below threshold (one signer) → rejected.
+        let mut l = Ledger::new();
+        let low = l.build_multisig_tx("r", 100, TxType::Transfer, &keys, 2, &[&s[0]]).unwrap();
+        assert!(VerifiedTx::new(low).is_none(), "1 signature < 2 threshold rejected");
+
+        // Duplicate signer cannot inflate the quorum (counted per DISTINCT key).
+        let mut l = Ledger::new();
+        let dup = l.build_multisig_tx("r", 100, TxType::Transfer, &keys, 2, &[&s[0], &s[0]]).unwrap();
+        assert!(VerifiedTx::new(dup).is_none(), "same key twice is one signer");
+
+        // An outsider's signature does not count toward the quorum.
+        let outsider = msig_signer();
+        let mut l = Ledger::new();
+        let out = l
+            .build_multisig_tx("r", 100, TxType::Transfer, &keys, 2, &[&s[0], &outsider])
+            .unwrap();
+        assert!(VerifiedTx::new(out).is_none(), "non-registered signer does not count");
+    }
+
+    #[test]
+    fn msig1_rejects_rebind_and_tamper() {
+        let s: Vec<CryptoEngine> = (0..3).map(|_| msig_signer()).collect();
+        let keys: Vec<String> = s.iter().map(|c| c.pq_identity_hex().unwrap()).collect();
+
+        // Rebind: replace a registered key in the auth → `from` no longer matches.
+        let mut l = Ledger::new();
+        let mut tx = l
+            .build_multisig_tx("r", 100, TxType::Transfer, &keys, 2, &[&s[0], &s[1]])
+            .unwrap();
+        let mut auth: MultisigAuth = serde_json::from_str(tx.pq_signature.as_ref().unwrap()).unwrap();
+        auth.pubkeys[0] = msig_signer().pq_identity_hex().unwrap();
+        tx.pq_signature = Some(serde_json::to_string(&auth).unwrap());
+        assert!(VerifiedTx::new(tx).is_none(), "rebinding keys breaks the address binding");
+
+        // Tamper the amount → recomputed hash disagrees → rejected.
+        let mut l = Ledger::new();
+        let mut tx = l
+            .build_multisig_tx("r", 100, TxType::Transfer, &keys, 2, &[&s[0], &s[1]])
+            .unwrap();
+        tx.amount = 999_999;
+        assert!(VerifiedTx::new(tx).is_none(), "amount tamper breaks the pre-image hash");
     }
 }
