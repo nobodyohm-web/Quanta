@@ -42,6 +42,11 @@
   }
   let fin = $state<Finality | null>(null);
 
+  // ── État de chargement honnête : « — » tant que rien n'est confirmé,
+  //    ligne d'erreur discrète si un refresh échoue (jamais de catch muet).
+  let loaded = $state(false);
+  let loadError = $state(false);
+
   let miningRate = $derived(uptime > 0 ? earned / uptime : 0);
 
   function fmtQ(n: number) { return n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }); }
@@ -52,12 +57,16 @@
       earned = r?.atn_earned ?? 0;
       trustScore = r?.trust_score ?? 0;
       uptime = r?.uptime_minutes ?? 0;
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch { loadError = true; }
     try {
       const s = await invoke<any>("get_node_status");
       peers = s?.peer_count ?? 0;
       mode = s?.mode ?? "Actif";
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch { loadError = true; }
     try {
       const o = await invoke<any>("get_chain_overview", { limit: 0 });
       maxSupply = o.max_supply_qta ?? 100_000_000;
@@ -65,16 +74,22 @@
       burnedQta = o.total_burned_qta ?? 0;
       circulatingQta = o.total_supply_qta ?? 0;
       pctToCap = o.pct_to_cap ?? 0;
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch { loadError = true; }
     try {
       const e = await invoke<any>("get_economy_stats");
       emissionPerHour = e?.emission_per_hour ?? 0;
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch { loadError = true; }
     try {
       const f = await invoke<Finality>("get_finality_status");
       fin = f;
       chainHeight = f.height;
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch { loadError = true; }
   }
 
   $effect(() => {
@@ -213,6 +228,9 @@
     <div>
       <div class="page-title">{t('mine.title')}</div>
       <div class="page-sub">{t('mine.subtitle')}</div>
+      {#if loadError}
+        <div class="load-err">{t('common.errLoad')}</div>
+      {/if}
     </div>
     <span class="tag {modeColors[mode] ?? 'tag-dim'}">
       {mode === 'Actif' ? t('db.mode.actif') : mode === 'Guardian' ? t('db.mode.guardian') : mode === 'Recherche' ? t('db.mode.research') : mode}
@@ -256,22 +274,22 @@
   <div class="grid-4 stats-row">
     <div class="card stat-card">
       <div class="stat-label">{t('mine.hero.forged')}</div>
-      <div class="stat-val sm">+{earned.toFixed(2)}</div>
+      <div class="stat-val sm">{loaded ? `+${earned.toFixed(2)}` : '—'}</div>
       <div class="stat-sub">≈ {(miningRate * 1440).toFixed(2)} {t('db.per_day')}</div>
     </div>
     <div class="card stat-card">
       <div class="stat-label">{t('db.uptime')}</div>
-      <div class="stat-val sm">{formatUptime(uptime)}</div>
+      <div class="stat-val sm">{loaded ? formatUptime(uptime) : '—'}</div>
       <div class="stat-sub">{t('db.node_active')}</div>
     </div>
     <div class="card stat-card">
       <div class="stat-label">{t('db.peers')}</div>
-      <div class="stat-val sm">{peers}</div>
+      <div class="stat-val sm">{loaded ? peers : '—'}</div>
       <div class="stat-sub">{t('db.connected')}</div>
     </div>
     <div class="card stat-card">
       <div class="stat-label">{t('db.height')}</div>
-      <div class="stat-val sm">{chainHeight.toLocaleString('fr-FR')}</div>
+      <div class="stat-val sm">{loaded ? chainHeight.toLocaleString('fr-FR') : '—'}</div>
       <div class="stat-sub">{t('db.blocks')}</div>
     </div>
   </div>
@@ -330,10 +348,10 @@
     <div class="card">
       <div class="card-title">{t('db.currency_title')}</div>
       <div class="supply-grid">
-        <div><div class="sup-k">{t('db.hard_cap')}</div><div class="sup-v">{fmtQ(maxSupply)}</div></div>
-        <div><div class="sup-k">{t('db.issued')}</div><div class="sup-v">{fmtQ(minedQta)}</div></div>
-        <div><div class="sup-k">{t('db.burned')}</div><div class="sup-v">{fmtQ(burnedQta)}</div></div>
-        <div><div class="sup-k">{t('db.circulating')}</div><div class="sup-v">{fmtQ(circulatingQta)}</div></div>
+        <div><div class="sup-k">{t('db.hard_cap')}</div><div class="sup-v">{loaded ? fmtQ(maxSupply) : '—'}</div></div>
+        <div><div class="sup-k">{t('db.issued')}</div><div class="sup-v">{loaded ? fmtQ(minedQta) : '—'}</div></div>
+        <div><div class="sup-k">{t('db.burned')}</div><div class="sup-v">{loaded ? fmtQ(burnedQta) : '—'}</div></div>
+        <div><div class="sup-k">{t('db.circulating')}</div><div class="sup-v">{loaded ? fmtQ(circulatingQta) : '—'}</div></div>
       </div>
       <div class="sup-bar"><div class="sup-fill" style="width:{Math.min(100, Math.max(pctToCap, pctToCap > 0 ? 0.5 : 0))}%;"></div></div>
       <div class="sup-cap-line">{pctToCap < 0.01 && pctToCap > 0 ? '<0,01' : pctToCap.toFixed(2)}{t('db.cap_issued')} · {t('db.deflationary')}</div>
@@ -348,6 +366,8 @@
 
 <style>
   .mine-p { font-size: var(--text-sm); color: var(--color-text-2); line-height: 1.55; }
+
+  .load-err { color: var(--color-text-2); font-size: var(--text-sm); margin-top: 4px; }
 
   /* ── Comprendre ── */
   .understand { margin-bottom: 12px; }

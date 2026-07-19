@@ -4,6 +4,11 @@
   import EmptyState from "./EmptyState.svelte";
   import { t } from "./i18n.svelte";
   import { FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
+  import { requestSend } from "./intents.svelte";
+
+  // Navigation callback from +page — money-send routes through the Wallet's
+  // 2-step review flow (no direct transfer here). Single send engine.
+  let { onNavigate }: { onNavigate: (view: string) => void } = $props();
 
   type Contact = { username: string; pk: string; code: string; addedAt: number };
   const STORE = "quanta-contacts";
@@ -19,12 +24,6 @@
   let adding = $state(false);
   let addErr = $state("");
   let addOk = $state("");
-
-  // Inline send
-  let sendFor = $state<string | null>(null); // pk du contact en cours d'envoi
-  let sendAmount = $state("");
-  let sendBusy = $state(false);
-  let sendMsg = $state<{ ok: boolean; text: string } | null>(null);
 
   function load() {
     try {
@@ -81,28 +80,13 @@
   function removeContact(pk: string) {
     contacts = contacts.filter(c => c.pk !== pk);
     persist();
-    if (sendFor === pk) sendFor = null;
   }
 
-  function openSend(pk: string) {
-    sendFor = sendFor === pk ? null : pk;
-    sendAmount = ""; sendMsg = null;
-  }
-
-  async function sendTo(c: Contact) {
-    const amt = parseFloat(sendAmount);
-    if (!isFinite(amt) || amt <= 0) { sendMsg = { ok: false, text: t('ct.invalidAmount') }; return; }
-    sendBusy = true; sendMsg = null;
-    try {
-      await invoke("ledger_transfer", { to: c.pk, amount: amt });
-      sendMsg = { ok: true, text: `${amt.toFixed(2)}${t('ct.sentMid')}@${c.username}${t('ct.sentPost')}` };
-      sendAmount = "";
-      setTimeout(() => { sendMsg = null; sendFor = null; }, FEEDBACK_OK_MS);
-    } catch (e) {
-      sendMsg = { ok: false, text: e instanceof Error ? e.message : String(e) };
-    } finally {
-      sendBusy = false;
-    }
+  // Money-send is a single engine: hand the recipient to the Wallet's Send
+  // panel (net/burn preview → sign) instead of transferring straight from here.
+  function startSend(c: Contact) {
+    requestSend("@" + c.username);
+    onNavigate("wallet");
   }
 </script>
 
@@ -167,29 +151,17 @@
       <EmptyState minHeight={150}>{t('ct.empty')}</EmptyState>
     {:else}
       {#each contacts as c (c.pk)}
-        <div class="ct-row" class:open={sendFor === c.pk}>
+        <div class="ct-row">
           <Identicon pubkey={c.pk} size={36} />
           <div class="ct-id">
             <div class="ct-name">@{c.username}</div>
             <div class="ct-code mono">{c.code}</div>
           </div>
           <div class="ct-actions">
-            <button class="btn btn-primary btn-sm" onclick={() => openSend(c.pk)}>{t('ct.send')}</button>
+            <button class="btn btn-primary btn-sm" onclick={() => startSend(c)}>{t('ct.send')}</button>
             <button class="ct-remove" onclick={() => removeContact(c.pk)} title={t('ct.remove')} aria-label={t('ct.remove')}>×</button>
           </div>
         </div>
-        {#if sendFor === c.pk}
-          <div class="ct-send">
-            <input class="input mono" type="number" min="0.01" step="0.01" placeholder={t('ct.amountPlaceholder')}
-              bind:value={sendAmount} onkeydown={(e) => e.key === 'Enter' && sendTo(c)} />
-            <button class="btn btn-primary" onclick={() => sendTo(c)} disabled={sendBusy}>
-              {#if sendBusy}{t('ct.sending')}{:else}{t('ct.sendToPre')}@{c.username}{/if}
-            </button>
-          </div>
-          {#if sendMsg}
-            <div class="ct-msg" class:ok={sendMsg.ok} class:err={!sendMsg.ok}>{sendMsg.text}</div>
-          {/if}
-        {/if}
       {/each}
     {/if}
   </div>
@@ -224,7 +196,6 @@
     padding: 12px 0; border-bottom: 1px solid var(--color-border);
   }
   .ct-row:last-child { border-bottom: none; }
-  .ct-row.open { border-bottom-color: transparent; }
   .ct-id { flex: 1; min-width: 0; }
   .ct-name { font-size: var(--text-base); font-weight: 700; color: var(--color-accent); }
   .ct-code {
@@ -236,8 +207,7 @@
     opacity: 0; transition: opacity var(--dur-fast) var(--ease-out);
   }
   .ct-row:hover .ct-actions,
-  .ct-row:focus-within .ct-actions,
-  .ct-row.open .ct-actions { opacity: 1; }
+  .ct-row:focus-within .ct-actions { opacity: 1; }
   @media (hover: none) { .ct-actions { opacity: 1; } }
   .ct-remove {
     width: 28px; height: 28px; border: none; border-radius: 8px;
@@ -248,20 +218,7 @@
   }
   .ct-remove:hover { background: rgba(229,72,77,0.08); color: var(--color-red); }
 
-  /* ── Envoi inline — puits discret rattaché à la ligne ── */
-  .ct-send {
-    display: flex; align-items: center; gap: 8px;
-    margin: 2px 0 10px 48px; padding: 10px;
-    background: var(--color-bg-1); border: 1px solid var(--color-border);
-    border-radius: 12px;
-  }
-  .ct-send .input { flex: 1; }
-  .ct-msg { font-size: var(--text-sm); margin: 0 0 10px 48px; }
-  .ct-msg.ok { color: var(--color-green); }
-  .ct-msg.err { color: var(--color-red); }
-
   @media (max-width: 720px) {
     .cc-grid, .add-grid { grid-template-columns: 1fr; }
-    .ct-send, .ct-msg { margin-left: 0; }
   }
 </style>

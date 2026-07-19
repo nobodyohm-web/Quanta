@@ -422,7 +422,7 @@
                navigation, elle, ne peut plus jamais geler. -->
           <svelte:boundary onerror={(e) => console.error("[view]", e)}>
             {#if view === "wallet"}<Wallet />
-            {:else if view === "contacts"}<Contacts />
+            {:else if view === "contacts"}<Contacts onNavigate={nav} />
             {:else if view === "dashboard"}<Dashboard />
             {:else if view === "network"}<Network />
             {:else if view === "profile"}<Profile />

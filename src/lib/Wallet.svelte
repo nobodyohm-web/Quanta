@@ -3,9 +3,10 @@
   import Identicon from "./Identicon.svelte";
   import Qr from "./Qr.svelte";
   import EmptyState from "./EmptyState.svelte";
-  import { untrack } from "svelte";
+  import { untrack, tick } from "svelte";
   import { t, type TKey } from "./i18n.svelte";
   import { getPrefs, setPrefs } from "./prefs";
+  import { takeSendIntent } from "./intents.svelte";
   import {
     parsePaymentUri, formatPaymentUri, splitTransfer, fmtQ, shortAddr, blocksToEta, isAddress,
     TICKER, FEEDBACK_COPY_MS,
@@ -119,6 +120,22 @@
     refresh();
     const iv = setInterval(refresh, 15_000);
     return () => clearInterval(iv);
+  });
+
+  // Cross-view send intent (Contacts « Envoyer » → single send engine). The
+  // {#key view} wrapper in +page remounts this component on each navigation, so
+  // a one-shot mount effect is enough — the Wallet is never kept alive in the
+  // background. Pre-fill the recipient, leave the amount empty and focus it; the
+  // standard Continue → net/burn preview → Confirm (sign) flow then applies as-is.
+  $effect(() => {
+    const to = untrack(() => takeSendIntent());
+    if (!to) return;
+    panel = "send";
+    preview = null;
+    feedback = null;
+    toAddress = to;
+    sendAmount = "";
+    tick().then(() => document.getElementById("w-amt")?.focus());
   });
 
   async function refresh() {

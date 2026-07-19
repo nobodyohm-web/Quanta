@@ -1,57 +1,18 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { getPrefs, setPrefs, applyTheme, type Prefs } from "./prefs";
   import TrustCharter from "./TrustCharter.svelte";
   import LanguageSelect from "./LanguageSelect.svelte";
   import { t } from "./i18n.svelte";
-  import { FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
+  import { FEEDBACK_OK_MS } from "./quanta";
 
   let prefs = $state<Prefs>(getPrefs());
-  let nodeTicket = $state<string>("");
-  let ticketCopied = $state(false);
-  let economy = $state<any>(null);
-  let peerInput = $state("");
-  let connectStatus = $state<"idle" | "ok" | "error">("idle");
-  let connectMsg = $state("");
 
   $effect(() => {
     setPrefs(prefs);
     applyTheme(prefs.theme);
   });
-
-  $effect(() => {
-    refresh();
-  });
-
-  async function refresh() {
-    try { nodeTicket = await invoke<string>("get_node_ticket"); } catch { nodeTicket = t('set.offline'); }
-    try { economy = await invoke("get_economy_stats"); } catch {}
-  }
-
-  async function copyTicket() {
-    if (!nodeTicket || nodeTicket === t('set.offline')) return;
-    await navigator.clipboard.writeText(nodeTicket);
-    ticketCopied = true;
-    setTimeout(() => ticketCopied = false, FEEDBACK_COPY_MS);
-  }
-
-  async function connectPeer() {
-    if (!peerInput.trim()) return;
-    connectStatus = "idle";
-    connectMsg = "";
-    try {
-      await invoke("connect_peer", { peerId: peerInput.trim() });
-      connectStatus = "ok";
-      connectMsg = t('set.connected');
-      peerInput = "";
-      setTimeout(() => { connectStatus = "idle"; connectMsg = ""; }, FEEDBACK_OK_MS);
-    } catch (e: any) {
-      connectStatus = "error";
-      connectMsg = String(e);
-    }
-  }
 
   function setTheme(t: "light" | "dark" | "auto") {
     prefs = { ...prefs, theme: t };
@@ -186,86 +147,6 @@
     </div>
   </section>
 
-  <!-- Identité réseau -->
-  <section class="group">
-    <div class="group-head">
-      <h2 class="section-label">{t('set.nodeShare')}</h2>
-      <p class="group-sub">{t('set.nodeShareSub')}</p>
-    </div>
-    <div class="card group-body">
-      <div class="ticket">
-        <code class="ticket-val">{nodeTicket}</code>
-        <button class="btn btn-ghost btn-sm" onclick={copyTicket} disabled={!nodeTicket || nodeTicket === t('set.offline')}>
-          {ticketCopied ? t('set.copied') : t('set.copy')}
-        </button>
-      </div>
-    </div>
-  </section>
-
-  <!-- Connecter un pair -->
-  <section class="group">
-    <div class="group-head">
-      <h2 class="section-label">{t('set.connectPeer')}</h2>
-      <p class="group-sub">{t('set.connectPeerSub')}</p>
-    </div>
-    <div class="card group-body">
-      <div class="connect">
-        <input class="input connect-input" type="text" bind:value={peerInput}
-          placeholder={t('set.connectPlaceholder')} />
-        <button class="btn btn-primary" onclick={connectPeer} disabled={!peerInput.trim()}>{t('set.connectBtn')}</button>
-      </div>
-      {#if connectMsg}
-        <div class="connect-msg" class:ok={connectStatus === "ok"} class:err={connectStatus === "error"}>
-          {connectMsg}
-        </div>
-      {/if}
-    </div>
-  </section>
-
-  <!-- Économie QUANTA V2 -->
-  {#if economy}
-  <section class="group">
-    <div class="group-head">
-      <h2 class="section-label">{t('set.econTitle')}</h2>
-      <p class="group-sub">{t('set.econSub')}</p>
-    </div>
-    <div class="card group-body">
-      <div class="econ-grid">
-        <div class="econ-cell">
-          <span class="ec-lab">{t('set.econCirculating')}</span>
-          <span class="ec-val">{economy.circulating?.toFixed(2) ?? "0"}</span>
-          <span class="ec-meta">QUANTA</span>
-        </div>
-        <div class="econ-cell">
-          <span class="ec-lab">{t('set.econBurned')}</span>
-          <span class="ec-val">{economy.total_burned?.toFixed(2) ?? "0"}</span>
-          <span class="ec-meta">{t('set.econBurnedMeta')}</span>
-        </div>
-        <div class="econ-cell">
-          <span class="ec-lab">{t('set.econHardCap')}</span>
-          <span class="ec-val">100M</span>
-          <span class="ec-meta">{t('set.econHardCapMeta')}</span>
-        </div>
-        <div class="econ-cell">
-          <span class="ec-lab">{t('set.econTotalMined')}</span>
-          <span class="ec-val">{economy.total_mined?.toFixed(2) ?? "0"}</span>
-          <span class="ec-meta">{t('set.econTotalMinedMeta')}</span>
-        </div>
-        <div class="econ-cell">
-          <span class="ec-lab">{t('set.econEmission')}</span>
-          <span class="ec-val">{economy.emission_per_hour?.toFixed(2) ?? "0"}</span>
-          <span class="ec-meta">{t('set.econEmissionMeta')}</span>
-        </div>
-        <div class="econ-cell">
-          <span class="ec-lab">{t('set.econProgress')}</span>
-          <span class="ec-val">{economy.max_supply ? (economy.total_mined / economy.max_supply * 100).toFixed(3) : "0"} %</span>
-          <span class="ec-meta">{t('set.econProgressMeta')}</span>
-        </div>
-      </div>
-    </div>
-  </section>
-  {/if}
-
   <!-- Mise à jour OTA -->
   <section class="group">
     <div class="group-head">
@@ -370,50 +251,6 @@
     box-shadow: var(--shadow-sm);
   }
 
-  /* ── Ticket de nœud ── */
-  .ticket {
-    display: flex; align-items: center; gap: var(--space-3);
-    padding: var(--space-3) 0;
-  }
-  .ticket-val {
-    flex: 1; min-width: 0;
-    font-family: var(--font-mono); font-size: var(--text-xs);
-    color: var(--color-text-1);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-
-  /* ── Connexion d'un pair ── */
-  .connect { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; }
-  .connect-input { flex: 1; font-family: var(--font-mono); font-size: var(--text-sm); }
-  .connect-msg {
-    margin-top: var(--space-2);
-    font-size: var(--text-sm); font-family: var(--font-mono);
-    color: var(--color-text-2);
-  }
-  .connect-msg.ok { color: var(--cyan); }
-  .connect-msg.err { color: var(--color-red); }
-
-  /* ── Grille économie — gros chiffres tabulaires, la typo est le héros ── */
-  .econ-grid {
-    display: grid; grid-template-columns: repeat(3, 1fr);
-    gap: var(--space-2);
-    padding: var(--space-3) 0;
-  }
-  .econ-cell {
-    display: flex; flex-direction: column; gap: 3px;
-    padding: var(--space-3) var(--space-4) var(--space-3) 0;
-  }
-  .ec-lab {
-    font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--color-text-3);
-  }
-  .ec-val {
-    font-family: var(--font-display); font-size: 22px; font-weight: 700;
-    color: var(--color-text-0); line-height: 1.1;
-    font-variant-numeric: tabular-nums lining-nums;
-  }
-  .ec-meta { font-size: var(--text-xs); color: var(--color-text-2); }
-
   /* ── Mise à jour ── */
   .update {
     display: flex; flex-direction: column; align-items: flex-start;
@@ -442,8 +279,4 @@
   .about { display: flex; flex-direction: column; gap: 5px; padding: var(--space-2) 0; }
   .about-line { font-size: var(--text-sm); color: var(--color-text-1); line-height: 1.6; }
   .about-line.muted { color: var(--color-text-3); font-size: var(--text-xs); }
-
-  @media (max-width: 640px) {
-    .econ-grid { grid-template-columns: 1fr 1fr; }
-  }
 </style>

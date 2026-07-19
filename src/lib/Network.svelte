@@ -5,7 +5,7 @@
   import NetworkScene3D from "./NetworkScene3D.svelte";
   import { t } from "./i18n.svelte";
   import { note } from "./diag";
-  import { TICKER, FEEDBACK_OK_MS, FEEDBACK_COPY_MS } from "./quanta";
+  import { FEEDBACK_OK_MS, FEEDBACK_COPY_MS } from "./quanta";
 
   let chainView = $state<"history" | "2d">("history");
 
@@ -15,18 +15,9 @@
   let protocol = $state("");
   let copied = $state(false);
 
-  // ─── La Forge — blockchain en direct + rareté ──────────────────
+  // ─── Blockchain en direct ──────────────────────────────────────
   let chainHeight = $state(0);
-  let supplyQta = $state(0);
-  let mintedQta = $state(0);
-  let burnedQta = $state(0);
-  let maxSupply = $state(100_000_000);
-  let pctToCap = $state(0);
-  let emissionNextTick = $state(0);   // QUANTA émis au prochain tick (minute)
-  let emissionPerHour = $derived(emissionNextTick * 60);
   let pendingTx = $state(0);
-  let holders = $state(0);
-  let myBalance = $state(0);
   let blocks = $state<any[]>([]);
   // Halo « flash » au nouveau bloc : minuterie propre (l'ancienne expression
   // `Date.now() - newBlockFlash < 1200` ne se réévaluait qu'au bloc SUIVANT
@@ -34,7 +25,11 @@
   let flashOn = $state(false);
   let flashTo: ReturnType<typeof setTimeout> | undefined;
   let finalityFloor = $state(0);     // ms epoch du dernier bloc reçu → animation
-  const myShare = $derived(supplyQta > 0 ? (myBalance / supplyQta) * 100 : 0);
+
+  // États de chargement — tant que !loaded, le résumé affiche « — » (pas 0) ;
+  // loadError s'allume au premier échec de refresh et s'éteint au succès suivant.
+  let loaded = $state(false);
+  let loadError = $state(false);
 
   async function loadChain() {
     const t0 = performance.now(); // sonde : durée réelle du sondage 1,5 s
@@ -42,36 +37,34 @@
       const o = await invoke<any>("get_chain_overview", { limit: 22 });
       const prev = chainHeight;
       chainHeight = o.height ?? 0;
-      supplyQta = o.total_supply_qta ?? 0;
-      mintedQta = o.total_mined_qta ?? 0;
-      burnedQta = o.total_burned_qta ?? 0;
-      maxSupply = o.max_supply_qta ?? 100_000_000;
-      pctToCap = o.pct_to_cap ?? 0;
-      emissionNextTick = o.emission_next_tick_qta ?? 0;
       pendingTx = o.pending ?? 0;
-      holders = o.holders ?? 0;
       blocks = o.blocks ?? [];
+      loaded = true;
+      loadError = false;
       if (prev && chainHeight > prev) {
         flashOn = true;
         clearTimeout(flashTo);
         flashTo = setTimeout(() => (flashOn = false), 1600);
       }
-    } catch {}
+    } catch {
+      loadError = true;
+    }
     try {
       const f = await invoke<any>("get_finality_status");
       finalityFloor = f?.finalized_floor ?? 0;
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch {
+      loadError = true;
+    }
     note("net.loadChain", `${Math.round(performance.now() - t0)}ms h=${chainHeight}`);
   }
   let connectInput = $state("");
   let connectErr = $state("");
   let connectSuccess = $state(false);
   let connecting = $state(false);
-  // Grand compteur « QUANTA forgés » : nœud DOM écrit DIRECTEMENT par la boucle
-  // rAF (jamais de $state à 60 fps — un flush Svelte par frame était du gâchis).
-  let forgeCountEl: HTMLDivElement | undefined;
 
-  // NET-9/NET-10/NET-15: Per-peer metrics + display name (NET-15)
+  // NET-9/NET-10: Per-peer metrics
   type PeerMetric = {
     public_key: string;
     display_name: string | null;
@@ -88,9 +81,6 @@
     last_seen_secs_ago: number;
   };
   let peerMetrics = $state<PeerMetric[]>([]);
-  let myDisplayName = $state<string | null>(null);
-  let displayNameDraft = $state("");
-  let displayNameSaving = $state(false);
 
   // NET-16: Chain-sync progress event payload + freshness gate
   type SyncProgress = {
@@ -112,66 +102,26 @@
       myPeerId = s?.peer_id ?? "";
       isOnline = s?.is_online ?? false;
       protocol = s?.protocol ?? "";
-    } catch {}
+      loaded = true;
+      loadError = false;
+    } catch {
+      loadError = true;
+    }
     // NET-9/10: pull per-peer metrics every refresh tick
     try {
       peerMetrics = await invoke<PeerMetric[]>("get_peer_metrics");
-    } catch {}
-    try {
-      const r = await invoke<any>("get_my_reputation");
-      myBalance = r?.atn_balance ?? 0;
-    } catch {}
-    note("net.refresh", `${Math.round(performance.now() - t0)}ms peers=${peerCount}`);
-  }
-
-  async function loadDisplayName() {
-    try {
-      myDisplayName = await invoke<string | null>("get_display_name");
-      displayNameDraft = myDisplayName ?? "";
-    } catch {}
-  }
-
-  async function saveDisplayName() {
-    displayNameSaving = true;
-    try {
-      const trimmed = displayNameDraft.trim();
-      const arg = trimmed.length === 0 ? null : trimmed;
-      myDisplayName = await invoke<string | null>("set_display_name", { name: arg });
-      displayNameDraft = myDisplayName ?? "";
-    } catch (e) {
-      console.warn("set_display_name failed", e);
+    } catch {
+      loadError = true;
     }
-    displayNameSaving = false;
+    note("net.refresh", `${Math.round(performance.now() - t0)}ms peers=${peerCount}`);
   }
 
   $effect(() => {
     refresh();
     loadChain();
-    loadDisplayName();
     const iv = setInterval(refresh, 5000);
     const tc = setInterval(loadChain, 1500);
     return () => { clearInterval(iv); clearInterval(tc); };
-  });
-
-  // Compteur « QUANTA forgés » qui monte en continu : dérive au rythme
-  // d'émission RÉEL du moment (emissionPerHour, décroissant, lu de la chaîne)
-  // et rattrape la vraie valeur à chaque sondage.
-  // Lit mintedQta/emissionPerHour uniquement dans le callback rAF (async) →
-  // pas de dépendance réactive ; écrit textContent DIRECTEMENT (zéro flush
-  // Svelte à 60 fps — leçon d'hygiène du gel au forge).
-  $effect(() => {
-    let raf = 0;
-    let last = performance.now();
-    let v = 0;
-    const tick = (now: number) => {
-      const dt = Math.min(0.1, (now - last) / 1000); last = now;
-      v += (emissionPerHour / 3600) * dt;                 // dérive live
-      if (mintedQta > v) v += (mintedQta - v) * Math.min(1, dt * 2.5); // rattrapage doux
-      if (forgeCountEl) forgeCountEl.textContent = fmtForge(v);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
   });
 
   // NET-16: subscribe to chain-sync progress events from the backend.
@@ -223,17 +173,6 @@
     connecting = false;
   }
 
-  function fmtNum(n: number) {
-    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return n.toFixed(2);
-  }
-
-  // Grand compteur live : séparateurs de milliers + 3 décimales qui défilent.
-  function fmtForge(n: number) {
-    return n.toLocaleString('fr-FR', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-  }
-
   // Presentation only — quality score color class (NET-10: >=80 good, 50-79 mid, <50 low).
   function qualityCls(q: number) {
     return q >= 80 ? 'q-good' : q >= 50 ? 'q-mid' : 'q-low';
@@ -254,25 +193,30 @@
   </div>
 
   <!-- Résumé réseau — chiffres réels du nœud, zéro imagerie -->
-  <div class="grid-4 net-summary">
-    <div class="card">
-      <div class="stat-label">{t('db.peers')}</div>
-      <div class="stat-val sm">{peerCount}</div>
+  <div class="net-summary-wrap">
+    <div class="grid-4 net-summary">
+      <div class="card">
+        <div class="stat-label">{t('db.peers')}</div>
+        <div class="stat-val sm">{loaded ? peerCount : '—'}</div>
+      </div>
+      <div class="card">
+        <div class="stat-label">{t('db.height')}</div>
+        <div class="stat-val sm">{loaded ? chainHeight : '—'}</div>
+        <div class="stat-sub">{t('db.blocks')}</div>
+      </div>
+      <div class="card">
+        <div class="stat-label">{t("net.finalityFloor")}</div>
+        <div class="stat-val sm">{loaded ? finalityFloor : '—'}</div>
+      </div>
+      <div class="card">
+        <div class="stat-label">{t("net.statusLabel")}</div>
+        <div class="stat-val sm">{loaded ? (isOnline ? t('wallet.connected') : t('wallet.offline')) : '—'}</div>
+        <div class="stat-sub mono">{protocol || '—'}</div>
+      </div>
     </div>
-    <div class="card">
-      <div class="stat-label">{t('db.height')}</div>
-      <div class="stat-val sm">{chainHeight}</div>
-      <div class="stat-sub">{t('db.blocks')}</div>
-    </div>
-    <div class="card">
-      <div class="stat-label">{t("net.finalityFloor")}</div>
-      <div class="stat-val sm">{finalityFloor}</div>
-    </div>
-    <div class="card">
-      <div class="stat-label">{t("net.statusLabel")}</div>
-      <div class="stat-val sm">{isOnline ? t('wallet.connected') : t('wallet.offline')}</div>
-      <div class="stat-sub mono">{protocol || '—'}</div>
-    </div>
+    {#if loadError}
+      <div class="net-load-err">{t('common.errLoad')}</div>
+    {/if}
   </div>
 
   <!-- Le réseau en 3D — chaque particule est un événement réel du nœud
@@ -280,45 +224,6 @@
        en orbite sont les pairs mesurés. WebGL2 pur, zéro dépendance. -->
   <div class="card net-live">
     <NetworkScene3D {peerCount} {blocks} {finalityFloor} />
-  </div>
-
-  <!-- La Forge — QUANTA forgés en direct (rareté + possession) -->
-  <div class="card forge-hero" class:forge-flash={flashOn}>
-    <div class="forge-main">
-      <div class="section-label">{t('net.forgeLabel')} · {t('net.forgeMaxOf')} {fmtNum(maxSupply)} {t('net.forgeMaximum')}</div>
-      <div class="forge-count" bind:this={forgeCountEl}>{fmtForge(mintedQta)}</div>
-      <div class="forge-sub">
-        <span class="forge-live-dot"></span>
-        {t('net.forgeLive')} · {emissionPerHour < 1 ? emissionPerHour.toFixed(2) : emissionPerHour.toFixed(0)} {t('net.forgePerHour')} · {t('net.forgeBlock')} #{chainHeight}
-      </div>
-      <!-- Rareté : progression vers le plafond DUR (100M) -->
-      <div class="cap-wrap">
-        <div class="cap-bar"><div class="cap-fill" style="width:{Math.min(100, Math.max(pctToCap, pctToCap > 0 ? 0.5 : 0))}%;"></div></div>
-        <div class="cap-meta">
-          <span><b>{pctToCap < 0.01 && pctToCap > 0 ? '<0,01' : pctToCap.toFixed(2)}%</b> {t('net.capEmitted')}</span>
-          <span>{@html t('net.capSupply')}</span>
-        </div>
-      </div>
-    </div>
-    <div class="forge-side">
-      <div class="forge-side-row">
-        <span class="forge-side-k">{t('net.youOwn')}</span>
-        <span class="forge-side-v">{fmtForge(myBalance)}<span class="forge-unit"> {TICKER}</span></span>
-      </div>
-      <div class="forge-side-row">
-        <span class="forge-side-k">{t('net.yourShare')}</span>
-        <span class="forge-side-v forge-share-pct">{myShare > 0 && myShare < 0.01 ? '<0,01' : myShare.toFixed(2)} %</span>
-      </div>
-      <div class="forge-share-bar"><div class="forge-share-fill" style="width:{Math.min(100, myShare > 0 ? Math.max(myShare, 2) : 0)}%;"></div></div>
-      <div class="forge-side-row forge-side-gap">
-        <span class="forge-side-k">{t('net.holders')}</span>
-        <span class="forge-side-v">{holders}</span>
-      </div>
-      <div class="forge-side-row">
-        <span class="forge-side-k">{t('net.circulating')}</span>
-        <span class="forge-side-v">{fmtNum(supplyQta)} {TICKER}</span>
-      </div>
-    </div>
   </div>
 
   <!-- Blockchain en direct -->
@@ -373,31 +278,6 @@
       <div class="sync-bar"><div class="sync-bar-fill" style="width:{syncPercent}%;"></div></div>
     </div>
   {/if}
-
-  <!-- NET-15: éditeur de pseudonyme -->
-  <div class="card name-panel">
-    <div class="name-row">
-      <div class="name-label">
-        <span class="name-title">{t('net.nicknameTitle')}</span>
-        <span class="name-sub">{t('net.nicknameHint')}</span>
-      </div>
-      <div class="name-field">
-        <input
-          class="input"
-          maxlength="32"
-          placeholder={t('net.nicknamePlaceholder')}
-          bind:value={displayNameDraft}
-          onkeydown={(e) => e.key === 'Enter' && saveDisplayName()}
-        />
-        <button class="btn btn-ghost btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
-          {displayNameSaving ? '…' : t('net.nicknameSave')}
-        </button>
-      </div>
-    </div>
-    {#if myDisplayName !== null && myDisplayName !== ''}
-      <div class="name-current">{t('net.nicknameCurrent')} <strong>{myDisplayName}</strong></div>
-    {/if}
-  </div>
 
   <!-- NET-9/10: table des pairs — hairlines, chiffres tabulaires -->
   {#if peerMetrics.length > 0}
@@ -502,60 +382,12 @@
   }
 
   /* ── Résumé réseau — 4 chiffres réels, aucune imagerie ───── */
-  .net-summary { margin-bottom: var(--space-4); }
+  .net-summary-wrap { margin-bottom: var(--space-4); }
+  .net-load-err {
+    font-size: var(--text-sm); color: var(--color-text-2);
+    margin: var(--space-2) 0 0 var(--space-1);
+  }
   .net-live { margin-bottom: var(--space-4); padding: var(--space-2); }
-
-  /* ── La Forge — rareté & possession ──────────────────────── */
-  .forge-hero {
-    display: flex; gap: var(--space-8); flex-wrap: wrap;
-    padding: var(--space-6) var(--space-8); margin-bottom: var(--space-4);
-    position: relative; overflow: hidden;
-    transition: box-shadow .45s ease;
-  }
-  .forge-flash { box-shadow: 0 0 0 2px var(--color-accent-dim), var(--shadow); }
-  .forge-main { flex: 1; min-width: 240px; }
-  .forge-count {
-    font-family: var(--font-display);
-    font-size: 52px; font-weight: 700; line-height: 1.02; letter-spacing: -.02em;
-    color: var(--color-text-0); margin: 6px 0 var(--space-3);
-    font-variant-numeric: tabular-nums lining-nums; font-feature-settings: 'tnum';
-  }
-  .forge-sub {
-    display: flex; align-items: center; gap: var(--space-2);
-    font-size: var(--text-base); color: var(--color-text-2);
-    font-variant-numeric: tabular-nums lining-nums;
-  }
-  .forge-live-dot {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent);
-    animation: forge-pulse 2s ease infinite; flex-shrink: 0;
-  }
-  @keyframes forge-pulse { 0%,100% { box-shadow: 0 0 0 0 var(--teal-glow); } 50% { box-shadow: 0 0 0 5px transparent; } }
-  .forge-side {
-    min-width: 220px; display: flex; flex-direction: column; gap: 10px; justify-content: center;
-    border-left: 1px solid var(--color-border); padding-left: var(--space-8);
-  }
-  .forge-side-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
-  .forge-side-gap { margin-top: 10px; }
-  .forge-side-k { font-size: var(--text-sm); color: var(--color-text-2); }
-  .forge-side-v {
-    font-family: var(--font-display);
-    font-size: var(--text-lg); font-weight: 700; color: var(--color-text-0);
-    font-variant-numeric: tabular-nums lining-nums;
-  }
-  .forge-share-pct { color: var(--color-accent); }
-  .forge-unit { font-size: var(--text-xs); color: var(--color-text-3); font-weight: 400; }
-  .forge-share-bar { height: 5px; background: var(--color-bg-3); border-radius: 3px; overflow: hidden; margin-top: 2px; }
-  .forge-share-fill { height: 100%; background: var(--color-accent); border-radius: 3px; transition: width 1s ease; }
-
-  .cap-wrap { margin-top: var(--space-5); max-width: 440px; }
-  .cap-bar { height: 6px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
-  .cap-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 1.2s ease; }
-  .cap-meta {
-    display: flex; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-2);
-    font-size: var(--text-xs); color: var(--color-text-2);
-    font-variant-numeric: tabular-nums lining-nums;
-  }
-  .cap-meta b { color: var(--color-text-0); font-weight: 700; }
 
   /* ── Blockchain en direct ────────────────────────────────── */
   .chain-wrap { padding: var(--space-5) var(--space-6) var(--space-6); margin-bottom: var(--space-4); }
@@ -621,28 +453,6 @@
     background: var(--cyan);
     transition: width 0.4s ease-out;
   }
-
-  /* ── NET-15 : éditeur de pseudonyme ──────────────────────── */
-  .name-panel { margin-bottom: var(--space-4); }
-  .name-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-5);
-    flex-wrap: wrap;
-  }
-  .name-label { display: flex; flex-direction: column; gap: 3px; min-width: 220px; flex: 1; }
-  .name-title { font-size: var(--text-base); font-weight: 600; color: var(--color-text-0); }
-  .name-sub { font-size: var(--text-sm); color: var(--color-text-2); }
-  .name-field { display: flex; gap: var(--space-2); flex: 1; max-width: 420px; }
-  .name-field .input { flex: 1; min-width: 0; }
-  .name-current {
-    margin-top: 14px;
-    padding-top: 14px;
-    border-top: 1px solid var(--color-border);
-    font-size: var(--text-sm);
-    color: var(--color-text-2);
-  }
-  .name-current strong { color: var(--color-text-0); font-weight: 600; }
 
   /* ── NET-9/10 : table des pairs — hairlines seules ───────── */
   .peers-panel { margin-bottom: var(--space-4); }

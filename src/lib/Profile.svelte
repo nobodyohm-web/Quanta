@@ -2,16 +2,10 @@
   import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
   import { t } from "./i18n.svelte";
-  import { copySensitive, TICKER, FEEDBACK_COPY_MS } from "./quanta";
+  import { copySensitive, FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
 
   let pk = $state("");
-  let balance = $state(0);
-  let earned = $state(0);
-  let staked = $state(0);
-  let trustScore = $state(0);
-  let uptime = $state(0);
   let mode = $state("Active");
-  let peers = $state(0);
   let joined = $state("");
   let copied = $state(false);
 
@@ -23,6 +17,12 @@
 
   // Pseudo unique @handle (adresse de wallet lisible)
   let username = $state<string | null>(null);
+
+  // ─── Surnom public (NET-15, éditeur repris de Réseau — identitaire, pas social) ──
+  let myDisplayName = $state<string | null>(null);
+  let displayNameDraft = $state("");
+  let displayNameSaving = $state(false);
+  let nicknameSaved = $state(false);
 
   // ─── Sécurité & Récupération ───────────────────────────────────
   let myCode = $state("");
@@ -114,16 +114,7 @@
     try {
       const r = await invoke<any>("get_my_reputation");
       pk = r?.public_key ?? "";
-      balance = r?.atn_balance ?? 0;
-      earned = r?.atn_earned ?? 0;
-      staked = r?.atn_staked ?? 0;
-      trustScore = r?.trust_score ?? 0;
-      uptime = r?.uptime_minutes ?? 0;
       joined = r?.joined_at ?? "";
-    } catch {}
-    try {
-      const s = await invoke<any>("get_node_status");
-      peers = s?.peer_count ?? 0;
     } catch {}
     try {
       // `mode` is NOT a field of NodeStatus — it lives in `get_node_mode`
@@ -143,10 +134,33 @@
     } catch {}
   }
 
+  async function loadDisplayName() {
+    try {
+      myDisplayName = await invoke<string | null>("get_display_name");
+      displayNameDraft = myDisplayName ?? "";
+    } catch {}
+  }
+
+  async function saveDisplayName() {
+    displayNameSaving = true;
+    try {
+      const trimmed = displayNameDraft.trim();
+      const arg = trimmed.length === 0 ? null : trimmed;
+      myDisplayName = await invoke<string | null>("set_display_name", { name: arg });
+      displayNameDraft = myDisplayName ?? "";
+      nicknameSaved = true;
+      setTimeout(() => (nicknameSaved = false), FEEDBACK_OK_MS);
+    } catch (e) {
+      console.warn("set_display_name failed", e);
+    }
+    displayNameSaving = false;
+  }
+
   $effect(() => {
     loadLocal();
     refresh();
     loadBioStatus();
+    loadDisplayName();
     const iv = setInterval(refresh, 10000);
     return () => clearInterval(iv);
   });
@@ -166,12 +180,6 @@
   function shortPk(k: string) {
     if (k.length < 12) return k;
     return k.slice(0, 8) + '…' + k.slice(-8);
-  }
-
-  function formatUptime(min: number) {
-    const h = Math.floor(min / 60);
-    const m = min % 60;
-    return `${h}h${m}m`;
   }
 
   function formatJoined(d: string) {
@@ -214,64 +222,38 @@
           <div class="section-label">{t('pf.seniority')}</div>
           <div class="meta-v mono">{formatJoined(joined)}</div>
         </div>
-        <div>
-          <div class="section-label">{t('pf.uptime')}</div>
-          <div class="meta-v mono">{formatUptime(uptime)}</div>
-        </div>
       </div>
     </div>
 
-    <!-- Public — ce que voient les autres -->
-    <div class="card">
-      <div class="card-title ct-row">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--color-text-3)" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c-2 2-3 4-3 6s1 4 3 6M8 2c2 2 3 4 3 6s-1 4-3 6"/></svg>
-        <span>{t('pf.whatOthersSee')}</span>
-      </div>
-      <div class="stat-grid">
-        <div class="stat">
-          <div class="section-label">{t('pf.balance')}</div>
-          <div class="fig fig-md">{balance.toFixed(2)}</div>
-          <div class="stat-unit">{TICKER}</div>
+    <!-- Surnom public (NET-15) — identité, juste sous le @pseudo -->
+    <div class="card name-panel">
+      <div class="name-row">
+        <div class="name-label">
+          <span class="name-title">{t('net.nicknameTitle')}</span>
+          <span class="name-sub">{t('net.nicknameHint')}</span>
         </div>
-        <div class="stat">
-          <div class="section-label">{t('pf.totalMined')}</div>
-          <div class="fig fig-md">{earned.toFixed(2)}</div>
-          <div class="stat-unit">{TICKER}</div>
-        </div>
-        <div class="stat">
-          <div class="section-label">{t('pf.trustScore')}</div>
-          <div class="fig fig-md">{trustScore}<span class="fig-suffix">%</span></div>
-          <div class="trust-bar-bg trust-bar-gap"><div class="trust-bar-fill" style="width:{trustScore}%;"></div></div>
+        <div class="name-field">
+          <input
+            class="input"
+            maxlength="32"
+            placeholder={t('net.nicknamePlaceholder')}
+            bind:value={displayNameDraft}
+            onkeydown={(e) => e.key === 'Enter' && saveDisplayName()}
+          />
+          <button class="btn btn-ghost btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
+            {displayNameSaving ? '…' : t('net.nicknameSave')}
+          </button>
         </div>
       </div>
-      <div class="divider"></div>
-      <div class="stat-grid stat-grid-2">
-        <div class="stat">
-          <div class="section-label">{t('pf.peers')}</div>
-          <div class="fig fig-md">{peers}</div>
-        </div>
-        <div class="stat">
-          <div class="section-label">{t('pf.mode')}</div>
-          <div><span class="mode-pill" data-tone={modeColors[mode] ?? 'tag-dim'}>{badgeLabel[mode] ?? mode}</span></div>
-        </div>
-      </div>
+      {#if myDisplayName !== null && myDisplayName !== ''}
+        <div class="name-current" class:name-current-flash={nicknameSaved}>{t('net.nicknameCurrent')} <strong>{myDisplayName}</strong></div>
+      {/if}
     </div>
 
     <!-- Ta contribution — « tu as forgé ça » (le minage est une vraie contribution) -->
     <div class="card">
       <div class="card-title">{t('pf.contribTitle')}</div>
       <p class="contrib-text">{@html t('pf.contribText')}</p>
-      <div class="stat-grid stat-grid-2">
-        <div class="stat">
-          <div class="section-label">{t('pf.networkMaintained')}</div>
-          <div class="fig fig-md">{formatUptime(uptime)}</div>
-        </div>
-        <div class="stat">
-          <div class="section-label">{t('pf.quantaForged')}</div>
-          <div class="fig fig-md accent">{earned.toFixed(2)}</div>
-          <div class="stat-unit">{TICKER}</div>
-        </div>
-      </div>
     </div>
 
     <!-- Sécurité & Récupération -->
@@ -455,29 +437,32 @@
   .ct-row { display: flex; align-items: center; gap: 7px; }
   .ct-row svg { flex-shrink: 0; }
 
-  /* ── Grille de stats — chiffres confiants, tabulaires, beaucoup de vide ── */
-  .stat-grid {
-    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 28px 24px;
-  }
-  .stat-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .fig {
-    font-family: var(--font-display);
-    font-variant-numeric: tabular-nums lining-nums;
-    font-feature-settings: 'tnum', 'lnum';
-    color: var(--color-text-0); line-height: 1; letter-spacing: -0.02em;
-  }
-  .fig-md { font-size: 26px; font-weight: 600; }
-  .fig.accent { color: var(--color-accent); }
-  .fig-suffix { font-size: 0.55em; font-weight: 500; color: var(--color-text-3); margin-left: 2px; letter-spacing: 0; }
-  .stat-unit {
-    font-size: var(--text-xs); font-weight: 500; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--color-text-3); margin-top: 8px;
-  }
-  .stat .section-label { margin-bottom: 9px; }
-
   /* ── Contribution ── */
-  .contrib-text { font-size: var(--text-base); color: var(--color-text-2); margin-bottom: 22px; line-height: 1.65; }
+  .contrib-text { font-size: var(--text-base); color: var(--color-text-2); line-height: 1.65; }
+
+  /* ── Surnom public (NET-15) — repris de Réseau, identité seule ── */
+  .name-panel { padding: 22px 24px; }
+  .name-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-5);
+    flex-wrap: wrap;
+  }
+  .name-label { display: flex; flex-direction: column; gap: 3px; min-width: 220px; flex: 1; }
+  .name-title { font-size: var(--text-base); font-weight: 600; color: var(--color-text-0); }
+  .name-sub { font-size: var(--text-sm); color: var(--color-text-2); }
+  .name-field { display: flex; gap: var(--space-2); flex: 1; max-width: 420px; }
+  .name-field .input { flex: 1; min-width: 0; }
+  .name-current {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--color-border);
+    font-size: var(--text-sm);
+    color: var(--color-text-2);
+    transition: color 0.3s ease;
+  }
+  .name-current strong { color: var(--color-text-0); font-weight: 600; }
+  .name-current-flash strong { color: var(--color-accent); }
 
   /* ── Sécurité ── */
   .sec-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
@@ -492,7 +477,6 @@
   .sec-hint { font-size: var(--text-sm); color: var(--color-text-2); line-height: 1.5; }
   .sec-hint-flex { flex: 1; }
   .sec-hint-mb { margin-bottom: 14px; }
-  .trust-bar-gap { margin-top: 12px; }
   .sec-ok-indent { margin: -4px 0 12px 46px; }
   .sec-code {
     font-size: 18px; font-weight: 700; letter-spacing: 0.1em;
@@ -546,7 +530,6 @@
   }
 
   @media (max-width: 620px) {
-    .stat-grid { grid-template-columns: 1fr 1fr; }
     .id-meta { gap: var(--space-6); }
   }
 </style>
