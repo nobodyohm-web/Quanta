@@ -184,7 +184,7 @@
     <!-- Brand moment -->
     <div class="hero">
       <div class="brand">
-        <QuantaMark size={34} tone="ink" />
+        <QuantaMark size={34} tone="aurora" />
         <span class="wordmark">QUANTA</span>
       </div>
       <h1 class="headline">{@html t("welcome.headline")}</h1>
@@ -210,9 +210,19 @@
               {:else if pseudoStatus === "checking"}
                 <span class="hint">{t("welcome.pseudoChecking")}</span>
               {:else if pseudoStatus === "free"}
-                <span class="hint good">✓ {t("welcome.pseudoFree")}</span>
+                <span class="hint good">
+                  <svg class="hint-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                    <path d="M3.5 8.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  {t("welcome.pseudoFree")}
+                </span>
               {:else if pseudoStatus === "taken"}
-                <span class="hint bad">✗ {t("welcome.pseudoTaken")}</span>
+                <span class="hint neutral">
+                  <svg class="hint-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                    <circle cx="8" cy="8" r="2.4" fill="currentColor" />
+                  </svg>
+                  {t("welcome.pseudoTaken")}
+                </span>
               {/if}
             </div>
           </div>
@@ -356,7 +366,8 @@
 
 <style>
   /* Inscription — niveau banque : blanc net, typo héros, un seul accent teal.
-     Zéro fond de particules, zéro rail aurora (retirés). */
+     Zéro fond de particules ; l'UNIQUE artefact de marque = un lavis Aurora
+     très doux derrière le titre (moment, jamais du chrome — cf. règle 11). */
   .welcome {
     min-height: 100vh; display: flex; background: var(--canvas);
     padding: 44px 24px; overflow-y: auto;
@@ -372,8 +383,23 @@
   }
   @media (prefers-reduced-motion: reduce) { .wrap { animation: none; } }
 
-  /* Le moment de marque — sur le fond clair, pas dans une carte */
-  .hero { padding: 2px 2px 2px; }
+  /* Le moment de marque — sur le fond clair, pas dans une carte. Un halo
+     Aurora (teal → violet) diffusé, très basse opacité : le blanc reste
+     dominant, le titre reste le héros. Statique (pas d'animation de chrome). */
+  .hero { position: relative; padding: 2px 2px 2px; }
+  .hero::before {
+    content: "";
+    position: absolute;
+    top: -72px; left: -48px;
+    width: 340px; height: 280px;
+    background:
+      radial-gradient(58% 58% at 26% 30%, rgba(20, 200, 184, 0.16), transparent 72%),
+      radial-gradient(46% 46% at 82% 16%, rgba(124, 58, 237, 0.09), transparent 72%);
+    filter: blur(10px);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .hero > * { position: relative; z-index: 1; }
   .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
   .wordmark {
     font-size: 15px; font-weight: 800; letter-spacing: 0.12em; color: var(--color-text-0);
@@ -409,9 +435,11 @@
 
   /* Validité du pseudo */
   .hint-row { min-height: 18px; margin-top: 4px; }
-  .hint { font-size: 12px; color: var(--color-text-2); }
-  .hint.good { color: var(--color-green); font-weight: 600; }
+  .hint { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--color-text-2); }
+  .hint.good { color: var(--color-accent); font-weight: 600; }   /* « disponible » = check teal */
+  .hint.neutral { color: var(--color-text-2); }                   /* « déjà pris » = info neutre, jamais une croix rouge */
   .hint.bad { color: var(--color-red); }
+  .hint-ico { flex-shrink: 0; }
 
   /* Étapes backup / verify / restore */
   .step-title { font-size: 20px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.02em; color: var(--color-text-0); }
