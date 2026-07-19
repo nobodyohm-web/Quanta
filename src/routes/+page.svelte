@@ -16,6 +16,7 @@
   import StrengthMeter from "$lib/StrengthMeter.svelte";
   import HelpModal from "$lib/HelpModal.svelte";
   import Settings from "$lib/Settings.svelte";
+  import Whitepaper from "$lib/Whitepaper.svelte";
   import { getPrefs, applyTheme } from "$lib/prefs";
   import "../app.css";
 
@@ -315,6 +316,7 @@
           {:else if view === "network"}<Network />
           {:else if view === "explorer"}<Explorer />
           {:else if view === "profile"}<Profile />
+          {:else if view === "whitepaper"}<Whitepaper />
           {:else if view === "settings"}<Settings />
           {:else}<Wallet />{/if}
         </div>

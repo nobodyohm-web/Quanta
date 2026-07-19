@@ -121,14 +121,23 @@ export function createShell(
       document.removeEventListener("visibilitychange", onVis);
       io.disconnect();
       ro.disconnect();
-      scene.traverse((obj) => {
-        const mesh = obj as THREE.Mesh;
-        if (mesh.geometry) mesh.geometry.dispose();
-        const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
-        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-        else mat?.dispose();
-      });
-      renderer.dispose();
+      // Disposal must NEVER be able to break navigation (a throw here would leave
+      // the view stuck) — hence the guard.
+      try {
+        scene.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.geometry) mesh.geometry.dispose();
+          const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
+          if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+          else mat?.dispose();
+        });
+        renderer.dispose();
+        // ⭐ THE nav-freeze fix: renderer.dispose() frees GPU objects but does NOT
+        // release the WebGL context. Without this, every visit to a 3D screen
+        // (Minage/Réseau…) leaked a context; after the browser's ~16-context cap
+        // the whole app froze ("l'app bloque"). Force the context loss on unmount.
+        renderer.forceContextLoss();
+      } catch { /* never let teardown trap the UI */ }
     },
   };
 }

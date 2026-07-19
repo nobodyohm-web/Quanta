@@ -117,19 +117,19 @@
   </div>
 
   {#if searchErr}
-    <div class="ex-err">{searchErr}</div>
+    <div class="ex-err" role="alert">{searchErr}</div>
   {/if}
 
   <!-- Wallet trouvé (données réelles du ledger) -->
   {#if searched}
     <div class="card ex-hit">
       <div class="ex-hit-head">
-        <Identicon pubkey={searched.key} size={52} />
-        <div style="flex:1;min-width:0;">
+        <Identicon pubkey={searched.key} size={48} />
+        <div class="ex-hit-id">
           {#if searched.name}
             <div class="ex-hit-name">@{searched.name}</div>
           {/if}
-          <div class="ex-hit-k">{t('ex.walletPublic')}</div>
+          <div class="section-label ex-sl">{t('ex.walletPublic')}</div>
           <button class="copy-btn" onclick={copyKey}>
             {copiedKey ? t('ct.copied') : shortAddr(searched.key)}
           </button>
@@ -138,10 +138,10 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3l10 10M13 3L3 13"/></svg>
         </button>
       </div>
-      <div>
-        <div class="stat-label">{t('ex.balance')}</div>
-        <div class="stat-val mono">{searched.balance.toFixed(6)}<span class="ex-unit">QUANTA</span></div>
-        <div class="stat-sub">{t('wallet.availableSub')}</div>
+      <div class="ex-hit-bal">
+        <div class="section-label">{t('ex.balance')}</div>
+        <div class="ex-bal">{searched.balance.toFixed(6)}<span class="ex-bal-u">QUANTA</span></div>
+        <div class="ex-hit-sub">{t('wallet.availableSub')}</div>
       </div>
     </div>
   {/if}
@@ -150,43 +150,45 @@
   <div class="card">
     <div class="ex-feed-head">
       <div class="card-title" style="margin-bottom:0;">{t('ex.liveTransactions')}</div>
-      <div class="pulse-dot" style="margin-left:4px;"></div>
-      <span class="ex-feed-live">{t('ex.realNetworkData')}</span>
+      <div class="pulse-dot"></div>
+      <span class="ex-live">{t('ex.realNetworkData')}</span>
     </div>
     {#if liveFeed.length === 0}
       <EmptyState minHeight={160}>{t('ex.waitingTransactions')}</EmptyState>
     {:else}
       {#each liveFeed as tx, i}
         {@const fd = FEED[tx.type] ?? FEED.Transfer}
-        <div class="feed-item" style={i === 0 ? 'animation:fadein 0.3s ease;' : ''}>
-          <div class="feed-type-badge" style="background:{fd.bg};color:{fd.color};font-size:14px;">
-            {fd.icon}
+        <div class="feed-item ex-item" style={i === 0 ? 'animation:fadein 0.3s ease;' : ''}>
+          <div class="ex-badge">{fd.icon}</div>
+          <div class="ex-row">
+            {#if tx.type === 'Mining'}
+              <div class="ex-desc">
+                <span class="ex-title">{t('ex.mining')}</span>
+                <span class="ex-meta mono">{tx.to}</span>
+              </div>
+              <span class="ex-amount">+{tx.amount.toFixed(4)}</span>
+            {:else if tx.type === 'Burn'}
+              <div class="ex-desc">
+                <span class="ex-title">{t('ex.burned')}</span>
+                <span class="ex-meta">QUANTA</span>
+              </div>
+              <span class="ex-amount">{tx.amount.toFixed(4)}</span>
+            {:else if tx.type === 'Stake' || tx.type === 'Unstake' || tx.type === 'Slash'}
+              <div class="ex-desc">
+                <span class="ex-title">{t(('tx.' + tx.type) as any)}</span>
+                <span class="ex-meta mono">{tx.from}</span>
+              </div>
+              <span class="ex-amount">{tx.amount.toFixed(4)}</span>
+            {:else}
+              <div class="ex-xfer">
+                <span class="mono">{tx.from}</span>
+                <span class="ex-arrow">→</span>
+                <span class="mono">{tx.to}</span>
+              </div>
+              <span class="ex-amount">{tx.amount.toFixed(4)}</span>
+            {/if}
           </div>
-          <div style="flex:1;min-width:0;">
-            <div class="ex-feed-line">
-              {#if tx.type === 'Mining'}
-                <span style="color:var(--color-text-2);">{t('ex.mining')}</span>
-                <span class="mono" style="color:var(--cyan);font-weight:700;">+{tx.amount.toFixed(4)}</span>
-                <span class="dim">→</span>
-                <span class="mono ex-feed-addr">{tx.to}</span>
-              {:else if tx.type === 'Burn'}
-                <span style="color:var(--color-text-2);">{t('ex.burned')}</span>
-                <span class="mono" style="color:var(--color-amber);font-weight:700;">{tx.amount.toFixed(4)}</span>
-                <span class="dim">QNT</span>
-              {:else if tx.type === 'Stake' || tx.type === 'Unstake' || tx.type === 'Slash'}
-                <span class="tag {tx.type === 'Stake' ? 'ex-tag-stake' : tx.type === 'Slash' ? 'ex-tag-slash' : 'ex-tag-unstake'}">{t(('tx.' + tx.type) as any)}</span>
-                <span class="mono" style="color:{fd.color};font-weight:700;">{tx.amount.toFixed(4)}</span>
-                <span class="dim">·</span>
-                <span class="mono ex-feed-addr">{tx.from}</span>
-              {:else}
-                <span class="mono ex-feed-addr">{tx.from}</span>
-                <span class="dim">→</span>
-                <span class="mono ex-feed-addr">{tx.to}</span>
-                <span class="mono" style="color:#3D6FE0;font-weight:700;">{tx.amount.toFixed(4)}</span>
-              {/if}
-            </div>
-          </div>
-          <div class="ex-feed-age">{formatAge(tx.timestamp)}</div>
+          <span class="ex-age">{formatAge(tx.timestamp)}</span>
         </div>
       {/each}
     {/if}
@@ -195,35 +197,96 @@
 </div>
 
 <style>
-  .ex-search { display: flex; gap: 10px; margin-bottom: 20px; }
+  /* ── Recherche ── @pseudo · adresse · lien quanta: */
+  .ex-search { display: flex; gap: var(--space-2); margin-bottom: var(--space-6); }
   /* Variante « proéminente » du .input global (taille seulement — le reste
      vient du vocabulaire partagé, focus ring inclus). */
   .ex-search .input { flex: 1; font-size: 15px; padding: 13px 16px; }
+
+  /* Erreur = seul emploi autorisé du rouge sémantique (vraie erreur). */
   .ex-err {
     font-size: 13px; color: var(--color-red);
-    margin-bottom: 16px; padding: 12px;
-    background: rgba(229,72,77,0.06); border-radius: 8px;
+    margin-bottom: var(--space-4); padding: 12px 14px;
+    background: rgba(229,72,77,0.06);
+    border: 1px solid rgba(229,72,77,0.16);
+    border-radius: var(--radius-sm);
   }
-  /* Résultat = carte blanche élevée (ombre du système, pas de bordure teal). */
-  .ex-hit { margin-bottom: 20px; box-shadow: var(--shadow); }
-  .ex-hit-head { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
-  .ex-hit-name { font-size: 17px; font-weight: 700; color: var(--color-accent); margin-bottom: 2px; }
-  .ex-hit-k { font-size: 12px; color: var(--color-text-2); margin-bottom: 6px; }
+
+  /* ── Résultat = carte-compte blanche (encre + typo, zéro couleur déco) ── */
+  .ex-hit { margin-bottom: var(--space-6); }
+  .ex-hit-head {
+    display: flex; gap: var(--space-4); align-items: center;
+    padding-bottom: var(--space-5); margin-bottom: var(--space-5);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .ex-hit-id { flex: 1; min-width: 0; }
+  .ex-hit-name {
+    font-size: 18px; font-weight: 700; color: var(--color-text-0);
+    letter-spacing: -0.01em; margin-bottom: 8px;
+  }
+  .ex-sl { margin-bottom: 6px; }
   .ex-close {
     background: none; border: none; cursor: pointer; color: var(--color-text-3);
-    padding: 6px; border-radius: 8px;
+    padding: 6px; border-radius: var(--radius-sm); flex-shrink: 0;
     transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
   }
   .ex-close:hover { color: var(--color-text-1); background: var(--color-bg-2); }
-  .ex-unit { font-size: 14px; color: var(--color-text-2); margin-left: 8px; }
-  /* Tags distincts Stake / Unstake / Slash (base .tag globale + teinte locale ;
-     mêmes familles que les pastilles du flux). */
-  .ex-tag-stake   { background: rgba(124,58,237,0.10); color: #7c3aed; }
-  .ex-tag-unstake { background: rgba(124,58,237,0.07); color: #9d7be8; }
-  .ex-tag-slash   { background: rgba(229,72,77,0.10);  color: var(--color-red); }
-  .ex-feed-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-  .ex-feed-live { font-size: 11px; color: var(--color-text-3); }
-  .ex-feed-line { font-size: 13px; font-weight: 500; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .ex-feed-addr { font-size: 11px; color: var(--color-text-2); }
-  .ex-feed-age { font-size: 11px; color: var(--color-text-3); flex-shrink: 0; }
+
+  /* Le chiffre est le héros : gros, confiant, tabulaire, en encre. */
+  .ex-bal {
+    font-family: var(--font-display);
+    font-size: 40px; font-weight: 700; line-height: 1;
+    letter-spacing: -0.02em; color: var(--color-text-0);
+    font-variant-numeric: tabular-nums lining-nums;
+    font-feature-settings: 'tnum', 'zero';
+  }
+  .ex-bal-u {
+    font-size: 15px; font-weight: 600; color: var(--color-text-2);
+    margin-left: 10px; letter-spacing: 0.02em;
+  }
+  .ex-hit-sub { font-size: 12px; color: var(--color-text-2); margin-top: 8px; }
+
+  /* ── Flux en direct ── */
+  .ex-feed-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-4); }
+  /* Le seul point vivant : pastille teal (pas de vert déco sur le chrome). */
+  .ex-feed-head .pulse-dot { background: var(--color-accent); }
+  .ex-live { font-size: 11px; color: var(--color-text-3); }
+
+  .ex-item { gap: var(--space-3); }
+  /* Pastille de type neutre — glyphe encre sur gris, aucune teinte de couleur. */
+  .ex-badge {
+    width: 32px; height: 32px; border-radius: var(--radius-sm);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--color-bg-2); color: var(--color-text-1);
+    font-size: 14px; flex-shrink: 0;
+  }
+  .ex-row {
+    flex: 1; min-width: 0; display: flex; align-items: center;
+    justify-content: space-between; gap: var(--space-3);
+  }
+  .ex-desc { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .ex-title {
+    font-size: 13px; font-weight: 600; color: var(--color-text-0); line-height: 1.2;
+  }
+  .ex-meta {
+    font-size: 11px; color: var(--color-text-2); line-height: 1.2;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ex-xfer {
+    display: flex; align-items: center; gap: 6px; min-width: 0;
+    font-size: 12px; color: var(--color-text-1);
+  }
+  .ex-xfer .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ex-arrow { color: var(--color-text-3); flex-shrink: 0; }
+  .ex-amount {
+    font-size: 14px; font-weight: 600; color: var(--color-text-0);
+    font-variant-numeric: tabular-nums lining-nums;
+    font-feature-settings: 'tnum', 'zero';
+    flex-shrink: 0; white-space: nowrap;
+  }
+  .ex-age {
+    font-size: 11px; color: var(--color-text-3); flex-shrink: 0;
+    min-width: 56px; text-align: right;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
 </style>

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import MiningScene from "./three/MiningScene.svelte";
-  import { t } from "./i18n.svelte";
+  import MiningTerminal from "./MiningTerminal.svelte";
+  import { t, locale } from "./i18n.svelte";
 
   // ── Live node data ──────────────────────────────────────────────
   let miningRate = $state(0);
@@ -36,6 +37,9 @@
     i_am_validator: boolean;
   }
   let fin = $state<Finality | null>(null);
+
+  // Mode pro — le terminal de la forge (révélé au clic)
+  let proMode = $state(false);
 
   function fmtQ(n: number) { return n.toLocaleString("fr-FR", { maximumFractionDigits: 0 }); }
 
@@ -139,16 +143,31 @@
     return `${h}h${m.toString().padStart(2, "0")}`;
   }
 
-  const modeColors: Record<string, string> = { Actif: "tag-green", Guardian: "tag-cyan", Recherche: "tag-orange" };
+  const modeColors: Record<string, string> = { Actif: "tag-cyan", Guardian: "tag-cyan", Recherche: "tag-dim" };
   const epochPct = $derived(fin ? (fin.blocks_into_epoch / fin.epoch_length) * 100 : 0);
 
   // Répartition Shapley — les 4 contributions mesurées (constantes du protocole).
+  // Teintes de TEAL uniquement (fin de l'arc-en-ciel bleu/violet/ambre — discipline banque).
   const SHAPLEY = [
-    { key: "energy", pct: 30, cls: "sh-teal" },
-    { key: "work", pct: 30, cls: "sh-blue" },
-    { key: "validation", pct: 25, cls: "sh-violet" },
-    { key: "uptime", pct: 15, cls: "sh-amber" },
+    { key: "energy", pct: 30, cls: "sh-1" },
+    { key: "work", pct: 30, cls: "sh-2" },
+    { key: "validation", pct: 25, cls: "sh-3" },
+    { key: "uptime", pct: 15, cls: "sh-4" },
   ] as const;
+
+  // i18n local — libellés « mode pro » (réactif via locale()).
+  const PRO: Record<string, Record<string, string>> = {
+    en: { label: "The forge, live", sub: "Watch your node work, in real time — for the curious.", open: "Pro mode", close: "Hide terminal" },
+    fr: { label: "La forge, en direct", sub: "Regarde ton nœud travailler, en temps réel — pour les curieux.", open: "Mode pro", close: "Masquer le terminal" },
+    es: { label: "La forja, en vivo", sub: "Mira trabajar tu nodo, en tiempo real — para los curiosos.", open: "Modo pro", close: "Ocultar terminal" },
+    ru: { label: "Кузница, в эфире", sub: "Смотрите, как работает узел, в реальном времени — для любопытных.", open: "Про-режим", close: "Скрыть терминал" },
+    zh: { label: "锻造炉·实时", sub: "实时观看你的节点工作——献给好奇的人。", open: "专业模式", close: "隐藏终端" },
+    ja: { label: "鍛冶場・ライブ", sub: "ノードの働きをリアルタイムで見る——好奇心のある人へ。", open: "プロモード", close: "ターミナルを隠す" },
+  };
+  function tp(key: string): string {
+    const loc = locale();
+    return PRO[loc]?.[key] ?? PRO.en[key] ?? key;
+  }
 </script>
 
 <div class="page">
@@ -163,22 +182,22 @@
   </div>
 
   <!-- ── Hero : le réseau vivant + votre rythme de forge ── -->
-  <div class="card card-hero mine-hero">
-    <div class="mh-torus">
-      <MiningScene height={250} {peers} />
-      <div class="mh-live">
+  <div class="card mine-hero">
+    <div class="mh-scene">
+      <MiningScene height={230} {peers} />
+      <span class="mh-live">
         <span class="mh-live-dot"></span>
         {t('mine.hero.live')}
-      </div>
+      </span>
     </div>
-    <div class="mh-stats">
+    <div class="mh-body">
       <div class="mh-main">
         <div class="stat-label">{t('mine.hero.rate')}</div>
         <div class="mh-rate">
           <span class="mono mh-rate-num">{miningRate.toFixed(4)}</span>
           <span class="mh-rate-unit">QUANTA/min</span>
         </div>
-        <div class="stat-sub">
+        <div class="mh-rate-sub mono">
           ≈ {(miningRate * 60).toFixed(2)} {t('db.per_hour')} · {(miningRate * 1440).toFixed(0)} {t('db.per_day')}
         </div>
       </div>
@@ -189,18 +208,34 @@
         </div>
         <div class="mh-cell">
           <div class="stat-label">{t('db.trust_score')}</div>
-          <div class="mono mh-cell-v" style="color:{trustScore > 80 ? 'var(--color-green)' : 'var(--color-amber)'};">{trustScore}%</div>
+          <div class="mono mh-cell-v">{trustScore}%</div>
         </div>
       </div>
     </div>
-    <p class="mh-explain">{t('mine.hero.explain')}</p>
+    <p class="mine-p mh-explain">{t('mine.hero.explain')}</p>
   </div>
 
+  <!-- ── Mode pro : le terminal de la forge (un clic) ── -->
+  <div class="pro-row">
+    <div class="pro-meta">
+      <div class="stat-label">{tp('label')}</div>
+      <div class="pro-sub">{tp('sub')}</div>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick={() => (proMode = !proMode)} aria-pressed={proMode}>
+      {proMode ? tp('close') : tp('open')}
+    </button>
+  </div>
+  {#if proMode}
+    <div class="pro-term">
+      <MiningTerminal />
+    </div>
+  {/if}
+
   <!-- ── Stats row ── -->
-  <div class="grid-4" style="margin-bottom:12px;">
+  <div class="grid-4 stats-row">
     <div class="card">
       <div class="stat-label">{t('db.energy')}</div>
-      <div class="stat-val sm mono">{energyKwh.toFixed(1)}<span style="font-size:12px;color:var(--color-text-2);margin-left:4px;">kWh</span></div>
+      <div class="stat-val sm mono">{energyKwh.toFixed(1)}<span class="stat-unit">kWh</span></div>
       <div class="stat-sub">{t('db.since_start')}</div>
     </div>
     <div class="card">
@@ -210,7 +245,7 @@
     </div>
     <div class="card">
       <div class="stat-label">{t('db.peers')}</div>
-      <div class="stat-val sm mono" style="color:var(--cyan);">{peers}</div>
+      <div class="stat-val sm mono">{peers}</div>
       <div class="stat-sub">{t('db.connected')}</div>
     </div>
     <div class="card">
@@ -220,7 +255,7 @@
     </div>
   </div>
 
-  <div class="grid-2" style="margin-bottom:12px;">
+  <div class="grid-2 dual-row">
     <!-- ── Pourquoi je gagne ? (Shapley, en langage simple) ── -->
     <div class="card">
       <div class="card-title">{t('mine.why.title')}</div>
@@ -247,12 +282,12 @@
         <span class="em-unit">QUANTA/h · {t('mine.emission.network')}</span>
       </div>
       <canvas bind:this={curveCanvas} class="em-curve" aria-label={t('mine.emission.curveAria')}></canvas>
-      <p class="mine-p" style="margin-top:10px;">{t('mine.emission.explain')}</p>
+      <p class="mine-p em-explain">{t('mine.emission.explain')}</p>
     </div>
   </div>
 
   <!-- ── Finalité — l'histoire gravée (Casper-FFG) ── -->
-  <div class="card" style="margin-bottom:12px;">
+  <div class="card fin-card">
     <div class="card-title">{t('mine.fin.title')}</div>
     {#if fin}
       <div class="fin-grid">
@@ -278,7 +313,7 @@
             <div class="mono fin-stat-v">{fmtQ(fin.total_staked)} <span class="fin-stat-u">QTA</span></div>
           </div>
           {#if fin.i_am_validator}
-            <div class="fin-you ok">✓ {t('mine.fin.youAre')}</div>
+            <div class="fin-you ok">{t('mine.fin.youAre')}</div>
           {:else}
             <div class="fin-you">{t('mine.fin.become')}</div>
           {/if}
@@ -295,15 +330,15 @@
     <div class="supply-grid">
       <div><div class="sup-k">{t('db.hard_cap')}</div><div class="sup-v mono">{fmtQ(maxSupply)}</div></div>
       <div><div class="sup-k">{t('db.issued')}</div><div class="sup-v mono">{fmtQ(minedQta)}</div></div>
-      <div><div class="sup-k">{t('db.burned')}</div><div class="sup-v mono" style="color:var(--color-amber);">{fmtQ(burnedQta)}</div></div>
+      <div><div class="sup-k">{t('db.burned')}</div><div class="sup-v mono">{fmtQ(burnedQta)}</div></div>
       <div><div class="sup-k">{t('db.circulating')}</div><div class="sup-v mono">{fmtQ(circulatingQta)}</div></div>
     </div>
     <div class="sup-bar"><div class="sup-fill" style="width:{Math.min(100, Math.max(pctToCap, pctToCap > 0 ? 0.5 : 0))}%;"></div></div>
     <div class="sup-cap-line">{pctToCap < 0.01 && pctToCap > 0 ? '<0,01' : pctToCap.toFixed(2)}{t('db.cap_issued')} · {t('db.deflationary')}</div>
     <div class="sup-trust">
-      <span>✓ {t('db.no_authority')}</span>
-      <span>✓ {t('db.no_premine')}</span>
-      <span>✓ {t('db.policy_in_code')}</span>
+      <span>{t('db.no_authority')}</span>
+      <span>{t('db.no_premine')}</span>
+      <span>{t('db.policy_in_code')}</span>
     </div>
   </div>
 </div>
@@ -311,87 +346,131 @@
 <style>
   .mine-p { font-size: 12.5px; color: var(--color-text-2); line-height: 1.55; }
 
-  /* Hero */
-  .mine-hero { margin-bottom: 12px; padding: 0 0 18px; overflow: hidden; }
-  .mh-torus { position: relative; }
+  /* ── Hero ─────────────────────────────────────────────────────── */
+  .mine-hero { margin-bottom: 12px; padding: 0 0 20px; overflow: hidden; }
+  .mh-scene { position: relative; }
   .mh-live {
     position: absolute; top: 14px; left: 16px;
     display: inline-flex; align-items: center; gap: 7px;
-    font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
     text-transform: uppercase; color: var(--color-text-2);
-    background: rgba(255,255,255,0.75); backdrop-filter: blur(4px);
+    background: rgba(255,255,255,0.78); backdrop-filter: blur(4px);
     border: 1px solid var(--color-border);
     padding: 5px 10px; border-radius: 999px;
   }
   .mh-live-dot {
     width: 7px; height: 7px; border-radius: 50%;
-    background: var(--color-green);
-    animation: pulse-ring 2s ease infinite;
+    background: var(--color-accent);
+    box-shadow: 0 0 0 0 rgba(11,165,160,0.5);
+    animation: mh-pulse 2s ease infinite;
   }
-  .mh-stats {
-    display: flex; align-items: flex-end; justify-content: space-between;
-    gap: 20px; padding: 4px 24px 0; flex-wrap: wrap;
+  @keyframes mh-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(11,165,160,0.4); }
+    50% { box-shadow: 0 0 0 5px rgba(11,165,160,0); }
   }
-  .mh-rate { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
-  .mh-rate-num {
-    font-size: 46px; font-weight: 700; color: var(--color-accent);
-    line-height: 1; letter-spacing: -0.02em;
-  }
-  .mh-rate-unit { font-size: 15px; color: var(--color-text-2); }
-  .mh-side { display: flex; gap: 28px; }
-  .mh-cell-v { font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .mh-explain { font-size: 12.5px; color: var(--color-text-2); line-height: 1.55; padding: 14px 24px 0; margin: 0; }
+  @media (prefers-reduced-motion: reduce) { .mh-live-dot { animation: none; } }
 
-  /* Shapley */
-  .sh-list { display: flex; flex-direction: column; gap: 13px; margin-top: 14px; }
-  .sh-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .mh-body {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 24px; padding: 6px 26px 0; flex-wrap: wrap;
+  }
+  .mh-rate { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; }
+  .mh-rate-num {
+    font-family: var(--font-display);
+    font-size: 52px; font-weight: 700; color: var(--color-accent);
+    line-height: 1; letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .mh-rate-unit { font-size: 15px; color: var(--color-text-2); font-weight: 500; }
+  .mh-rate-sub { font-size: 12.5px; color: var(--color-text-2); margin-top: 8px; }
+  .mh-side { display: flex; gap: 32px; }
+  .mh-cell-v { font-size: 22px; font-weight: 700; color: var(--color-text-0); margin-top: 4px; }
+  .mh-explain { padding: 16px 26px 0; margin: 0; }
+
+  /* ── Mode pro (toggle) ────────────────────────────────────────── */
+  .pro-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 12px;
+    padding: 14px 20px;
+    background: var(--surface); border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg); box-shadow: var(--shadow-sm);
+  }
+  .pro-meta .stat-label { margin-bottom: 3px; }
+  .pro-sub { font-size: 12.5px; color: var(--color-text-2); }
+  .pro-term { margin-bottom: 12px; }
+
+  /* ── Stats row ── */
+  .stats-row { margin-bottom: 12px; }
+  .stat-unit { font-size: 12px; color: var(--color-text-2); margin-left: 4px; font-weight: 400; }
+
+  .dual-row { margin-bottom: 12px; }
+
+  /* ── Shapley — teintes de teal uniquement ── */
+  .sh-list { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+  .sh-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
   .sh-name { font-size: 13px; font-weight: 600; color: var(--color-text-0); }
   .sh-pct { font-size: 12px; color: var(--color-text-2); }
   .sh-bar { height: 6px; background: var(--color-bg-3); border-radius: 3px; overflow: hidden; }
-  .sh-fill { height: 100%; border-radius: 3px; }
-  .sh-teal   { background: #0BA5A0; }
-  .sh-blue   { background: #3D6FE0; }
-  .sh-violet { background: #7C3AED; }
-  .sh-amber  { background: #E8810C; }
-  .sh-sub { font-size: 11.5px; color: var(--color-text-2); margin-top: 4px; line-height: 1.45; }
+  .sh-fill { height: 100%; border-radius: 3px; transition: width 0.8s var(--ease-out); }
+  .sh-1 { background: var(--teal-700); }
+  .sh-2 { background: var(--teal-500); }
+  .sh-3 { background: var(--teal-400); }
+  .sh-4 { background: var(--teal-300); }
+  .sh-sub { font-size: 11.5px; color: var(--color-text-2); margin-top: 5px; line-height: 1.45; }
 
-  /* Émission */
-  .em-now { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
-  .em-val { font-size: 30px; font-weight: 700; color: var(--color-text-0); }
+  /* ── Émission ── */
+  .em-now { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
+  .em-val { font-family: var(--font-display); font-size: 32px; font-weight: 700; color: var(--color-text-0); font-variant-numeric: tabular-nums lining-nums; }
   .em-unit { font-size: 12px; color: var(--color-text-2); }
   .em-curve { width: 100%; height: 110px; display: block; }
+  .em-explain { margin-top: 12px; }
 
-  /* Finalité */
-  .fin-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 24px; }
+  /* ── Finalité ── */
+  .fin-card { margin-bottom: 12px; }
+  .fin-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 28px; }
   @media (max-width: 720px) { .fin-grid { grid-template-columns: 1fr; } }
   .fin-epoch-head {
     display: flex; justify-content: space-between; align-items: baseline;
-    font-size: 13px; font-weight: 600; margin-bottom: 8px;
+    font-size: 13px; font-weight: 600; color: var(--color-text-0); margin-bottom: 8px;
   }
   .fin-bar { height: 8px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
-  .fin-fill { height: 100%; background: linear-gradient(90deg, #0BA5A0, #14C8B8); border-radius: 4px; transition: width 0.8s ease; }
+  .fin-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 0.8s var(--ease-out); }
   .fin-floor {
     display: flex; align-items: center; gap: 8px;
-    margin: 14px 0 10px; font-size: 13px; color: var(--color-text-1);
+    margin: 16px 0 10px; font-size: 13px; color: var(--color-text-1);
   }
   .fin-floor svg { color: var(--color-accent); flex-shrink: 0; }
-  .fin-right { display: flex; flex-direction: column; gap: 14px; }
-  .fin-stat-v { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .fin-right { display: flex; flex-direction: column; gap: 16px; }
+  .fin-stat-v { font-size: 22px; font-weight: 700; color: var(--color-text-0); margin-top: 4px; }
   .fin-stat-u { font-size: 12px; color: var(--color-text-2); font-weight: 400; }
   .fin-you {
     font-size: 12px; color: var(--color-text-2);
-    padding: 8px 12px; background: var(--color-bg-2);
-    border-radius: 8px; line-height: 1.5;
+    padding: 10px 12px; background: var(--color-bg-2);
+    border-radius: var(--radius-sm); line-height: 1.5;
   }
-  .fin-you.ok { color: var(--color-green); font-weight: 600; background: rgba(22,163,74,0.07); }
+  .fin-you.ok {
+    color: var(--color-accent-hover); font-weight: 600;
+    background: var(--cyan-dim); border: 1px solid var(--cyan-mid);
+  }
 
-  /* Offre (reprise de la carte existante) */
-  .supply-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px; }
-  .sup-k { font-size: 11px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
-  .sup-v { font-size: 20px; font-weight: 700; color: var(--color-text-0); }
+  /* ── Offre prouvable ── */
+  .supply-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
+  .sup-k { font-size: 11px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; }
+  .sup-v { font-size: 20px; font-weight: 700; color: var(--color-text-0); font-variant-numeric: tabular-nums lining-nums; }
   .sup-bar { height: 8px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
-  .sup-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 1.2s ease; }
-  .sup-cap-line { font-size: 12px; color: var(--color-text-2); margin-top: 6px; }
-  .sup-trust { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; font-size: 12px; color: var(--color-green); font-weight: 600; }
+  .sup-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 1.2s var(--ease-out); }
+  .sup-cap-line { font-size: 12px; color: var(--color-text-2); margin-top: 8px; }
+  .sup-trust {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 16px;
+    font-size: 12px; color: var(--color-text-1); font-weight: 500;
+  }
+  .sup-trust span { display: inline-flex; align-items: center; gap: 7px; }
+  .sup-trust span::before {
+    content: ""; width: 14px; height: 14px; flex-shrink: 0;
+    border-radius: 50%;
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 4.8 8.5 9.5 3.5' fill='none' stroke='%230BA5A0' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 10px no-repeat,
+      var(--cyan-dim);
+  }
   @media (max-width: 720px) { .supply-grid { grid-template-columns: repeat(2, 1fr); } }
 </style>

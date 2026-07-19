@@ -46,6 +46,7 @@
     { id: 'network',       label: 'nav.network',   icon: 'network' },
     { id: 'explorer',      label: 'nav.explorer',  icon: 'explorer' },
     { id: 'profile',       label: 'nav.profile',   icon: 'profile' },
+    { id: 'whitepaper',    label: 'nav.whitepaper', icon: 'whitepaper' },
   ];
 </script>
 
@@ -74,6 +75,8 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="3"/><path d="M2 14c0-3.314 2.686-5 6-5s6 1.686 6 5"/></svg>
         {:else if item.icon === 'explorer'}
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
+        {:else if item.icon === 'whitepaper'}
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 1.5h5L12.5 5v9.5H4z"/><path d="M9 1.5V5h3.5M6 8h4.5M6 11h4.5"/></svg>
         {/if}
         {t(item.label)}
       </button>
