@@ -258,6 +258,27 @@
     (window as unknown as { __quantaView?: string }).__quantaView = view;
   });
 
+  // Disjoncteur : `effect_update_depth_exceeded` (boucle d'effets) tue le
+  // graphe réactif — la page devient une nature morte (LE « gel » du 19/07,
+  // bloc #91). Ici : on capte l'erreur, on remonte TOUT le shell ({#key
+  // appGen}) — un clignotement d'une seconde au lieu d'une app morte — et
+  // l'événement part dans la forensique.
+  let appGen = $state(0);
+  let lastBreak = 0;
+  $effect(() => {
+    const breaker = (e: ErrorEvent) => {
+      if (!String(e.message).includes("effect_update_depth")) return;
+      const now = Date.now();
+      if (now - lastBreak < 5000) return; // jamais en boucle
+      lastBreak = now;
+      note("disjoncteur", "remontage du shell après boucle d'effets");
+      // setTimeout : on laisse le flush fautif s'aborter proprement d'abord.
+      setTimeout(() => { appGen += 1; }, 50);
+    };
+    window.addEventListener("error", breaker);
+    return () => window.removeEventListener("error", breaker);
+  });
+
   // Bannière « gel détecté » : la sonde (diag.ts) émet quanta-stall à chaque
   // rapport — l'app MONTRE qu'elle a vu le gel et où lire le contexte.
   let stallFlash = $state("");
@@ -375,6 +396,7 @@
     </div>
   </div>
 {:else}
+  {#key appGen}
   <div class="app-shell">
     <Sidebar activeView={view} onNavigate={nav} />
     <main class="main-content">
@@ -411,6 +433,7 @@
   {#if stallFlash}
     <div class="stall-banner" role="status">⚠ {t('diag.stall')} · {stallFlash}</div>
   {/if}
+  {/key}
 {/if}
 
 <style>

@@ -217,7 +217,8 @@ export function startDiag(): void {
   // boucle EN SILENCE (aucun boundary ne la voit) — ici elle entre dans
   // l'anneau ET déclenche un rapport. Plus jamais de mort silencieuse.
   window.addEventListener("error", (e) => {
-    note("js-erreur", `${String(e.message).slice(0, 100)} @${String(e.filename).split("/").pop()}:${e.lineno}`);
+    const stack = (e.error as Error | undefined)?.stack ?? "";
+    note("js-erreur", `${String(e.message).slice(0, 100)} @${String(e.filename).split("/").pop()}:${e.lineno} ${stack.slice(0, 300)}`);
     report("js-erreur", 0);
   });
   window.addEventListener("unhandledrejection", (e) => {

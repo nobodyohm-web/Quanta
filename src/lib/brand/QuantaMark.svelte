@@ -19,6 +19,8 @@
   // `sealing`: when it flips true the block blooms Aurora once (~600 ms) then
   // settles — wire it to real quanta://block-sealed events at CALL SITES,
   // never as a loop. Honours prefers-reduced-motion.
+  import { untrack } from "svelte";
+
   let {
     size = 28,
     tone = "ink",
@@ -43,11 +45,17 @@
 
   // One-shot seal bloom: re-keyed each time `sealing` flips true (unless the
   // viewer prefers reduced motion). Cheap — no persistent media listener.
+  //
+  // ⚠ `seal += 1` NU dans l'effet = LA boucle infinie qui gelait l'app à
+  // chaque bloc scellé (19/07, bloc #91 : `effect_update_depth_exceeded`,
+  // graphe réactif tué, app morte à l'écran). `seal += 1` LIT `seal` → il
+  // devenait dépendance de l'effet → chaque écriture le redéclenchait en
+  // boucle synchrone. L'incrément DOIT être sous `untrack`.
   let seal = $state(0);
   $effect(() => {
     if (!sealing) return;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-    if (!reduce) seal += 1;
+    if (!reduce) untrack(() => { seal += 1; });
   });
 </script>
 
