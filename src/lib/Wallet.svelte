@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
-  import Torus3D from "./Torus3D.svelte";
   import Qr from "./Qr.svelte";
   import EmptyState from "./EmptyState.svelte";
   import { untrack } from "svelte";
@@ -48,8 +47,6 @@
   let codeCopied = $state(false);
   let loading = $state(true);
   let nodeStatus = $state<any>(null);
-  let pulse = $state(0);
-  let lastHeight = 0;
 
   const myPk = $derived(ov?.address ?? "");
   // Public, human-facing receive address (`qta1…`, checksummed). `myPk` (hex) stays
@@ -94,9 +91,11 @@
   }
 
   // ── Solde animé : le montant COMPTE jusqu'à sa nouvelle valeur (ticker).
+  // « Solde total » = tout ce qu'on détient sur la chaîne (dépensable + staké
+  // + en-déverrouillage) ; la ventilation vit dans « Ton argent » plus bas.
   let shownBalance = $state(0);
   $effect(() => {
-    const target = ov?.spendable ?? 0;
+    const target = ov ? ov.spendable + ov.staked + ov.unbonding : 0;
     const start = untrack(() => shownBalance);
     if (Math.abs(target - start) < 1e-9) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -125,7 +124,6 @@
   async function refresh() {
     try {
       ov = await invoke<WalletOverview>("get_wallet_overview");
-      if (ov.height > lastHeight) { if (lastHeight > 0) pulse++; lastHeight = ov.height; }
     } catch { /* ignore */ }
     try { txs = await invoke<LedgerTx[]>("get_recent_txs"); } catch { /* ignore */ }
     try { const e = await invoke<any>("get_energy_stats"); energyKwh = e?.kwh_consumed ?? 0; } catch { /* optional */ }
@@ -372,33 +370,26 @@
 
 <div class="page">
 
-  <!-- ── Hero : le solde, la vérité de la chaîne — le MOMENT de l'écran ── -->
-  <div class="card card-hero w-hero">
+  <!-- ── Hero : le solde total — LE moment de l'écran, la typo seule ── -->
+  <div class="card w-hero">
     {#if loading}
+      <div class="skeleton sk-label"></div>
       <div class="skeleton sk-bal"></div>
-      <div class="skeleton sk-unit"></div>
     {:else}
-      <div class="w-coin3d"><Torus3D height={120} {peers} {pulse} /></div>
-      <div class="w-bal-row">
-        <div class="w-balance mono" class:amt-private={privacy}>{shownBalance.toFixed(2)}</div>
+      <div class="w-hero-top">
+        <span class="w-hero-label">{t('wallet.totalBalance')}</span>
         <button class="w-eye" onclick={togglePrivacy}
           aria-label={t('wallet.privacyToggle')} title={t('wallet.privacyToggle')}>
           {#if privacy}
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l18 18M10.6 10.7a2.8 2.8 0 003.9 3.9M6.6 6.7C4.3 8.1 2.7 10.2 2 12c1.6 4 5.4 7 10 7 1.9 0 3.7-.5 5.2-1.4M12 5c4.6 0 8.4 3 10 7-.4 1.1-1.1 2.2-2 3.2"/></svg>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l18 18M10.6 10.7a2.8 2.8 0 003.9 3.9M6.6 6.7C4.3 8.1 2.7 10.2 2 12c1.6 4 5.4 7 10 7 1.9 0 3.7-.5 5.2-1.4M12 5c4.6 0 8.4 3 10 7-.4 1.1-1.1 2.2-2 3.2"/></svg>
           {:else}
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 12c1.6-4 5.4-7 10-7s8.4 3 10 7c-1.6 4-5.4 7-10 7S3.6 16 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 12c1.6-4 5.4-7 10-7s8.4 3 10 7c-1.6 4-5.4 7-10 7S3.6 16 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
           {/if}
         </button>
       </div>
-      <div class="w-unit">QUANTA</div>
-      <div class="w-meta" class:amt-private={privacy}>
-        <span class="w-pos">+{(ov?.earned ?? 0).toFixed(2)} {t('wallet.earned')}</span>
-        <span class="w-sep">·</span>
-        <span>{(ov?.staked ?? 0).toFixed(2)} {t('wallet.stakedShort')}</span>
-        {#if (ov?.unbonding ?? 0) > 0}
-          <span class="w-sep">·</span>
-          <span>{(ov?.unbonding ?? 0).toFixed(2)} {t('wallet.unbondingShort')}</span>
-        {/if}
+      <div class="w-balance-row" class:amt-private={privacy}>
+        <span class="w-balance">{shownBalance.toFixed(2)}</span>
+        <span class="w-cur">QUANTA</span>
       </div>
     {/if}
   </div>
@@ -422,6 +413,13 @@
         <rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>
       </svg>
       <span>{t('wallet.stake')}</span>
+    </button>
+    <button class="w-btn w-btn-soon" disabled aria-disabled="true" title={t('wallet.soon')}>
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M7 8h11M15 5l3 3-3 3M17 16H6M9 13l-3 3 3 3"/>
+      </svg>
+      <span>{t('wallet.exchange')}</span>
+      <span class="w-soon">{t('wallet.soon')}</span>
     </button>
   </div>
 
@@ -758,28 +756,25 @@
 </div>
 
 <style>
-  /* ── Hero — LE moment de l'écran : carte blanche, rail Aurora (card-hero) ── */
-  .w-hero {
-    display: flex; flex-direction: column; align-items: center;
-    padding: 16px 24px 28px; gap: var(--space-1);
-    margin-bottom: 12px;
+  /* ── Hero — le solde total, la typo seule (niveau banque : Trade Republic) ── */
+  .w-hero { padding: 22px 26px 26px; margin-bottom: 12px; }
+  .w-hero-top {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
   }
+  .w-hero-label {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.01em; color: var(--color-text-2);
+  }
+  .w-balance-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .w-balance {
-    font-size: 48px; font-weight: 700; letter-spacing: -0.03em; line-height: 1;
-    color: var(--color-text-0);
+    font-size: clamp(46px, 9vw, 64px); font-weight: 700; letter-spacing: -0.035em;
+    line-height: 1; color: var(--color-text-0);
+    font-variant-numeric: tabular-nums lining-nums;
   }
-  .w-unit {
-    font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
-    color: var(--color-text-2); margin-top: var(--space-1);
-  }
-  .w-meta {
-    display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; justify-content: center;
-    font-size: 13px; color: var(--color-text-2); margin-top: var(--space-3);
+  .w-cur {
+    font-size: 17px; font-weight: 600; letter-spacing: 0.02em; color: var(--color-accent-hover);
   }
   .w-sep { opacity: 0.5; }
-  .w-pos { color: var(--cyan); font-weight: 600; }
-  .w-coin3d { width: 100%; max-width: 340px; margin-bottom: 4px; }
-  .w-bal-row { display: flex; align-items: center; gap: 10px; }
   .w-eye {
     display: flex; align-items: center; justify-content: center;
     width: 30px; height: 30px; border-radius: 8px;
@@ -800,8 +795,8 @@
   }
   @keyframes sk-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
   @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
-  .sk-bal  { width: 180px; height: 54px; border-radius: var(--radius-sm); }
-  .sk-unit { width: 48px; height: 18px; border-radius: 4px; margin-top: 8px; }
+  .sk-label { width: 96px; height: 15px; border-radius: 5px; margin-bottom: 12px; }
+  .sk-bal  { width: 240px; height: 60px; border-radius: var(--radius-sm); }
   .sk-row  { width: 100%; height: 44px; border-radius: var(--radius-sm); margin-bottom: 6px; }
 
   /* Actions — trois tuiles blanches flottantes ; l'état actif porte le teal */
@@ -823,6 +818,13 @@
   }
   .w-btn:hover { border-color: var(--color-border-hover); color: var(--color-text-0); transform: translateY(-1px); box-shadow: var(--shadow); }
   .w-btn.w-active { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); transform: none; box-shadow: var(--shadow-sm); }
+  .w-btn:disabled { cursor: default; }
+  .w-btn-soon { opacity: 0.7; }
+  .w-btn-soon:hover { transform: none; border-color: var(--color-border); color: var(--color-text-1); box-shadow: var(--shadow-sm); }
+  .w-soon {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--color-accent-hover); line-height: 1;
+  }
 
   /* Feedback */
   .w-fb {
@@ -924,9 +926,11 @@
     margin-top: 12px; font-size: 11.5px; color: var(--color-text-3);
   }
   .w-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  /* Discipline couleur (niveau banque) : un seul accent. Le teal marque le
+     bondé (l'état actif) ; déverrouillage et forgé restent en encre. */
   .w-cell.c-teal  .w-cell-v { color: var(--cyan); }
-  .w-cell.c-amber .w-cell-v { color: var(--color-amber); }
-  .w-cell.c-green .w-cell-v { color: var(--color-green); }
+  .w-cell.c-amber .w-cell-v { color: var(--color-text-0); }
+  .w-cell.c-green .w-cell-v { color: var(--color-text-0); }
 
   .w-form  { display: flex; flex-direction: column; gap: var(--space-4); }
   .w-field { display: flex; flex-direction: column; gap: 6px; }
