@@ -9,6 +9,7 @@
   //  Garde-fous perf stricts : boucle time-boxée 4 ms/frame, pause hors
   //  écran / onglet caché, cleanup au démontage → jamais de gel.
   // ═══════════════════════════════════════════════════════════════════
+  import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { blake3 } from "@noble/hashes/blake3.js";
@@ -131,7 +132,11 @@
     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }
   function push(kind: string, text: string) {
-    lines = [{ id: ++seq, kind, time: stamp(), text }, ...lines].slice(0, 30);
+    // untrack : appelé depuis des $effect — sans lui, le spread `...lines`
+    // serait une LECTURE trackée de l'état qu'on écrit → boucle réactive
+    // infinie (effect_update_depth_exceeded ; le bug historique des gels).
+    const prev = untrack(() => lines);
+    lines = [{ id: ++seq, kind, time: stamp(), text }, ...prev].slice(0, 30);
   }
 
   let seenStats = false;
@@ -260,8 +265,12 @@
       io.observe(rootEl);
     }
     play();
-    // Graine visible immédiate (et seul rendu sous reduced-motion) : un vrai hash tout de suite.
-    if (!coreHash) { for (let k = 39; k >= 32; k--) { if (++input[k] !== 0) break; } coreHash = bytesToHex(blake3(input)); }
+    // Graine visible immédiate — untrack : sans lui, lire coreHash ici rendrait
+    // l'effet dépendant d'un état réécrit toutes les 90 ms par computeBatch
+    // (→ re-création interval/observers 11×/s).
+    untrack(() => {
+      if (!coreHash) { for (let k = 39; k >= 32; k--) { if (++input[k] !== 0) break; } coreHash = bytesToHex(blake3(input)); }
+    });
     return () => {
       clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
