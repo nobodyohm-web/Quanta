@@ -11,6 +11,7 @@
   // ═══════════════════════════════════════════════════════════════════
   import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { blake3 } from "@noble/hashes/blake3.js";
   import { bytesToHex } from "@noble/hashes/utils.js";
@@ -106,8 +107,10 @@
 
   // ── Cœur de hachage BLAKE3 (réel, mesuré) ────────────────────────
   let coreHash = $state("");        // dernier digest hex (vrai BLAKE3)
+  let hashTrail = $state<string[]>([]); // cascade : les digests précédents
   let hps = $state(0);              // hashs/seconde mesurés
   let totalHashes = $state(0);      // total calculés depuis l'ouverture
+  let appVersion = $state("");      // version affichée — fin du doute sur le build
   const input = new Uint8Array(48); // 32 o (dernier hash bloc) + 8 o nonce + 8 o slot
 
   function seedInput() {
@@ -193,6 +196,9 @@
       for (let k = 39; k >= 32; k--) { if (++input[k] !== 0) break; } // ++ nonce (big-endian)
       digest = blake3(input);
     }
+    // Cascade : le digest courant descend dans la traîne — le calcul se VOIT couler.
+    const prev = coreHash;
+    if (prev) hashTrail = [prev, ...hashTrail].slice(0, 3);
     coreHash = bytesToHex(digest);
     totalHashes += BATCH;
     acc += BATCH;
@@ -254,6 +260,7 @@
   });
 
   $effect(() => {
+    getVersion().then((v) => (appVersion = v)).catch(() => {});
     poll();
     const iv = setInterval(poll, 3000);
     // pause hors écran / onglet caché (perf + honnêteté : rien ne tourne caché)
@@ -286,7 +293,7 @@
 <div class="engine" class:reduce bind:this={rootEl} role="group" aria-label={tl("title")}>
   <div class="bar">
     <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="bar-t">quanta · engine</span>
+    <span class="bar-t">quanta · engine{appVersion ? ` · v${appVersion}` : ""}</span>
     <span class="bar-live" class:paused={!visible}><span class="dot"></span>{tl("live")}</span>
   </div>
 
@@ -297,7 +304,14 @@
       <div class="core-title">{tl("title")}</div>
     </div>
     <div class="hash" aria-live="off">
-      {#each hashGroups as g, i}<span class="hg" class:hot={i % 3 === 0}>{g}</span>{/each}
+      <div class="hash-now">
+        {#each hashGroups as g, i}<span class="hg" class:hot={i % 3 === 0}>{g}</span>{/each}
+      </div>
+      <!-- La traîne : les digests précédents s'estompent — preuve visuelle que
+           le calcul coule (chaque ligne = un vrai BLAKE3 qui vient d'exister). -->
+      {#each hashTrail as h, d}
+        <div class="hash-prev" style="opacity:{0.42 - d * 0.13}">{h}</div>
+      {/each}
     </div>
     <div class="core-meta">
       <span class="chain">{tl("chain")}</span>
@@ -366,13 +380,19 @@
   .slot b { color: #eef2f7; font-size: 15px; }
   .core-title { font-family: var(--font-display); font-size: 13px; font-weight: 700; color: var(--teal); letter-spacing: 0.02em; }
   .hash {
-    display: flex; flex-wrap: wrap; gap: 5px 8px;
-    font-size: 15px; line-height: 1.5; word-break: break-all;
-    padding: 14px; border-radius: var(--radius-sm);
-    background: #06080b; border: 1px solid var(--line); min-height: 62px;
+    padding: 18px; border-radius: var(--radius-sm);
+    background: #06080b; border: 1px solid var(--line); min-height: 132px;
   }
-  .hg { color: #8b93a3; transition: color 0.1s linear; }
+  .hash-now {
+    display: flex; flex-wrap: wrap; gap: 6px 10px;
+    font-size: 18px; line-height: 1.5; word-break: break-all;
+  }
+  .hg { color: #98a0b0; }
   .hg.hot { color: var(--teal); }
+  .hash-prev {
+    margin-top: 7px; font-size: 12.5px; letter-spacing: 0.04em;
+    color: #7b849a; word-break: break-all; line-height: 1.4;
+  }
   .reduce .hash { filter: none; }
   .core-meta { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; }
   .chain { font-size: 11.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
