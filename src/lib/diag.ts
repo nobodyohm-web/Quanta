@@ -175,6 +175,14 @@ export function startDiag(): void {
     const n = performance.now();
     const gap = n - beat;
     beat = n;
+    // Fenêtre cachée/occluse : macOS ralentit les timers à ~1 s — des trous
+    // NORMAUX, pas des gels. On se tait (sinon : spam « GEL 1000 ms » dans le
+    // journal de preuve pendant toute absence — observé le 19/07 au soir).
+    if (document.hidden || document.visibilityState !== "visible") {
+      overrun = 0;
+      stormStart = n;
+      return;
+    }
     if (gap > 600) report("watchdog", gap);
     else if (gap - 150 > 40) overrun += gap - 150;
     if (n - stormStart >= 3000) {
