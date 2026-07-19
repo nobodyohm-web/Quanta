@@ -330,8 +330,20 @@
         cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
       }
       gl!.viewport(0, 0, cv.width, cv.height);
-      const now = performance.now() / 1000;
-      while (queue.length) { const s = queue.shift()!; spawnBurst(s.kind, s.n, now); }
+      const t0 = performance.now();
+      const now = t0 / 1000;
+      // Budget de spawn par frame : jamais plus de 400 particules écrites
+      // d'un coup — une rafale d'événements s'étale sur quelques frames au
+      // lieu de bloquer la frame du scellement.
+      let budget = 400;
+      while (queue.length && budget > 0) {
+        const s = queue[0];
+        const take = Math.min(s.n, budget);
+        spawnBurst(s.kind, take, now);
+        s.n -= take;
+        budget -= take;
+        if (s.n <= 0) queue.shift();
+      }
       syncPeers(peerCount);
       computeVP(cv.width, cv.height, performance.now());
       gl!.clear(gl!.COLOR_BUFFER_BIT);
@@ -339,6 +351,9 @@
       gl!.uniform1f(uDpr, dpr);
       gl!.uniformMatrix4fv(uVP, false, vp);
       gl!.drawArrays(gl!.POINTS, 0, TOTAL);
+      // Coût de frame anormal → dans l'anneau (visible en forensique).
+      const cost = performance.now() - t0;
+      if (cost > 40) note("gl-frame", `${Math.round(cost)}ms`);
       if (!reduced) raf = requestAnimationFrame(frame);
       else running = false;
     }

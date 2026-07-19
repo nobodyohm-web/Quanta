@@ -1462,21 +1462,22 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 use tauri::Manager;
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    // 1. Thread principal
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // 1. Thread principal — ping chaque seconde, rapport dès 300 ms
+                    //    (un gel d'1-2 s à chaque bloc passait sous l'ancien 5 s/1 s).
                     let t0 = std::time::Instant::now();
                     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
                     let _ = guard.run_on_main_thread(move || {
                         let _ = tx.send(());
                     });
-                    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
                         Ok(Ok(())) => {
                             let ms = t0.elapsed().as_millis() as u64;
-                            if ms > 1000 {
+                            if ms > 300 {
                                 ui_diag_write(&format!("GEL thread-principal Rust {} ms (beachball)", ms));
                             }
                         }
-                        _ => ui_diag_write("GEL thread-principal Rust >10 s (beachball sévère)"),
+                        _ => ui_diag_write("GEL thread-principal Rust >5 s (beachball sévère)"),
                     }
                     // 2. Battement webview
                     let last = LAST_UI_BEAT.load(std::sync::atomic::Ordering::Relaxed);

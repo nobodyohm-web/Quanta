@@ -363,9 +363,17 @@
     // ici, dans le terminal, copiable tel quel.
     let seenStall = lastStall() ?? "";
     if (seenStall) push("stall", seenStall.slice(0, 220));
+    // La forensique par scellement (diag.ts, inconditionnelle) s'affiche
+    // aussi ici : chaque bloc laisse sa ligne de vérité mesurée.
+    let seenSeal = "";
+    try { seenSeal = localStorage.getItem("quanta.lastSeal") ?? ""; } catch { /* best-effort */ }
     const sd = setInterval(() => {
       const s = lastStall();
       if (s && s !== seenStall) { seenStall = s; push("stall", s.slice(0, 220)); }
+      try {
+        const f = localStorage.getItem("quanta.lastSeal");
+        if (f && f !== seenSeal) { seenSeal = f; push("hash", f.slice(25, 245)); }
+      } catch { /* best-effort */ }
     }, 5000);
     // pause hors écran / onglet caché (perf + honnêteté : rien ne tourne caché)
     const onVis = () => { visible = !document.hidden; play(); };

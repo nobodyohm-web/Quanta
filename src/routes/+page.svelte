@@ -18,6 +18,7 @@
   import Whitepaper from "$lib/Whitepaper.svelte";
   import { getPrefs, applyTheme } from "$lib/prefs";
   import { startDiag, note } from "$lib/diag";
+  import { warmAudio } from "$lib/sound";
   // Local fonts — bundled, no CDN (offline-first). Inter for everything,
   // JetBrains Mono reserved for the pro terminal only.
   import "@fontsource-variable/inter";
@@ -183,6 +184,10 @@
   $effect(() => {
     if (!ready) return;
     invoke<string>("get_public_key").then((a) => { myAddr = a; }).catch(() => {});
+    // Pré-chauffe la route audio maintenant (geste utilisateur = déverrouillage)
+    // — le réveil d'une interface externe (Universal Audio…) peut bloquer ~1-2 s
+    // s'il arrive au moment du carillon de scellement.
+    warmAudio();
   });
 
   async function unlock() {

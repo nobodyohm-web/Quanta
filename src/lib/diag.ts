@@ -13,6 +13,7 @@
 // tx-applied, engine…) : un gel corrélé au forge se lit directement.
 
 import { listen } from "@tauri-apps/api/event";
+import { lastChimeAgoMs } from "./sound";
 
 type Entry = { t: number; k: string; d: string };
 
@@ -22,6 +23,38 @@ let ringPos = 0;
 let rawInvoke: ((cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>) | null = null;
 let lastReportAt = 0;
 let started = false;
+// Dernière frame présentée (rAF) — partagé watchdog rendu + forensique.
+let lastRaf = 0;
+
+/// Forensique d'un scellement : 3 s d'échantillonnage à 100 ms, écrite SANS
+/// condition — chaque bloc produit sa ligne de vérité mesurée.
+function runSealForensics(index: number): void {
+  const t0 = performance.now();
+  let jsWorst = 0;
+  let rafWorst = 0;
+  let last = t0;
+  const iv = setInterval(() => {
+    const now = performance.now();
+    jsWorst = Math.max(jsWorst, now - last - 100);
+    last = now;
+    if (lastRaf) rafWorst = Math.max(rafWorst, now - lastRaf);
+    if (now - t0 >= 3000) {
+      clearInterval(iv);
+      const chime = lastChimeAgoMs();
+      const recent = ring
+        .filter((e) => now - e.t < 3500)
+        .map((e) => `${e.k}:${e.d}`)
+        .join(" | ");
+      const line =
+        `FORENSIQUE bloc #${index} : pire_trou_js=${Math.round(jsWorst)}ms ` +
+        `pire_trou_rendu=${Math.round(rafWorst)}ms ` +
+        `carillon=${chime >= 0 ? `${chime}ms` : "jamais"} :: ${recent}`.slice(0, 900);
+      try { localStorage.setItem("quanta.lastSeal", `${new Date().toISOString()} ${line}`); } catch { /* best-effort */ }
+      try { void rawInvoke?.("ui_diag", { msg: line }); } catch { /* best-effort */ }
+      note("forensique", `#${index} js=${Math.round(jsWorst)} rendu=${Math.round(rafWorst)}`);
+    }
+  }, 100);
+}
 
 /** Note une opération dans l'anneau de contexte (jamais bloquant, jamais réactif). */
 export function note(kind: string, detail: string): void {
@@ -123,13 +156,24 @@ export function startDiag(): void {
     try { void rawInvoke?.("ui_diag", { msg: `sonde active vue=${view} patch=${patchState}` }); } catch { /* best-effort */ }
   }, 4000);
 
-  // ── 2. Watchdog : trou entre deux battements = thread bloqué ──
+  // ── 2. Watchdog : trou entre deux battements = thread bloqué.
+  // Un seul long blocage (>600 ms) OU une TEMPÊTE de micro-blocages (somme
+  // des retards >800 ms sur 3 s glissantes — chacun sous le seuil, l'ensemble
+  // très visible) sont rapportés : c'est la signature du « ça freeze » perçu.
   let beat = performance.now();
+  let overrun = 0;
+  let stormStart = performance.now();
   setInterval(() => {
     const n = performance.now();
     const gap = n - beat;
     beat = n;
     if (gap > 600) report("watchdog", gap);
+    else if (gap - 150 > 40) overrun += gap - 150;
+    if (n - stormStart >= 3000) {
+      if (overrun > 800) report("tempête-jank", overrun);
+      overrun = 0;
+      stormStart = n;
+    }
   }, 150);
 
   // ── 2b. Battement de cœur vers Rust : le gardien backend détecte un webview
@@ -140,18 +184,26 @@ export function startDiag(): void {
   // figées (compositeur/GPU/occlusion). Si aucune frame n'est présentée
   // pendant > 3 s alors que la page se dit visible → gel de RENDU, rapporté
   // une fois par épisode (le rAF repartant réarme).
-  let lastRaf = performance.now();
+  lastRaf = performance.now();
   let rafReported = false;
   const rafBeat = () => { lastRaf = performance.now(); rafReported = false; requestAnimationFrame(rafBeat); };
   try { requestAnimationFrame(rafBeat); } catch { /* best-effort */ }
   setInterval(() => {
     if (document.hidden) { lastRaf = performance.now(); return; }
     const gap = performance.now() - lastRaf;
-    if (gap > 3000 && !rafReported) {
+    if (gap > 1200 && !rafReported) {
       rafReported = true;
       report("rendu-rAF", gap);
     }
-  }, 1000);
+  }, 500);
+
+  // ── 5. Forensique par scellement — la demande d'Alex : « des logs pour
+  // comprendre ». À CHAQUE bloc scellé, fenêtre de 3 s échantillonnée à
+  // 100 ms, TOUJOURS écrite (aucun seuil) : pire trou JS, pire trou de rendu,
+  // délai depuis le carillon (corrélation audio ⇄ gel), anneau récent.
+  listen<{ index?: number }>("quanta://block-sealed", (e) => {
+    try { runSealForensics(e.payload?.index ?? -1); } catch { /* best-effort */ }
+  }).catch(() => { /* best-effort */ });
 
   // ── 3. Longtasks (moteurs qui l'exposent) ──
   try {
