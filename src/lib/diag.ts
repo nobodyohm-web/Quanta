@@ -58,6 +58,9 @@ function report(source: string, ms: number): void {
   console.error("[diag]", msg);
   try { localStorage.setItem("quanta.lastStall", `${new Date().toISOString()} ${msg}`); } catch { /* best-effort */ }
   try { void rawInvoke?.("ui_diag", { msg }); } catch { /* best-effort */ }
+  // Signal visible : le shell affiche une bannière « gel détecté et enregistré »
+  // — l'app prouve qu'elle a vu le gel, l'utilisateur sait où lire le rapport.
+  try { window.dispatchEvent(new CustomEvent("quanta-stall", { detail: `${Math.round(ms)} ms (${source})` })); } catch { /* best-effort */ }
 }
 
 /** Dernier gel enregistré (affichable dans le terminal du moteur). */
@@ -128,6 +131,27 @@ export function startDiag(): void {
     beat = n;
     if (gap > 600) report("watchdog", gap);
   }, 150);
+
+  // ── 2b. Battement de cœur vers Rust : le gardien backend détecte un webview
+  // MORT (WebContent tué → gel permanent, plus aucun JS) et le recharge.
+  setInterval(() => { try { void rawInvoke?.("ui_beat"); } catch { /* best-effort */ } }, 5000);
+
+  // ── 2c. rAF-liveness : le fil JS peut battre pendant que les FRAMES sont
+  // figées (compositeur/GPU/occlusion). Si aucune frame n'est présentée
+  // pendant > 3 s alors que la page se dit visible → gel de RENDU, rapporté
+  // une fois par épisode (le rAF repartant réarme).
+  let lastRaf = performance.now();
+  let rafReported = false;
+  const rafBeat = () => { lastRaf = performance.now(); rafReported = false; requestAnimationFrame(rafBeat); };
+  try { requestAnimationFrame(rafBeat); } catch { /* best-effort */ }
+  setInterval(() => {
+    if (document.hidden) { lastRaf = performance.now(); return; }
+    const gap = performance.now() - lastRaf;
+    if (gap > 3000 && !rafReported) {
+      rafReported = true;
+      report("rendu-rAF", gap);
+    }
+  }, 1000);
 
   // ── 3. Longtasks (moteurs qui l'exposent) ──
   try {

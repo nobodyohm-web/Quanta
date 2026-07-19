@@ -252,6 +252,20 @@
     note("nav", view);
     (window as unknown as { __quantaView?: string }).__quantaView = view;
   });
+
+  // Bannière « gel détecté » : la sonde (diag.ts) émet quanta-stall à chaque
+  // rapport — l'app MONTRE qu'elle a vu le gel et où lire le contexte.
+  let stallFlash = $state("");
+  let stallTo: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const h = (e: Event) => {
+      stallFlash = String((e as CustomEvent).detail ?? "").slice(0, 80);
+      clearTimeout(stallTo);
+      stallTo = setTimeout(() => (stallFlash = ""), 8000);
+    };
+    window.addEventListener("quanta-stall", h);
+    return () => { window.removeEventListener("quanta-stall", h); clearTimeout(stallTo); };
+  });
   function handleCmd(id: string) { nav(id); }
 </script>
 
@@ -389,6 +403,9 @@
   <CommandPalette isOpen={cmdOpen} onClose={() => cmdOpen = false} onCommand={handleCmd} />
   <HelpModal isOpen={helpOpen} onClose={() => helpOpen = false} />
   <Toasts myAddress={myAddr} />
+  {#if stallFlash}
+    <div class="stall-banner" role="status">⚠ {t('diag.stall')} · {stallFlash}</div>
+  {/if}
 {/if}
 
 <style>
@@ -514,6 +531,24 @@
   .new-id-cta:hover { background: rgba(11,165,160,0.16); border-color: var(--color-accent); }
 
   /* Layout handled by app.css .app-shell and .main-content */
+
+  /* Bannière de gel — preuve visible que la sonde a capturé l'événement. */
+  .stall-banner {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 300;
+    padding: 9px 16px;
+    background: var(--surface);
+    border: 1px solid #f0b429;
+    border-radius: 100px;
+    box-shadow: var(--shadow-lg);
+    font-size: 12.5px; font-weight: 600; color: var(--color-text-0);
+    animation: toast-like-in 0.25s ease-out;
+  }
+  @keyframes toast-like-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce) { .stall-banner { animation: none; } }
 
   /* Écran en erreur (boundary) — sobre, actionnable. */
   .view-fail { max-width: 480px; display: flex; flex-direction: column; gap: 12px; }

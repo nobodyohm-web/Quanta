@@ -153,13 +153,43 @@ async fn check_identity(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, 
     Ok(db.as_ref().ok_or("DB not ready")?.get_active_keypair().await?.is_some())
 }
 
-/// Sonde de diagnostic UI : le frontend rapporte ici tout gel du thread
-/// principal (watchdog/longtask) avec l'anneau des opérations qui l'entouraient.
+/// Secondes epoch (0 en cas d'horloge cassée — jamais de panic).
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Écrit un rapport de diagnostic sur TOUS les canaux, sans jamais paniquer :
+/// log Rust, stderr (best-effort — `eprintln!` panique si stderr est fermé,
+/// c'est ce qui a tué les instances de dev du 2026-07-19), et un journal
+/// persistant `ui-diag.log` dans le dossier de données (lisible app fermée).
+fn ui_diag_write(msg: &str) {
+    log::warn!("◈ [UI-DIAG] {}", msg);
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "◈ [UI-DIAG] {}", msg);
+    let path = node_runtime::default_data_dir().join("ui-diag.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[{}] {}", epoch_secs(), msg);
+    }
+}
+
+/// Sonde de diagnostic UI : le frontend rapporte ici tout gel (fil JS bloqué,
+/// rendu rAF figé) avec l'anneau des opérations qui l'entouraient.
 /// Best-effort, aucun effet sur l'état du nœud — le gel devient une donnée datée.
 #[tauri::command]
-fn ui_diag(msg: String) {
-    log::warn!("◈ [UI-DIAG] {}", msg);
-    eprintln!("◈ [UI-DIAG] {}", msg);
+async fn ui_diag(msg: String) {
+    ui_diag_write(&msg);
+}
+
+/// Battement de cœur du webview (diag.ts, toutes les 5 s). Nourrit le gardien :
+/// 25 s de silence = webview mort (WebContent tué) → rechargement automatique.
+static LAST_UI_BEAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[tauri::command]
+async fn ui_beat() {
+    LAST_UI_BEAT.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -1421,10 +1451,55 @@ pub fn run() {
                 // mines; the daemon (bin/quanta-node) calls the same fn with mine=false.
                 node_runtime::bootstrap(&state, node_runtime::default_data_dir(), true).await;
             });
+            // ── Gardien de gel (côté Rust — les couches que le JS ne voit pas) ──
+            // 1. Thread principal macOS chronométré (run_on_main_thread) : un
+            //    beachball (thread principal bloqué > 1 s) devient une ligne datée.
+            // 2. Battement webview : diag.ts invoque `ui_beat` toutes les 5 s ;
+            //    25 s de silence = processus de rendu mort (WebContent tué) →
+            //    rechargement du webview (WKWebView relance un WebContent frais).
+            // Best-effort intégral : le gardien ne touche jamais l'état du nœud.
+            let guard = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::Manager;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    // 1. Thread principal
+                    let t0 = std::time::Instant::now();
+                    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                    let _ = guard.run_on_main_thread(move || {
+                        let _ = tx.send(());
+                    });
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+                        Ok(Ok(())) => {
+                            let ms = t0.elapsed().as_millis() as u64;
+                            if ms > 1000 {
+                                ui_diag_write(&format!("GEL thread-principal Rust {} ms (beachball)", ms));
+                            }
+                        }
+                        _ => ui_diag_write("GEL thread-principal Rust >10 s (beachball sévère)"),
+                    }
+                    // 2. Battement webview
+                    let last = LAST_UI_BEAT.load(std::sync::atomic::Ordering::Relaxed);
+                    if last != 0 {
+                        let silent = epoch_secs().saturating_sub(last);
+                        if silent > 25 {
+                            ui_diag_write(&format!(
+                                "webview muet depuis {} s — rechargement automatique",
+                                silent
+                            ));
+                            // Réarme avant le reload pour ne pas boucler à 5 s.
+                            LAST_UI_BEAT.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
+                            if let Some(w) = guard.get_webview_window("main") {
+                                let _ = w.reload();
+                            }
+                        }
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            ui_diag,
+            ui_diag, ui_beat,
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
             get_recovery_phrase, restore_from_phrase,
             get_receive_address, validate_address, resolve_address,
