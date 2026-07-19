@@ -177,6 +177,10 @@ pub fn run() {
     // PQ-TRANSPORT-1: install aws-lc-rs (X25519MLKEM768) as the process default.
     node_runtime::install_crypto_provider();
 
+    // Un nœud doit vivre fenêtre cachée : sans ceci, App Nap étrangle le tick
+    // de minage 60 s et les heartbeats gossip dès que la fenêtre est occluse.
+    node_runtime::prevent_app_nap();
+
     let app_state = Arc::new(AppState::new());
 
     tauri::Builder::default()

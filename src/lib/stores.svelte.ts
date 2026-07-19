@@ -52,6 +52,20 @@ export const POLL_WALLET_MS = 15_000;
 /** Identité : @pseudo + code de connexion (quasi statiques). */
 export const POLL_IDENTITY_MS = 10_000;
 
+// ─── Rattrapage au retour de fond ───────────────────────────────────────────
+// macOS gèle les timers JS d'une fenêtre occluse (le backend Rust, lui, continue
+// grâce à `prevent_app_nap`). Au retour, sans ceci, l'écran garderait des
+// chiffres périmés jusqu'au prochain tick (jusqu'à 15 s pour le wallet) : on
+// re-fetch immédiatement chaque store actif dès que la fenêtre redevient visible.
+const activeTicks = new Set<() => void>();
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      for (const tick of activeTicks) tick();
+    }
+  });
+}
+
 /** Un store sondé : `.value` chaud, refcount → UN interval, dernière valeur
  *  bonne conservée en cas d'échec. */
 export interface PolledStore<T> {
@@ -68,6 +82,8 @@ function makePolledStore<T>(fetcher: () => Promise<T>, intervalMs: number): Poll
   let error = $state(false);
   let refs = 0;
   let iv: ReturnType<typeof setInterval> | null = null;
+  // Référence stable pour le registre de rattrapage visibilitychange.
+  const catchUp = (): void => void tick();
 
   async function tick(): Promise<void> {
     try {
@@ -96,6 +112,7 @@ function makePolledStore<T>(fetcher: () => Promise<T>, intervalMs: number): Poll
       if (refs === 1) {
         void tick(); // premier abonné → charge tout de suite puis lance l'interval
         iv = setInterval(() => void tick(), intervalMs);
+        activeTicks.add(catchUp);
       }
       let released = false;
       return () => {
@@ -105,6 +122,7 @@ function makePolledStore<T>(fetcher: () => Promise<T>, intervalMs: number): Poll
         if (refs === 0 && iv) {
           clearInterval(iv);
           iv = null;
+          activeTicks.delete(catchUp);
         }
       };
     },

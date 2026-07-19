@@ -31,6 +31,9 @@ async fn main() {
     // PQ transport (X25519MLKEM768) — same provider install as the desktop app.
     node_runtime::install_crypto_provider();
 
+    // Same App Nap opt-out as the app: a daemon exists to run unattended.
+    node_runtime::prevent_app_nap();
+
     let state = Arc::new(AppState::new());
 
     // `QUANTA_WALLET_PASSWORD` opens a PERSISTENT wallet (unlock existing / create

@@ -139,6 +139,9 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # ─── macOS Keychain (Touch ID–gated quick unlock, security/biometric.rs) ───
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+# App Nap opt-out (node_runtime::prevent_app_nap) — same version Tauri already
+# carries transitively, so this adds no new build unit family.
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
 
 [dev-dependencies]
 proptest = "1"     # Property-based testing for invariants (Shapley, ledger overflow)

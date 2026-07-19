@@ -31,6 +31,28 @@ pub fn install_crypto_provider() {
     }
 }
 
+/// Opt the process out of **App Nap** (macOS). Without this, macOS throttles
+/// the timers of an app whose window is fully occluded or minimized — the 60 s
+/// mining tick, the Hello/Ping heartbeats and the 30 s snapshot all fire late
+/// or barely at all, so the node effectively stops mining while backgrounded.
+/// `NSActivityBackground` disables App Nap ONLY: it does not keep the display
+/// awake and does not prevent system sleep — closing the lid still sleeps the
+/// machine (a laptop in a bag must not cook itself for the network).
+#[cfg(target_os = "macos")]
+pub fn prevent_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let reason = NSString::from_str("Quanta node: mining, gossip and block validation");
+    let token = NSProcessInfo::processInfo()
+        .beginActivityWithOptions_reason(NSActivityOptions::Background, &reason);
+    // The activity ends when the token is released — leak it so it spans the
+    // whole process lifetime.
+    std::mem::forget(token);
+    log::info!("◈ [Node] App Nap prevention active — the node keeps mining in the background");
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prevent_app_nap() {}
+
 /// The default on-disk data directory — the **same** location the desktop app
 /// uses, so a daemon and the app on one machine share one chain/identity/DB.
 /// `QUANTA_DATA_DIR` overrides it (isolated probe/multi-node runs on one machine:
