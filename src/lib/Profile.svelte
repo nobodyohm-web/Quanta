@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import Identicon from "./Identicon.svelte";
   import { t } from "./i18n.svelte";
-  import { copySensitive } from "./quanta";
+  import { copySensitive, TICKER, FEEDBACK_COPY_MS } from "./quanta";
 
   let pk = $state("");
   let balance = $state(0);
@@ -100,7 +100,7 @@
     // a forgotten recovery phrase in the clipboard is a real exfiltration path.
     copySensitive(recoveryPhrase).catch(() => {});
     phraseCopied = true;
-    setTimeout(() => (phraseCopied = false), 2000);
+    setTimeout(() => (phraseCopied = false), FEEDBACK_COPY_MS);
   }
 
   function markBackedUp() {
@@ -154,13 +154,13 @@
   function copyPk() {
     navigator.clipboard?.writeText(pk);
     copied = true;
-    setTimeout(() => copied = false, 2000);
+    setTimeout(() => copied = false, FEEDBACK_COPY_MS);
   }
 
   function copyReceiveAddr() {
     navigator.clipboard?.writeText(receiveAddr);
     addrCopied = true;
-    setTimeout(() => addrCopied = false, 2000);
+    setTimeout(() => addrCopied = false, FEEDBACK_COPY_MS);
   }
 
   function shortPk(k: string) {
@@ -231,17 +231,17 @@
         <div class="stat">
           <div class="section-label">{t('pf.balance')}</div>
           <div class="fig fig-md">{balance.toFixed(2)}</div>
-          <div class="stat-unit">QNT</div>
+          <div class="stat-unit">{TICKER}</div>
         </div>
         <div class="stat">
           <div class="section-label">{t('pf.totalMined')}</div>
           <div class="fig fig-md">{earned.toFixed(2)}</div>
-          <div class="stat-unit">QNT</div>
+          <div class="stat-unit">{TICKER}</div>
         </div>
         <div class="stat">
           <div class="section-label">{t('pf.trustScore')}</div>
           <div class="fig fig-md">{trustScore}<span class="fig-suffix">%</span></div>
-          <div class="trust-bar-bg" style="margin-top:12px;"><div class="trust-bar-fill" style="width:{trustScore}%;"></div></div>
+          <div class="trust-bar-bg trust-bar-gap"><div class="trust-bar-fill" style="width:{trustScore}%;"></div></div>
         </div>
       </div>
       <div class="divider"></div>
@@ -269,7 +269,7 @@
         <div class="stat">
           <div class="section-label">{t('pf.quantaForged')}</div>
           <div class="fig fig-md accent">{earned.toFixed(2)}</div>
-          <div class="stat-unit">QNT</div>
+          <div class="stat-unit">{TICKER}</div>
         </div>
       </div>
     </div>
@@ -298,7 +298,7 @@
         <div class="section-label">{t('pf.recoveryPhrase')}</div>
         {#if !recoveryOpen}
           <div class="sec-row">
-            <span class="sec-hint" style="flex:1;">{t('pf.recoveryPhraseHint')}</span>
+            <span class="sec-hint sec-hint-flex">{t('pf.recoveryPhraseHint')}</span>
             <button class="btn btn-ghost btn-sm" onclick={() => { recoveryOpen = true; recoveryErr=''; recoveryPhrase=''; }}>{t('pf.reviewSave')}</button>
           </div>
         {:else if !recoveryPhrase}
@@ -327,7 +327,7 @@
       <!-- Facteurs de récupération d'urgence -->
       <div class="sec-block sec-block-last">
         <div class="section-label">{t('pf.emergencyRecovery')}</div>
-        <div class="sec-hint" style="margin-bottom:14px;">{t('pf.emergencyRecoveryHint')}</div>
+        <div class="sec-hint sec-hint-mb">{t('pf.emergencyRecoveryHint')}</div>
         <div class="sec-factor">
           <div class="sec-factor-ic">⚷</div>
           <div class="sec-factor-body">
@@ -365,7 +365,7 @@
           </div>
         {/if}
         {#if bioOk && bioEnabled}
-          <div class="sec-ok" style="margin:-4px 0 12px 46px;">✓ {t('pf.bioEnabled')}</div>
+          <div class="sec-ok sec-ok-indent">✓ {t('pf.bioEnabled')}</div>
         {/if}
         <div class="sec-factor">
           <div class="sec-factor-ic">✉</div>
@@ -410,7 +410,7 @@
     display: inline-flex; align-items: center;
     padding: 4px 11px; border-radius: 100px;
     background: var(--color-bg-1); border: 1px solid var(--color-border);
-    font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.06em;
     text-transform: uppercase; color: var(--color-text-2);
     white-space: nowrap;
   }
@@ -443,10 +443,10 @@
     font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
     text-transform: uppercase; color: var(--color-text-3); flex-shrink: 0;
   }
-  .addr-val { font-size: 13px; color: var(--color-text-1); letter-spacing: 0.02em; overflow: hidden; text-overflow: ellipsis; }
+  .addr-val { font-size: var(--text-base); color: var(--color-text-1); letter-spacing: 0.02em; overflow: hidden; text-overflow: ellipsis; }
   .id-meta { display: flex; gap: var(--space-8); flex-shrink: 0; }
   .meta-v {
-    font-family: var(--font-display); font-size: 15px; font-weight: 600;
+    font-family: var(--font-display); font-size: var(--text-lg); font-weight: 600;
     color: var(--color-text-1);
     font-variant-numeric: tabular-nums lining-nums;
   }
@@ -471,25 +471,29 @@
   .fig.accent { color: var(--color-accent); }
   .fig-suffix { font-size: 0.55em; font-weight: 500; color: var(--color-text-3); margin-left: 2px; letter-spacing: 0; }
   .stat-unit {
-    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    font-size: var(--text-xs); font-weight: 500; letter-spacing: 0.06em;
     text-transform: uppercase; color: var(--color-text-3); margin-top: 8px;
   }
   .stat .section-label { margin-bottom: 9px; }
 
   /* ── Contribution ── */
-  .contrib-text { font-size: 13.5px; color: var(--color-text-2); margin-bottom: 22px; line-height: 1.65; }
+  .contrib-text { font-size: var(--text-base); color: var(--color-text-2); margin-bottom: 22px; line-height: 1.65; }
 
   /* ── Sécurité ── */
   .sec-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
   .sec-head svg { flex-shrink: 0; }
-  .sec-title { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; color: var(--color-text-0); }
+  .sec-title { font-size: var(--text-lg); font-weight: 700; letter-spacing: -0.01em; color: var(--color-text-0); }
   .sec-head .chip { margin-left: auto; }
-  .sec-intro { font-size: 13.5px; color: var(--color-text-2); margin-bottom: 18px; line-height: 1.65; }
+  .sec-intro { font-size: var(--text-base); color: var(--color-text-2); margin-bottom: 18px; line-height: 1.65; }
   .sec-block { padding: 18px 0; border-bottom: 1px solid var(--color-border); }
   .sec-block-last { border-bottom: none; padding-bottom: 0; }
   .sec-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .sec-row .input { flex: 1; min-width: 150px; }
-  .sec-hint { font-size: 12px; color: var(--color-text-2); line-height: 1.5; }
+  .sec-hint { font-size: var(--text-sm); color: var(--color-text-2); line-height: 1.5; }
+  .sec-hint-flex { flex: 1; }
+  .sec-hint-mb { margin-bottom: 14px; }
+  .trust-bar-gap { margin-top: 12px; }
+  .sec-ok-indent { margin: -4px 0 12px 46px; }
   .sec-code {
     font-size: 18px; font-weight: 700; letter-spacing: 0.1em;
     color: var(--color-text-0);
@@ -499,12 +503,12 @@
     background: var(--color-bg-1); border: 1px solid var(--color-border);
     border-radius: var(--radius); padding: 16px; margin-bottom: 10px;
   }
-  .sec-phrase { font-size: 13.5px; line-height: 1.9; color: var(--color-text-0); word-break: break-all; user-select: all; }
+  .sec-phrase { font-size: var(--text-base); line-height: 1.9; color: var(--color-text-0); word-break: break-all; user-select: all; }
   /* Rouge sémantique — avertissement réellement critique (perte de fonds) */
-  .sec-warn { font-size: 12px; color: var(--color-red); margin-bottom: 12px; line-height: 1.5; }
-  .sec-err { font-size: 12px; color: var(--color-red); margin-top: 8px; }
+  .sec-warn { font-size: var(--text-sm); color: var(--color-red); margin-bottom: 12px; line-height: 1.5; }
+  .sec-err { font-size: var(--text-sm); color: var(--color-red); margin-top: 8px; }
   /* Confirmation positive — teal (le seul accent), pas de vert décoratif */
-  .sec-ok { font-size: 12px; color: var(--color-accent); font-weight: 600; margin-top: 8px; }
+  .sec-ok { font-size: var(--text-sm); color: var(--color-accent); font-weight: 600; margin-top: 8px; }
   .bio-form { margin: 0 0 14px 46px; }
   .bio-form-row { display: flex; gap: 8px; }
   .bio-form-row .input { flex: 1; }
@@ -515,14 +519,14 @@
     display: flex; align-items: center; justify-content: center;
     background: var(--color-accent-dim); color: var(--color-accent); font-size: 16px;
   }
-  .sec-factor-t { font-size: 13.5px; font-weight: 600; color: var(--color-text-0); margin-bottom: 2px; }
+  .sec-factor-t { font-size: var(--text-base); font-weight: 600; color: var(--color-text-0); margin-bottom: 2px; }
 
   /* ── Chip neutre (statut, « bientôt », sauvegarde) ── */
   .chip {
     display: inline-flex; align-items: center;
     padding: 3px 10px; border-radius: 100px;
     background: var(--color-bg-1); border: 1px solid var(--color-border);
-    font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+    font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.05em;
     text-transform: uppercase; color: var(--color-text-2); white-space: nowrap;
   }
   .chip-attn { color: var(--color-text-0); border-color: var(--color-border-hover); }
@@ -534,8 +538,8 @@
     width: 40px; height: 40px; border-radius: var(--radius-sm); flex-shrink: 0;
     background: var(--color-bg-2); display: flex; align-items: center; justify-content: center;
   }
-  .private-t { font-size: 14px; font-weight: 600; color: var(--color-text-1); }
-  .private-hint { font-size: 12px; color: var(--color-text-3); margin-top: 3px; }
+  .private-t { font-size: var(--text-base); font-weight: 600; color: var(--color-text-1); }
+  .private-hint { font-size: var(--text-sm); color: var(--color-text-3); margin-top: 3px; }
   .private-dots { margin-left: auto; display: flex; gap: 5px; }
   .private-dots span {
     width: 5px; height: 5px; border-radius: 50%; background: var(--color-text-3); opacity: 0.5;

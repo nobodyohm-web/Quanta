@@ -5,6 +5,7 @@
   import NetworkScene3D from "./NetworkScene3D.svelte";
   import { t } from "./i18n.svelte";
   import { note } from "./diag";
+  import { TICKER, FEEDBACK_OK_MS, FEEDBACK_COPY_MS } from "./quanta";
 
   let chainView = $state<"history" | "2d">("history");
 
@@ -202,7 +203,7 @@
   function copyId() {
     navigator.clipboard?.writeText(myPeerId);
     copied = true;
-    setTimeout(() => copied = false, 2000);
+    setTimeout(() => copied = false, FEEDBACK_COPY_MS);
   }
 
   async function connectPeer() {
@@ -214,7 +215,7 @@
       await invoke("connect_peer", { peerId: connectInput.trim() });
       connectInput = "";
       connectSuccess = true;
-      setTimeout(() => connectSuccess = false, 4000);
+      setTimeout(() => connectSuccess = false, FEEDBACK_OK_MS);
       refresh();
     } catch (e) {
       connectErr = String(e);
@@ -264,11 +265,11 @@
       <div class="stat-sub">{t('db.blocks')}</div>
     </div>
     <div class="card">
-      <div class="stat-label">Plancher de finalité</div>
+      <div class="stat-label">{t("net.finalityFloor")}</div>
       <div class="stat-val sm">{finalityFloor}</div>
     </div>
     <div class="card">
-      <div class="stat-label">Statut</div>
+      <div class="stat-label">{t("net.statusLabel")}</div>
       <div class="stat-val sm">{isOnline ? t('wallet.connected') : t('wallet.offline')}</div>
       <div class="stat-sub mono">{protocol || '—'}</div>
     </div>
@@ -302,11 +303,11 @@
     <div class="forge-side">
       <div class="forge-side-row">
         <span class="forge-side-k">{t('net.youOwn')}</span>
-        <span class="forge-side-v">{fmtForge(myBalance)}<span class="forge-unit"> QNT</span></span>
+        <span class="forge-side-v">{fmtForge(myBalance)}<span class="forge-unit"> {TICKER}</span></span>
       </div>
       <div class="forge-side-row">
         <span class="forge-side-k">{t('net.yourShare')}</span>
-        <span class="forge-side-v" style="color:var(--color-accent);">{myShare > 0 && myShare < 0.01 ? '<0,01' : myShare.toFixed(2)} %</span>
+        <span class="forge-side-v forge-share-pct">{myShare > 0 && myShare < 0.01 ? '<0,01' : myShare.toFixed(2)} %</span>
       </div>
       <div class="forge-share-bar"><div class="forge-share-fill" style="width:{Math.min(100, myShare > 0 ? Math.max(myShare, 2) : 0)}%;"></div></div>
       <div class="forge-side-row forge-side-gap">
@@ -315,7 +316,7 @@
       </div>
       <div class="forge-side-row">
         <span class="forge-side-k">{t('net.circulating')}</span>
-        <span class="forge-side-v">{fmtNum(supplyQta)} QNT</span>
+        <span class="forge-side-v">{fmtNum(supplyQta)} {TICKER}</span>
       </div>
     </div>
   </div>
@@ -389,7 +390,7 @@
           onkeydown={(e) => e.key === 'Enter' && saveDisplayName()}
         />
         <button class="btn btn-ghost btn-sm" onclick={saveDisplayName} disabled={displayNameSaving}>
-          {displayNameSaving ? '⏳' : t('net.nicknameSave')}
+          {displayNameSaving ? '…' : t('net.nicknameSave')}
         </button>
       </div>
     </div>
@@ -406,7 +407,7 @@
         <div class="peers-head">
           <span>{t('net.colNameKey')}</span>
           <span>{t('net.colCountry')}</span>
-          <span>RTT</span>
+          <span>{t('net.colRtt')}</span>
           <span>{t('net.colLoss')}</span>
           <span>{t('net.colQuality')}</span>
           <span>{t('net.colSeen')}</span>
@@ -464,7 +465,7 @@
         <input class="input mono" placeholder={t('net.connectPlaceholder')} bind:value={connectInput}
           onkeydown={(e) => e.key === 'Enter' && connectPeer()} />
         <button class="btn btn-primary" onclick={connectPeer} disabled={connecting}>
-          {connecting ? '⏳' : t('net.connectBtn')}
+          {connecting ? '…' : t('net.connectBtn')}
         </button>
       </div>
       {#if connectErr}
@@ -482,8 +483,8 @@
   .tnum { font-variant-numeric: tabular-nums lining-nums; font-feature-settings: 'tnum', 'lnum'; }
 
   /* ── En-tête : statut réseau ─────────────────────────────── */
-  .net-status { display: flex; gap: 8px; align-items: center; }
-  .net-status-txt { font-size: 13px; color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
+  .net-status { display: flex; gap: var(--space-2); align-items: center; }
+  .net-status-txt { font-size: var(--text-base); color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
   .status-dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--color-text-3);
@@ -492,22 +493,22 @@
   /* Vert = seul point sémantique conservé : nœud réellement en ligne. */
   .status-dot.online {
     background: var(--color-green);
-    box-shadow: 0 0 0 0 rgba(22,163,74,0.4);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-green) 40%, transparent);
     animation: pulse-dot 2s ease-in-out infinite;
   }
   @keyframes pulse-dot {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(22,163,74,0.35); }
-    50% { box-shadow: 0 0 0 4px rgba(22,163,74,0); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-green) 35%, transparent); }
+    50% { box-shadow: 0 0 0 4px transparent; }
   }
 
   /* ── Résumé réseau — 4 chiffres réels, aucune imagerie ───── */
-  .net-summary { margin-bottom: 16px; }
-  .net-live { margin-bottom: 16px; padding: 8px; }
+  .net-summary { margin-bottom: var(--space-4); }
+  .net-live { margin-bottom: var(--space-4); padding: var(--space-2); }
 
   /* ── La Forge — rareté & possession ──────────────────────── */
   .forge-hero {
-    display: flex; gap: 32px; flex-wrap: wrap;
-    padding: 28px 32px; margin-bottom: 16px;
+    display: flex; gap: var(--space-8); flex-wrap: wrap;
+    padding: var(--space-6) var(--space-8); margin-bottom: var(--space-4);
     position: relative; overflow: hidden;
     transition: box-shadow .45s ease;
   }
@@ -516,52 +517,53 @@
   .forge-count {
     font-family: var(--font-display);
     font-size: 52px; font-weight: 700; line-height: 1.02; letter-spacing: -.02em;
-    color: var(--color-text-0); margin: 6px 0 12px;
+    color: var(--color-text-0); margin: 6px 0 var(--space-3);
     font-variant-numeric: tabular-nums lining-nums; font-feature-settings: 'tnum';
   }
   .forge-sub {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 13px; color: var(--color-text-2);
+    display: flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-base); color: var(--color-text-2);
     font-variant-numeric: tabular-nums lining-nums;
   }
   .forge-live-dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent);
     animation: forge-pulse 2s ease infinite; flex-shrink: 0;
   }
-  @keyframes forge-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(11,165,160,.35); } 50% { box-shadow: 0 0 0 5px rgba(11,165,160,0); } }
+  @keyframes forge-pulse { 0%,100% { box-shadow: 0 0 0 0 var(--teal-glow); } 50% { box-shadow: 0 0 0 5px transparent; } }
   .forge-side {
     min-width: 220px; display: flex; flex-direction: column; gap: 10px; justify-content: center;
-    border-left: 1px solid var(--color-border); padding-left: 32px;
+    border-left: 1px solid var(--color-border); padding-left: var(--space-8);
   }
-  .forge-side-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .forge-side-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
   .forge-side-gap { margin-top: 10px; }
-  .forge-side-k { font-size: 12px; color: var(--color-text-2); }
+  .forge-side-k { font-size: var(--text-sm); color: var(--color-text-2); }
   .forge-side-v {
     font-family: var(--font-display);
-    font-size: 16px; font-weight: 700; color: var(--color-text-0);
+    font-size: var(--text-lg); font-weight: 700; color: var(--color-text-0);
     font-variant-numeric: tabular-nums lining-nums;
   }
-  .forge-unit { font-size: 11px; color: var(--color-text-3); font-weight: 400; }
+  .forge-share-pct { color: var(--color-accent); }
+  .forge-unit { font-size: var(--text-xs); color: var(--color-text-3); font-weight: 400; }
   .forge-share-bar { height: 5px; background: var(--color-bg-3); border-radius: 3px; overflow: hidden; margin-top: 2px; }
   .forge-share-fill { height: 100%; background: var(--color-accent); border-radius: 3px; transition: width 1s ease; }
 
-  .cap-wrap { margin-top: 20px; max-width: 440px; }
+  .cap-wrap { margin-top: var(--space-5); max-width: 440px; }
   .cap-bar { height: 6px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
   .cap-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 1.2s ease; }
   .cap-meta {
-    display: flex; justify-content: space-between; gap: 12px; margin-top: 8px;
-    font-size: 11px; color: var(--color-text-2);
+    display: flex; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-2);
+    font-size: var(--text-xs); color: var(--color-text-2);
     font-variant-numeric: tabular-nums lining-nums;
   }
   .cap-meta b { color: var(--color-text-0); font-weight: 700; }
 
   /* ── Blockchain en direct ────────────────────────────────── */
-  .chain-wrap { padding: 20px 24px 24px; margin-bottom: 16px; }
-  .chain-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  .chain-wrap { padding: var(--space-5) var(--space-6) var(--space-6); margin-bottom: var(--space-4); }
+  .chain-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
   .chain-head-r { display: flex; align-items: center; gap: 14px; }
   .chain-title { margin-bottom: 0; }
-  .chain-meta { font-size: 12px; color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
-  .chain-strip { display: flex; align-items: stretch; overflow-x: auto; padding-bottom: 8px; }
+  .chain-meta { font-size: var(--text-sm); color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
+  .chain-strip { display: flex; align-items: stretch; overflow-x: auto; padding-bottom: var(--space-2); }
   .chain-strip::-webkit-scrollbar { height: 4px; }
   .chain-pending {
     flex-shrink: 0; min-width: 82px; border: 1px dashed var(--color-border-hover);
@@ -579,33 +581,33 @@
   .chain-block {
     flex-shrink: 0; min-width: 98px; border: 1px solid var(--color-border);
     border-radius: 12px; padding: 14px 12px; background: var(--surface);
-    box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 4px;
+    box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: var(--space-1);
   }
   .chain-block-new { animation: chain-in .6s cubic-bezier(.2,.8,.2,1); border-color: var(--color-accent); box-shadow: 0 0 0 2px var(--color-accent-dim); }
   @keyframes chain-in { from { opacity: 0; transform: translateX(-18px) scale(.92); } to { opacity: 1; transform: none; } }
-  .chain-block-h { font-size: 13px; font-weight: 700; color: var(--color-text-0); font-variant-numeric: tabular-nums lining-nums; }
+  .chain-block-h { font-size: var(--text-base); font-weight: 700; color: var(--color-text-0); font-variant-numeric: tabular-nums lining-nums; }
   .chain-block-mint {
     font-family: var(--font-display);
-    font-size: 13px; font-weight: 700; color: var(--color-text-0);
+    font-size: var(--text-base); font-weight: 700; color: var(--color-text-0);
     font-variant-numeric: tabular-nums lining-nums;
   }
-  .chain-block-meta { font-size: 11px; color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
+  .chain-block-meta { font-size: var(--text-xs); color: var(--color-text-2); font-variant-numeric: tabular-nums lining-nums; }
   .chain-block-hash { font-size: 10px; color: var(--color-text-3); }
-  .chain-empty { flex-shrink: 0; padding: 16px; font-size: 13px; color: var(--color-text-3); align-self: center; }
+  .chain-empty { flex-shrink: 0; padding: var(--space-4); font-size: var(--text-base); color: var(--color-text-3); align-self: center; }
 
   /* ── NET-16 : bandeau de synchronisation ─────────────────── */
-  .sync-banner { margin-bottom: 16px; }
+  .sync-banner { margin-bottom: var(--space-4); }
   .sync-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-  .sync-label { font-size: 13px; color: var(--color-text-2); font-weight: 500; }
-  .sync-counts { font-size: 12px; color: var(--color-text-1); font-variant-numeric: tabular-nums lining-nums; }
+  .sync-label { font-size: var(--text-base); color: var(--color-text-2); font-weight: 500; }
+  .sync-counts { font-size: var(--text-sm); color: var(--color-text-1); font-variant-numeric: tabular-nums lining-nums; }
   .sync-delta {
     display: inline-block;
-    margin-left: 8px;
+    margin-left: var(--space-2);
     padding: 1px 8px;
     border-radius: 100px;
     background: var(--cyan-dim);
     color: var(--cyan);
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums lining-nums;
   }
   .sync-bar {
@@ -621,43 +623,43 @@
   }
 
   /* ── NET-15 : éditeur de pseudonyme ──────────────────────── */
-  .name-panel { margin-bottom: 16px; }
+  .name-panel { margin-bottom: var(--space-4); }
   .name-row {
     display: flex;
     align-items: center;
-    gap: 20px;
+    gap: var(--space-5);
     flex-wrap: wrap;
   }
   .name-label { display: flex; flex-direction: column; gap: 3px; min-width: 220px; flex: 1; }
-  .name-title { font-size: 14px; font-weight: 600; color: var(--color-text-0); }
-  .name-sub { font-size: 12px; color: var(--color-text-2); }
-  .name-field { display: flex; gap: 8px; flex: 1; max-width: 420px; }
+  .name-title { font-size: var(--text-base); font-weight: 600; color: var(--color-text-0); }
+  .name-sub { font-size: var(--text-sm); color: var(--color-text-2); }
+  .name-field { display: flex; gap: var(--space-2); flex: 1; max-width: 420px; }
   .name-field .input { flex: 1; min-width: 0; }
   .name-current {
     margin-top: 14px;
     padding-top: 14px;
     border-top: 1px solid var(--color-border);
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--color-text-2);
   }
   .name-current strong { color: var(--color-text-0); font-weight: 600; }
 
   /* ── NET-9/10 : table des pairs — hairlines seules ───────── */
-  .peers-panel { margin-bottom: 16px; }
-  .peers-panel-title { margin-bottom: 4px; }
+  .peers-panel { margin-bottom: var(--space-4); }
+  .peers-panel-title { margin-bottom: var(--space-1); }
   .peers-table { display: flex; flex-direction: column; }
   .peers-head, .peers-row {
     display: grid;
     grid-template-columns: 2fr 0.7fr 0.9fr 0.8fr 0.8fr 0.7fr;
     align-items: center;
-    gap: 16px;
+    gap: var(--space-4);
     padding: 13px 4px;
-    font-size: 13px;
+    font-size: var(--text-base);
     border-bottom: 1px solid var(--color-border);
   }
   .peers-head {
     color: var(--color-text-3);
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.07em;
@@ -668,7 +670,7 @@
   .peers-row > span:nth-child(n+3) { text-align: right; justify-self: end; }
   .peers-row:last-child { border-bottom: none; }
   .peers-row:hover { background: var(--color-bg-1); }
-  .peer-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .peer-name { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
   .peer-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-text-3); flex-shrink: 0; }
   .peer-dot.alive { background: var(--cyan); }
   .peer-name-text {
@@ -676,7 +678,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--color-text-1);
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
   .peer-country { color: var(--color-text-2); }
   .peer-seen { color: var(--color-text-2); }
@@ -686,7 +688,7 @@
     display: inline-block;
     padding: 2px 9px;
     border-radius: 100px;
-    font-size: 11px;
+    font-size: var(--text-xs);
     font-weight: 600;
     font-variant-numeric: tabular-nums lining-nums;
   }
@@ -695,10 +697,10 @@
   .quality-pill.q-low { color: var(--color-text-3); }
 
   /* ── Panneau de connexion ────────────────────────────────── */
-  .connect-panel { margin-bottom: 16px; }
+  .connect-panel { margin-bottom: var(--space-4); }
   .connect-section {
-    margin-bottom: 24px;
-    padding-bottom: 24px;
+    margin-bottom: var(--space-6);
+    padding-bottom: var(--space-6);
     border-bottom: 1px solid var(--color-border);
   }
   .connect-section:last-child {
@@ -716,15 +718,15 @@
     border: 1px solid var(--color-border-hover);
     color: var(--color-text-2);
     display: flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700;
+    font-size: var(--text-xs); font-weight: 700;
     font-variant-numeric: tabular-nums lining-nums;
   }
   .step-text {
-    font-size: 13px; font-weight: 500;
+    font-size: var(--text-base); font-weight: 500;
     color: var(--color-text-1);
   }
   .id-display {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: var(--space-3);
     padding: 14px 16px;
     background: var(--color-bg-1);
     border-radius: var(--radius-sm);
@@ -732,7 +734,7 @@
   }
   .peer-id-code {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--color-text-0);
     word-break: break-all;
     flex: 1;
@@ -742,9 +744,9 @@
   .connect-field { display: flex; gap: 10px; }
   .connect-field .input { flex: 1; min-width: 0; }
   .connect-msg {
-    font-size: 12px;
+    font-size: var(--text-sm);
     margin-top: 10px;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-sm);
   }
   /* Rouge = seul emploi sémantique conservé : erreur réelle de connexion. */

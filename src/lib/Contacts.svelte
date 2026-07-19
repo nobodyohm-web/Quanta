@@ -3,6 +3,7 @@
   import Identicon from "./Identicon.svelte";
   import EmptyState from "./EmptyState.svelte";
   import { t } from "./i18n.svelte";
+  import { FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
 
   type Contact = { username: string; pk: string; code: string; addedAt: number };
   const STORE = "quanta-contacts";
@@ -49,7 +50,7 @@
 
   async function copy(kind: "pseudo" | "code") {
     const text = kind === "pseudo" ? "@" + (myUsername ?? "") : myCode;
-    try { await navigator.clipboard.writeText(text); copied = kind; setTimeout(() => (copied = ""), 1800); } catch {}
+    try { await navigator.clipboard.writeText(text); copied = kind; setTimeout(() => (copied = ""), FEEDBACK_COPY_MS); } catch {}
   }
 
   async function addContact() {
@@ -68,7 +69,7 @@
         persist();
         addOk = `${t('ct.addedPre')}@${v.username}${t('ct.addedPost')}`;
         addPseudo = ""; addCode = "";
-        setTimeout(() => (addOk = ""), 3000);
+        setTimeout(() => (addOk = ""), FEEDBACK_OK_MS);
       }
     } catch (e) {
       addErr = String(e);
@@ -96,7 +97,7 @@
       await invoke("ledger_transfer", { to: c.pk, amount: amt });
       sendMsg = { ok: true, text: `${amt.toFixed(2)}${t('ct.sentMid')}@${c.username}${t('ct.sentPost')}` };
       sendAmount = "";
-      setTimeout(() => { sendMsg = null; sendFor = null; }, 2500);
+      setTimeout(() => { sendMsg = null; sendFor = null; }, FEEDBACK_OK_MS);
     } catch (e) {
       sendMsg = { ok: false, text: e instanceof Error ? e.message : String(e) };
     } finally {
@@ -114,7 +115,7 @@
   </div>
 
   <!-- Mon adresse à partager -->
-  <div class="card" style="margin-bottom:12px;">
+  <div class="card card-gap">
     <div class="card-title">{t('ct.cardTitle')}</div>
     <p class="cc-desc">{@html t('ct.cardDesc')}</p>
     <div class="cc-grid">
@@ -139,7 +140,7 @@
   </div>
 
   <!-- Ajouter un proche -->
-  <div class="card" style="margin-bottom:12px;">
+  <div class="card card-gap">
     <div class="card-title">{t('ct.addTitle')}</div>
     <div class="add-grid">
       <div class="form-group">
@@ -195,6 +196,8 @@
 </div>
 
 <style>
+  .card-gap { margin-bottom: 12px; }
+
   /* ── Partage — deux tuiles calmes dans la carte blanche ── */
   .cc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .cc-item {
@@ -205,13 +208,13 @@
   .cc-v { font-size: 20px; font-weight: 700; color: var(--color-text-0); }
   .cc-code { letter-spacing: 0.08em; }
   .cc-item .copy-btn { align-self: flex-start; margin-top: 10px; }
-  .cc-desc { font-size: 13px; color: var(--color-text-2); line-height: 1.55; margin-bottom: 14px; }
-  .cc-note { font-size: 12px; color: var(--color-amber); margin-top: 12px; }
+  .cc-desc { font-size: var(--text-base); color: var(--color-text-2); line-height: 1.55; margin-bottom: 14px; }
+  .cc-note { font-size: var(--text-sm); color: var(--color-amber); margin-top: 12px; }
 
   /* ── Ajouter ── */
   .add-grid { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
   .add-grid .form-group { margin: 0; }
-  .form-msg { font-size: 12px; margin-top: 10px; }
+  .form-msg { font-size: var(--text-sm); margin-top: 10px; }
   .form-msg.err { color: var(--color-red); }
   .form-msg.ok { color: var(--color-green); }
 
@@ -223,9 +226,9 @@
   .ct-row:last-child { border-bottom: none; }
   .ct-row.open { border-bottom-color: transparent; }
   .ct-id { flex: 1; min-width: 0; }
-  .ct-name { font-size: 14px; font-weight: 700; color: var(--color-accent); }
+  .ct-name { font-size: var(--text-base); font-weight: 700; color: var(--color-accent); }
   .ct-code {
-    font-size: 11px; color: var(--color-text-3);
+    font-size: var(--text-xs); color: var(--color-text-3);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .ct-actions {
@@ -253,7 +256,7 @@
     border-radius: 12px;
   }
   .ct-send .input { flex: 1; }
-  .ct-msg { font-size: 12px; margin: 0 0 10px 48px; }
+  .ct-msg { font-size: var(--text-sm); margin: 0 0 10px 48px; }
   .ct-msg.ok { color: var(--color-green); }
   .ct-msg.err { color: var(--color-red); }
 

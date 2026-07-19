@@ -69,6 +69,18 @@
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
 
+  /* ── Échelle typographique — 4 tailles de corps, AUCUN demi-pixel.
+     Toute font-size d'écran doit venir d'ici (hors .stat-val display). ── */
+  --text-xs: 11px;   /* micro-étiquettes, légendes */
+  --text-sm: 12px;   /* méta, sous-titres de cellule */
+  --text-base: 13px; /* corps, boutons, inputs */
+  --text-lg: 15px;   /* corps mis en avant, titres de carte */
+
+  /* Variantes alpha du teal — source unique pour halos/keyframes
+     (fin des rgba(11,165,160,…) recopiés à la main dans les écrans). */
+  --teal-glow: rgba(11,165,160,0.35);
+  --teal-veil: rgba(11,165,160,0.16);
+
   /* ── v13 « colorimétrie iconique » — le teal joyau comme SYSTÈME ──
      Une seule couleur possède la marque ; voici sa gamme complète, du
      souffle au minéral. L'indigo/violet n'existent que comme FUITE du

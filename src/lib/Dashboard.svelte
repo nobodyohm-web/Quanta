@@ -2,6 +2,13 @@
   import { invoke } from "@tauri-apps/api/core";
   import ForgeEngine from "./ForgeEngine.svelte";
   import { t, locale } from "./i18n.svelte";
+  import { TICKER, TEAL } from "./quanta";
+
+  // Alpha variants of TEAL derived from the single brand constant — no
+  // duplicated rgba() literals for the canvas gradient/halo.
+  const TEAL_VEIL = TEAL + "29"; // ≈ rgba(11,165,160,0.16)
+  const TEAL_TRANSPARENT = TEAL + "00";
+  const TEAL_GLOW = TEAL + "59"; // ≈ rgba(11,165,160,0.35)
 
   // ── Données vivantes du nœud (ZÉRO énergie, ZÉRO 3D) ────────────
   let earned = $state(0);
@@ -94,8 +101,8 @@
     const padL = 2, padR = 2, padT = 10, padB = 18;
     const x0 = padL, x1 = w - padR, y0 = padT, y1 = h - padB;
     const grad = ctx.createLinearGradient(0, y0, 0, y1);
-    grad.addColorStop(0, "rgba(11,165,160,0.16)");
-    grad.addColorStop(1, "rgba(11,165,160,0)");
+    grad.addColorStop(0, TEAL_VEIL);
+    grad.addColorStop(1, TEAL_TRANSPARENT);
     ctx.beginPath();
     ctx.moveTo(x0, y0);
     ctx.lineTo(x1, y1);
@@ -106,18 +113,18 @@
     ctx.beginPath();
     ctx.moveTo(x0, y0);
     ctx.lineTo(x1, y1);
-    ctx.strokeStyle = "#0BA5A0";
+    ctx.strokeStyle = TEAL;
     ctx.lineWidth = 1.8;
     ctx.stroke();
     const px = x0 + (x1 - x0) * (pct / 100);
     const py = y0 + (y1 - y0) * (pct / 100);
     ctx.beginPath();
     ctx.arc(px, py, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#0BA5A0";
+    ctx.fillStyle = TEAL;
     ctx.fill();
     ctx.beginPath();
     ctx.arc(px, py, 8, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(11,165,160,0.35)";
+    ctx.strokeStyle = TEAL_GLOW;
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.fillStyle = "rgba(110,110,115,0.9)";
@@ -293,7 +300,7 @@
           </div>
           <div class="fin-stat">
             <div class="stat-label">{t('mine.fin.staked')}</div>
-            <div class="fin-stat-v">{fmtQ(fin.total_staked)} <span class="fin-stat-u">QTA</span></div>
+            <div class="fin-stat-v">{fmtQ(fin.total_staked)} <span class="fin-stat-u">{TICKER}</span></div>
           </div>
           {#if fin.i_am_validator}
             <div class="fin-you ok">{t('mine.fin.youAre')}</div>
@@ -340,7 +347,7 @@
 </div>
 
 <style>
-  .mine-p { font-size: 12.5px; color: var(--color-text-2); line-height: 1.55; }
+  .mine-p { font-size: var(--text-sm); color: var(--color-text-2); line-height: 1.55; }
 
   /* ── Comprendre ── */
   .understand { margin-bottom: 12px; }
@@ -352,8 +359,8 @@
     background: var(--cyan-dim); color: var(--color-accent);
     margin-bottom: 12px;
   }
-  .ex-k { font-size: 14px; font-weight: 700; color: var(--color-text-0); margin-bottom: 6px; letter-spacing: -0.01em; }
-  .ex-v { font-size: 12.5px; color: var(--color-text-2); line-height: 1.55; }
+  .ex-k { font-size: var(--text-base); font-weight: 700; color: var(--color-text-0); margin-bottom: 6px; letter-spacing: -0.01em; }
+  .ex-v { font-size: var(--text-sm); color: var(--color-text-2); line-height: 1.55; }
 
   /* ── Forge (terminal) ── */
   .forge { margin-bottom: 12px; }
@@ -367,7 +374,7 @@
   /* ── Émission ── */
   .em-now { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
   .em-val { font-size: 32px; font-weight: 700; color: var(--color-text-0); letter-spacing: -0.02em; font-variant-numeric: tabular-nums lining-nums; }
-  .em-unit { font-size: 12px; color: var(--color-text-2); }
+  .em-unit { font-size: var(--text-sm); color: var(--color-text-2); }
   .em-curve { width: 100%; height: 110px; display: block; }
   .em-explain { margin-top: 12px; }
 
@@ -377,20 +384,20 @@
   @media (max-width: 720px) { .fin-grid { grid-template-columns: 1fr; } }
   .fin-epoch-head {
     display: flex; justify-content: space-between; align-items: baseline;
-    font-size: 13px; font-weight: 600; color: var(--color-text-0); margin-bottom: 8px;
+    font-size: var(--text-base); font-weight: 600; color: var(--color-text-0); margin-bottom: 8px;
   }
   .fin-bar { height: 8px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
   .fin-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 0.8s var(--ease-out); }
   .fin-floor {
     display: flex; align-items: center; gap: 8px;
-    margin: 16px 0 10px; font-size: 13px; color: var(--color-text-1);
+    margin: 16px 0 10px; font-size: var(--text-base); color: var(--color-text-1);
   }
   .fin-floor svg { color: var(--color-accent); flex-shrink: 0; }
   .fin-right { display: flex; flex-direction: column; gap: 16px; }
   .fin-stat-v { font-size: 22px; font-weight: 700; color: var(--color-text-0); margin-top: 4px; font-variant-numeric: tabular-nums lining-nums; }
-  .fin-stat-u { font-size: 12px; color: var(--color-text-2); font-weight: 400; }
+  .fin-stat-u { font-size: var(--text-sm); color: var(--color-text-2); font-weight: 400; }
   .fin-you {
-    font-size: 12px; color: var(--color-text-2);
+    font-size: var(--text-sm); color: var(--color-text-2);
     padding: 10px 12px; background: var(--color-bg-2);
     border-radius: var(--radius-sm); line-height: 1.5;
   }
@@ -401,14 +408,14 @@
 
   /* ── Offre prouvable ── */
   .supply-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 16px; }
-  .sup-k { font-size: 11px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; }
+  .sup-k { font-size: var(--text-xs); color: var(--color-text-3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; }
   .sup-v { font-size: 19px; font-weight: 700; color: var(--color-text-0); font-variant-numeric: tabular-nums lining-nums; }
   .sup-bar { height: 8px; background: var(--color-bg-3); border-radius: 4px; overflow: hidden; }
   .sup-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 1.2s var(--ease-out); }
-  .sup-cap-line { font-size: 12px; color: var(--color-text-2); margin-top: 8px; }
+  .sup-cap-line { font-size: var(--text-sm); color: var(--color-text-2); margin-top: 8px; }
   .sup-trust {
     display: flex; flex-direction: column; gap: 8px; margin-top: 16px;
-    font-size: 12px; color: var(--color-text-1); font-weight: 500;
+    font-size: var(--text-sm); color: var(--color-text-1); font-weight: 500;
   }
   .sup-trust span { display: inline-flex; align-items: center; gap: 7px; }
   .sup-trust span::before {
