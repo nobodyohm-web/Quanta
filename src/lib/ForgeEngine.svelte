@@ -16,6 +16,7 @@
   import { blake3 } from "@noble/hashes/blake3.js";
   import { bytesToHex } from "@noble/hashes/utils.js";
   import { locale } from "./i18n.svelte";
+  import { lastStall } from "./diag";
 
   const reduce =
     typeof window !== "undefined" && !!window.matchMedia &&
@@ -357,6 +358,15 @@
       lastBeat = nowB;
       if (gap > 900) push("stall", fill(tl("eStall"), { ms: Math.round(gap) }));
     }, 250);
+    // Rapports de la sonde globale (diag.ts) : un gel survenu sur N'IMPORTE
+    // quelle page — avec l'anneau des opérations qui l'entouraient — remonte
+    // ici, dans le terminal, copiable tel quel.
+    let seenStall = lastStall() ?? "";
+    if (seenStall) push("stall", seenStall.slice(0, 220));
+    const sd = setInterval(() => {
+      const s = lastStall();
+      if (s && s !== seenStall) { seenStall = s; push("stall", s.slice(0, 220)); }
+    }, 5000);
     // pause hors écran / onglet caché (perf + honnêteté : rien ne tourne caché)
     const onVis = () => { visible = !document.hidden; play(); };
     document.addEventListener("visibilitychange", onVis);
@@ -376,6 +386,7 @@
     return () => {
       clearInterval(iv);
       clearInterval(wd);
+      clearInterval(sd);
       document.removeEventListener("visibilitychange", onVis);
       io?.disconnect();
       running = false; if (timer) clearInterval(timer); timer = null;

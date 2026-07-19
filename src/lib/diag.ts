@@ -1,0 +1,154 @@
+// Sonde de diagnostic du thread UI — « voir ce qui se passe quand ça gèle ».
+//
+// Trois capteurs, tous best-effort et sans effet sur l'app :
+//   1. Patch global de `__TAURI_INTERNALS__.invoke` : chaque commande est
+//      chronométrée (nom, durée, taille de réponse) dans un anneau de contexte.
+//   2. Watchdog 150 ms : un trou > 600 ms entre deux battements = thread UI
+//      bloqué → rapport complet (gel + anneau) vers le log Rust (`ui_diag`),
+//      la console et localStorage (`quanta.lastStall`).
+//   3. PerformanceObserver "longtask" (si le moteur le supporte — WKWebView
+//      ne l'expose pas toujours ; le watchdog reste le capteur principal).
+//
+// L'anneau enregistre aussi les événements Tauri du nœud (mined, block-sealed,
+// tx-applied, engine…) : un gel corrélé au forge se lit directement.
+
+import { listen } from "@tauri-apps/api/event";
+
+type Entry = { t: number; k: string; d: string };
+
+const RING_SIZE = 48;
+const ring: Entry[] = [];
+let ringPos = 0;
+let rawInvoke: ((cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>) | null = null;
+let lastReportAt = 0;
+let started = false;
+
+/** Note une opération dans l'anneau de contexte (jamais bloquant, jamais réactif). */
+export function note(kind: string, detail: string): void {
+  try {
+    const e = { t: performance.now(), k: kind, d: detail };
+    if (ring.length < RING_SIZE) ring.push(e);
+    else { ring[ringPos] = e; ringPos = (ringPos + 1) % RING_SIZE; }
+  } catch { /* la sonde ne casse jamais l'app */ }
+}
+
+function ringDump(): string {
+  const ordered = ring.length < RING_SIZE
+    ? ring
+    : ring.slice(ringPos).concat(ring.slice(0, ringPos));
+  const now = performance.now();
+  return ordered
+    .map((e) => `-${((now - e.t) / 1000).toFixed(2)}s ${e.k}:${e.d}`)
+    .join(" | ");
+}
+
+function sizeOf(r: unknown): string {
+  if (typeof r === "string") return ` ${r.length}c`;
+  if (Array.isArray(r)) return ` ${r.length}el`;
+  return "";
+}
+
+/** Rapport de gel : contexte complet vers Rust + console + localStorage. */
+function report(source: string, ms: number): void {
+  const now = performance.now();
+  if (now - lastReportAt < 3000) return; // anti-spam : 1 rapport / 3 s max
+  lastReportAt = now;
+  const view = (window as unknown as { __quantaView?: string }).__quantaView ?? "?";
+  const msg = `GEL ${Math.round(ms)} ms (${source}) vue=${view} :: ${ringDump()}`;
+  console.error("[diag]", msg);
+  try { localStorage.setItem("quanta.lastStall", `${new Date().toISOString()} ${msg}`); } catch { /* best-effort */ }
+  try { void rawInvoke?.("ui_diag", { msg }); } catch { /* best-effort */ }
+}
+
+/** Dernier gel enregistré (affichable dans le terminal du moteur). */
+export function lastStall(): string | null {
+  try { return localStorage.getItem("quanta.lastStall"); } catch { return null; }
+}
+
+/** Démarre la sonde (idempotent). À appeler une fois au boot du shell. */
+export function startDiag(): void {
+  if (started) return;
+  started = true;
+
+  // ── 1. Patch global d'invoke : toute commande passe par ici.
+  // @tauri-apps/api résout `window.__TAURI_INTERNALS__.invoke` À L'APPEL, donc
+  // remplacer cette propriété suffit. Si l'objet est gelé (Object.freeze),
+  // l'affectation jette en mode strict → repli : clone + remplacement de la
+  // propriété window entière. Le ping de démarrage rapporte l'état du patch.
+  let patchState = "off";
+  try {
+    type Internals = Record<string, unknown> & {
+      invoke: NonNullable<typeof rawInvoke>;
+      __diagWrapped?: boolean;
+    };
+    const w = window as unknown as { __TAURI_INTERNALS__?: Internals };
+    const internals = w.__TAURI_INTERNALS__;
+    if (internals?.invoke && !internals.__diagWrapped) {
+      const orig = internals.invoke.bind(internals) as NonNullable<typeof rawInvoke>;
+      rawInvoke = orig;
+      const wrapped = ((cmd: string, args?: unknown, opts?: unknown) => {
+        const t0 = performance.now();
+        const p = orig(cmd, args, opts);
+        (p as Promise<unknown>).then(
+          (r) => { if (cmd !== "ui_diag") note("cmd", `${cmd} ${Math.round(performance.now() - t0)}ms${sizeOf(r)}`); },
+          () => note("cmd✗", `${cmd} ${Math.round(performance.now() - t0)}ms`),
+        );
+        return p;
+      }) as Internals["invoke"];
+      try {
+        internals.invoke = wrapped;
+        internals.__diagWrapped = true;
+        patchState = "direct";
+      } catch {
+        const clone: Internals = Object.assign(
+          Object.create(Object.getPrototypeOf(internals) as object) as Internals,
+          internals,
+          { invoke: wrapped, __diagWrapped: true },
+        );
+        w.__TAURI_INTERNALS__ = clone;
+        patchState = "clone";
+      }
+    } else if (internals?.__diagWrapped) {
+      patchState = "déjà";
+    }
+  } catch { /* sans patch, watchdog + événements restent actifs */ }
+
+  // Ping de démarrage : confirme (côté log Rust) que la sonde est active,
+  // sur quelle vue, et si le patch d'invoke intercepte (direct/clone/off).
+  setTimeout(() => {
+    const view = (window as unknown as { __quantaView?: string }).__quantaView ?? "?";
+    try { void rawInvoke?.("ui_diag", { msg: `sonde active vue=${view} patch=${patchState}` }); } catch { /* best-effort */ }
+  }, 4000);
+
+  // ── 2. Watchdog : trou entre deux battements = thread bloqué ──
+  let beat = performance.now();
+  setInterval(() => {
+    const n = performance.now();
+    const gap = n - beat;
+    beat = n;
+    if (gap > 600) report("watchdog", gap);
+  }, 150);
+
+  // ── 3. Longtasks (moteurs qui l'exposent) ──
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        note("longtask", `${Math.round(e.duration)}ms`);
+        if (e.duration > 300) report("longtask", e.duration);
+      }
+    }).observe({ entryTypes: ["longtask"] });
+  } catch { /* WKWebView : non supporté — le watchdog couvre */ }
+
+  // ── 4. Événements du nœud, datés dans l'anneau (corrélation gel ↔ forge) ──
+  for (const ev of [
+    "quanta://mined",
+    "quanta://block-sealed",
+    "quanta://tx-applied",
+    "quanta://chain-sync-progress",
+    "quanta://engine",
+  ]) {
+    listen(ev, (e) => {
+      try { note("evt", `${ev.slice(9)} ${JSON.stringify(e.payload).slice(0, 90)}`); } catch { /* best-effort */ }
+    }).catch(() => { /* best-effort */ });
+  }
+}

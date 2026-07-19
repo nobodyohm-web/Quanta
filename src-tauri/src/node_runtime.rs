@@ -33,7 +33,14 @@ pub fn install_crypto_provider() {
 
 /// The default on-disk data directory — the **same** location the desktop app
 /// uses, so a daemon and the app on one machine share one chain/identity/DB.
+/// `QUANTA_DATA_DIR` overrides it (isolated probe/multi-node runs on one machine:
+/// two processes must never share one live DB + node identity).
 pub fn default_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("QUANTA_DATA_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("quanta-protocol")

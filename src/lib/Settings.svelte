@@ -174,6 +174,14 @@
           <span class="unit">QUANTA</span>
         </div>
       </div>
+
+      <div class="row">
+        <span class="row-label">{t('set.privacyMode')}</span>
+        <div class="seg">
+          <button class="seg-btn" class:active={prefs.privacy} onclick={() => prefs = { ...prefs, privacy: true }}>{t('set.privacyOn')}</button>
+          <button class="seg-btn" class:active={!prefs.privacy} onclick={() => prefs = { ...prefs, privacy: false }}>{t('set.privacyOff')}</button>
+        </div>
+      </div>
     </div>
   </section>
 

@@ -17,6 +17,7 @@
   import Settings from "$lib/Settings.svelte";
   import Whitepaper from "$lib/Whitepaper.svelte";
   import { getPrefs, applyTheme } from "$lib/prefs";
+  import { startDiag, note } from "$lib/diag";
   // Local fonts — bundled, no CDN (offline-first). Inter for everything,
   // JetBrains Mono reserved for the pro terminal only.
   import "@fontsource-variable/inter";
@@ -27,6 +28,16 @@
   // entirely in Welcome.svelte (step "welcome"); this page only boots ("check"),
   // unlocks an existing vault ("unlock"), or prompts for a @pseudo ("username").
   type Step = "check" | "welcome" | "unlock" | "username";
+
+  // Sonde de gel : démarrée avant tout (patch d'invoke inclus) — un thread UI
+  // bloqué > 600 ms devient un rapport daté avec le contexte des opérations.
+  if (typeof window !== "undefined") startDiag();
+
+  // Autopilote de diagnostic (dev uniquement, jamais en release) : une instance
+  // jetable — dossier de données séparé — entre seule, droit sur une vue cible,
+  // pour reproduire un bug sous la sonde sans interaction.
+  const AUTOPILOT =
+    import.meta.env.DEV && import.meta.env.VITE_QUANTA_AUTOPILOT === "1";
 
   let view = $state("wallet");
   let ready = $state(false);
@@ -102,6 +113,38 @@
     try {
       await new Promise(r => setTimeout(r, 400));
       const has = await invoke<boolean>("check_identity");
+      if (AUTOPILOT) {
+        // Un seul essai, jamais de boucle : si le déverrouillage échoue (vault
+        // réel ≠ vault jetable), on s'arrête net — pas de brute-force accidentel.
+        try {
+          const password = "quanta-dev-autopilot";
+          const id = has
+            ? await invoke<{ public_key_hex: string }>("unlock_identity", { password })
+            : await invoke<{ public_key_hex: string }>("create_identity", { displayName: "probe", password });
+          pk = id.public_key_hex;
+          ready = true;
+          view = import.meta.env.VITE_QUANTA_AUTOPILOT_VIEW || "network";
+          // Rotation de vues (sonde) : mime la navigation humaine pendant les
+          // forges — chaque changement est daté dans l'anneau de la sonde.
+          if (import.meta.env.VITE_QUANTA_AUTOPILOT_ROTATE === "1") {
+            const cycle = ["network", "wallet", "network", "dashboard", "network", "profile"];
+            let ci = 0;
+            setInterval(() => { ci = (ci + 1) % cycle.length; view = cycle[ci]; }, 15000);
+          }
+          // Auto-test de la sonde : gel volontaire de 900 ms, 30 s après le boot
+          // — prouve de bout en bout que le watchdog capture un vrai gel.
+          if (import.meta.env.VITE_QUANTA_AUTOPILOT_SELFTEST === "1") {
+            setTimeout(() => {
+              const t0 = performance.now();
+              while (performance.now() - t0 < 900) { /* gel volontaire (test) */ }
+            }, 30000);
+          }
+        } catch (e) {
+          console.error("[autopilot] arrêt:", e);
+        }
+        loading = false;
+        return;
+      }
       step = has ? "unlock" : "welcome";
       if (has) {
         try {
@@ -204,6 +247,11 @@
   function skipUsername() { ready = true; }
 
   function nav(v: string) { view = v; }
+  // La vue courante entre dans l'anneau de la sonde (contexte des rapports de gel).
+  $effect(() => {
+    note("nav", view);
+    (window as unknown as { __quantaView?: string }).__quantaView = view;
+  });
   function handleCmd(id: string) { nav(id); }
 </script>
 

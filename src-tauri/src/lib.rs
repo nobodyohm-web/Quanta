@@ -153,6 +153,15 @@ async fn check_identity(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, 
     Ok(db.as_ref().ok_or("DB not ready")?.get_active_keypair().await?.is_some())
 }
 
+/// Sonde de diagnostic UI : le frontend rapporte ici tout gel du thread
+/// principal (watchdog/longtask) avec l'anneau des opérations qui l'entouraient.
+/// Best-effort, aucun effet sur l'état du nœud — le gel devient une donnée datée.
+#[tauri::command]
+fn ui_diag(msg: String) {
+    log::warn!("◈ [UI-DIAG] {}", msg);
+    eprintln!("◈ [UI-DIAG] {}", msg);
+}
+
 #[tauri::command]
 async fn create_identity(
     state: tauri::State<'_, Arc<AppState>>, display_name: String, password: String,
@@ -1415,6 +1424,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            ui_diag,
             check_identity, create_identity, unlock_identity, get_public_key, get_recovery_key,
             get_recovery_phrase, restore_from_phrase,
             get_receive_address, validate_address, resolve_address,

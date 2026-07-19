@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ChainHistory from "./ChainHistory.svelte";
+  import NetworkScene3D from "./NetworkScene3D.svelte";
   import { t } from "./i18n.svelte";
+  import { note } from "./diag";
 
   let chainView = $state<"history" | "2d">("history");
 
@@ -26,12 +27,16 @@
   let holders = $state(0);
   let myBalance = $state(0);
   let blocks = $state<any[]>([]);
-  let newBlockFlash = $state(0);
+  // Halo « flash » au nouveau bloc : minuterie propre (l'ancienne expression
+  // `Date.now() - newBlockFlash < 1200` ne se réévaluait qu'au bloc SUIVANT
+  // → le halo restait allumé ~2 min au lieu de 1,2 s).
+  let flashOn = $state(false);
+  let flashTo: ReturnType<typeof setTimeout> | undefined;
   let finalityFloor = $state(0);     // ms epoch du dernier bloc reçu → animation
-  let mintedDisplay = $state(0);     // compteur animé, monte en continu
   const myShare = $derived(supplyQta > 0 ? (myBalance / supplyQta) * 100 : 0);
 
   async function loadChain() {
+    const t0 = performance.now(); // sonde : durée réelle du sondage 1,5 s
     try {
       const o = await invoke<any>("get_chain_overview", { limit: 22 });
       const prev = chainHeight;
@@ -45,21 +50,25 @@
       pendingTx = o.pending ?? 0;
       holders = o.holders ?? 0;
       blocks = o.blocks ?? [];
-      if (prev && chainHeight > prev) newBlockFlash = Date.now();
+      if (prev && chainHeight > prev) {
+        flashOn = true;
+        clearTimeout(flashTo);
+        flashTo = setTimeout(() => (flashOn = false), 1600);
+      }
     } catch {}
     try {
       const f = await invoke<any>("get_finality_status");
       finalityFloor = f?.finalized_floor ?? 0;
     } catch {}
+    note("net.loadChain", `${Math.round(performance.now() - t0)}ms h=${chainHeight}`);
   }
   let connectInput = $state("");
   let connectErr = $state("");
   let connectSuccess = $state(false);
   let connecting = $state(false);
-  let networkCanvas: HTMLCanvasElement;
-  // Variable simple (PAS $state) : réécrite 60 fps par la boucle canvas, elle
-  // n'a aucun lecteur réactif — la garder en $state planifiait 60 flushs/s inutiles.
-  let animFrame = 0;
+  // Grand compteur « QUANTA forgés » : nœud DOM écrit DIRECTEMENT par la boucle
+  // rAF (jamais de $state à 60 fps — un flush Svelte par frame était du gâchis).
+  let forgeCountEl: HTMLDivElement | undefined;
 
   // NET-9/NET-10/NET-15: Per-peer metrics + display name (NET-15)
   type PeerMetric = {
@@ -95,6 +104,7 @@
 
 
   async function refresh() {
+    const t0 = performance.now(); // sonde : durée réelle du sondage 5 s
     try {
       const s = await invoke<any>("get_node_status");
       peerCount = s?.peer_count ?? 0;
@@ -110,6 +120,7 @@
       const r = await invoke<any>("get_my_reputation");
       myBalance = r?.atn_balance ?? 0;
     } catch {}
+    note("net.refresh", `${Math.round(performance.now() - t0)}ms peers=${peerCount}`);
   }
 
   async function loadDisplayName() {
@@ -145,7 +156,8 @@
   // d'émission RÉEL du moment (emissionPerHour, décroissant, lu de la chaîne)
   // et rattrape la vraie valeur à chaque sondage.
   // Lit mintedQta/emissionPerHour uniquement dans le callback rAF (async) →
-  // pas de dépendance réactive, l'effet ne tourne qu'une fois.
+  // pas de dépendance réactive ; écrit textContent DIRECTEMENT (zéro flush
+  // Svelte à 60 fps — leçon d'hygiène du gel au forge).
   $effect(() => {
     let raf = 0;
     let last = performance.now();
@@ -154,7 +166,7 @@
       const dt = Math.min(0.1, (now - last) / 1000); last = now;
       v += (emissionPerHour / 3600) * dt;                 // dérive live
       if (mintedQta > v) v += (mintedQta - v) * Math.min(1, dt * 2.5); // rattrapage doux
-      mintedDisplay = v;
+      if (forgeCountEl) forgeCountEl.textContent = fmtForge(v);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -185,125 +197,6 @@
     if (!syncProgress || syncProgress.sender_height === 0) return 0;
     const pct = (syncProgress.our_height / syncProgress.sender_height) * 100;
     return Math.max(0, Math.min(100, pct));
-  });
-
-  // Canvas animation — graphe réseau vivant (compte de peers RÉEL, zéro fake).
-  // Les peers orbitent en ellipse ; les connexions « coulent » (pointillés
-  // animés) ; à chaque nouveau bloc, une rafale d'impulsions part de mon nœud
-  // vers tous les peers (propagation du bloc).
-  // SEULE dépendance voulue : peerCount. Piège Svelte 5 (bug du gel au forge) :
-  // le premier draw() était appelé SYNCHRONIQUEMENT dans le corps de l'effet →
-  // toutes ses lectures ($state newBlockFlash, locale via t()) devenaient des
-  // dépendances trackées, et l'écriture de newBlockFlash au scellement d'un
-  // bloc reconstruisait tout l'effet (positions re-tirées, rAF relancé) au
-  // moment exact du forge. Désormais : lastFlash init sous untrack, et le
-  // premier draw passe par requestAnimationFrame (asynchrone = non tracké).
-  $effect(() => {
-    if (!networkCanvas) return;
-    const W = networkCanvas.width, H = networkCanvas.height;
-    const cx = W / 2, cy = H / 2;
-    const count = peerCount;
-
-    const peers = Array.from({ length: count }, (_, i) => ({
-      angle: (i / Math.max(count, 1)) * Math.PI * 2 + Math.random() * 0.4,
-      radius: 92 + (i % 3) * 28,
-      speed: 0.0015 + Math.random() * 0.0011,
-      r: 7 + Math.random() * 4,
-      phase: Math.random() * Math.PI * 2,
-    }));
-    let localPulses: { fx: number; fy: number; tx: number; ty: number; t: number; big: boolean }[] = [];
-    let lastFlash = untrack(() => newBlockFlash);
-
-    const draw = () => {
-      const ctx = networkCanvas.getContext('2d');
-      if (!ctx) return;
-      const now = Date.now();
-      ctx.clearRect(0, 0, W, H);
-
-      // Anneaux de guidage (profondeur)
-      for (const rr of [72, 118, 162]) {
-        ctx.beginPath(); ctx.ellipse(cx, cy, rr, rr * 0.78, 0, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(0,0,0,0.035)'; ctx.lineWidth = 1; ctx.stroke();
-      }
-
-      // Positions courantes (orbite elliptique = léger effet de tilt 3D)
-      peers.forEach(p => { p.angle += p.speed; });
-      const pos = peers.map(p => ({
-        x: cx + Math.cos(p.angle) * p.radius,
-        y: cy + Math.sin(p.angle) * p.radius * 0.78,
-        r: p.r, phase: p.phase,
-      }));
-
-      // Nouveau bloc → rafale de propagation vers tous les peers
-      if (newBlockFlash !== lastFlash) {
-        lastFlash = newBlockFlash;
-        pos.forEach(n => localPulses.push({ fx: cx, fy: cy, tx: n.x, ty: n.y, t: 0, big: true }));
-      }
-      // Trafic ambiant
-      if (Math.random() < 0.02 && pos.length) {
-        const n = pos[Math.floor(Math.random() * pos.length)];
-        localPulses.push({ fx: cx, fy: cy, tx: n.x, ty: n.y, t: 0, big: false });
-      }
-
-      // Connexions « qui coulent »
-      pos.forEach(n => {
-        const dist = Math.hypot(n.x - cx, n.y - cy);
-        const a = Math.max(0, 1 - dist / 230) * 0.4;
-        ctx.beginPath();
-        ctx.setLineDash([3, 6]);
-        ctx.lineDashOffset = -((now / 55) % 9);
-        ctx.moveTo(cx, cy); ctx.lineTo(n.x, n.y);
-        ctx.strokeStyle = `rgba(11,165,160,${a})`;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      });
-      ctx.setLineDash([]);
-
-      // Impulsions
-      localPulses = localPulses.filter(p => p.t < 1);
-      localPulses.forEach(p => {
-        p.t += p.big ? 0.03 : 0.02;
-        const e = p.t;
-        const px = p.fx + (p.tx - p.fx) * e, py = p.fy + (p.ty - p.fy) * e;
-        ctx.beginPath(); ctx.arc(px, py, (p.big ? 4 : 2.5) * (1 - e * 0.25), 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(11,165,160,${(1 - e) * (p.big ? 0.9 : 0.55)})`; ctx.fill();
-      });
-
-      // Peers — anneaux propres, halo doux, respiration
-      pos.forEach(n => {
-        const breathe = 1 + Math.sin(now / 700 + n.phase) * 0.08;
-        const r = n.r * breathe;
-        ctx.beginPath(); ctx.arc(n.x, n.y, r + 5, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(11,165,160,0.06)'; ctx.fill();
-        ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffffff'; ctx.fill();
-        ctx.strokeStyle = 'rgba(11,165,160,0.55)'; ctx.lineWidth = 1.6; ctx.stroke();
-      });
-
-      // Mon nœud — anneau qui respire + cœur plein
-      const mb = 1 + Math.sin(now / 600) * 0.06;
-      const mr = 18 * mb;
-      ctx.beginPath(); ctx.arc(cx, cy, mr + 10, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(11,165,160,${0.10 + Math.sin(now / 600) * 0.03})`; ctx.fill();
-      ctx.beginPath(); ctx.arc(cx, cy, mr, 0, Math.PI * 2);
-      ctx.fillStyle = '#0BA5A0'; ctx.fill();
-      ctx.font = 'bold 9px Inter, sans-serif'; ctx.fillStyle = '#fff';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(t('net.canvasMe'), cx, cy);
-
-      if (pos.length === 0) {
-        ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.font = '13px Inter, sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(t('net.canvasNoPeers'), cx, cy + 56);
-        ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.font = '11px Inter, sans-serif';
-        ctx.fillText(t('net.canvasShareHint'), cx, cy + 76);
-      }
-
-      animFrame = requestAnimationFrame(draw);
-    };
-    // JAMAIS de draw() synchrone ici (ses lectures seraient trackées) — le
-    // premier rendu passe par rAF, hors du contexte réactif de l'effet.
-    animFrame = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(animFrame);
   });
 
   function copyId() {
@@ -381,17 +274,18 @@
     </div>
   </div>
 
-  <!-- Graphe vivant du réseau — Canvas2D honnête : MES pairs réels en orbite,
-       impulsions de propagation à chaque bloc réel (newBlockFlash). -->
+  <!-- Le réseau en 3D — chaque particule est un événement réel du nœud
+       (signature, vérification, scellement, minage, snapshot) ; les sphères
+       en orbite sont les pairs mesurés. WebGL2 pur, zéro dépendance. -->
   <div class="card net-live">
-    <canvas bind:this={networkCanvas} width="880" height="400" class="net-live-canvas"></canvas>
+    <NetworkScene3D {peerCount} />
   </div>
 
   <!-- La Forge — QUANTA forgés en direct (rareté + possession) -->
-  <div class="card forge-hero" class:forge-flash={Date.now() - newBlockFlash < 1200}>
+  <div class="card forge-hero" class:forge-flash={flashOn}>
     <div class="forge-main">
       <div class="section-label">{t('net.forgeLabel')} · {t('net.forgeMaxOf')} {fmtNum(maxSupply)} {t('net.forgeMaximum')}</div>
-      <div class="forge-count">{fmtForge(mintedDisplay)}</div>
+      <div class="forge-count" bind:this={forgeCountEl}>{fmtForge(mintedQta)}</div>
       <div class="forge-sub">
         <span class="forge-live-dot"></span>
         {t('net.forgeLive')} · {emissionPerHour < 1 ? emissionPerHour.toFixed(2) : emissionPerHour.toFixed(0)} {t('net.forgePerHour')} · {t('net.forgeBlock')} #{chainHeight}
@@ -448,7 +342,7 @@
         </div>
         {#each blocks as b, i (b.index)}
           <div class="chain-link"></div>
-          <div class="chain-block" class:chain-block-new={i === 0 && Date.now() - newBlockFlash < 1600}>
+          <div class="chain-block" class:chain-block-new={i === 0 && flashOn}>
             <div class="chain-block-h">#{b.index}</div>
             <div class="chain-block-mint">+{(b.minted_qta ?? 0).toFixed(3)}</div>
             <div class="chain-block-meta">{b.tx_count} {t('net.txAbbr')}</div>
@@ -609,7 +503,6 @@
   /* ── Résumé réseau — 4 chiffres réels, aucune imagerie ───── */
   .net-summary { margin-bottom: 16px; }
   .net-live { margin-bottom: 16px; padding: 8px; }
-  .net-live-canvas { display: block; width: 100%; height: auto; }
 
   /* ── La Forge — rareté & possession ──────────────────────── */
   .forge-hero {

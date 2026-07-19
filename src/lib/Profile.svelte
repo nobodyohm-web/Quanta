@@ -15,6 +15,12 @@
   let joined = $state("");
   let copied = $state(false);
 
+  // Adresse de réception publique — `qta1…` (Bech32m, checksummée), la forme
+  // à partager/mettre en QR (voir `get_receive_address`). Distincte de la clé
+  // publique hex ci-dessus, qui reste l'identité on-chain brute.
+  let receiveAddr = $state("");
+  let addrCopied = $state(false);
+
   // Pseudo unique @handle (adresse de wallet lisible)
   let username = $state<string | null>(null);
 
@@ -132,6 +138,9 @@
     try {
       myCode = await invoke<string>("get_my_connection_code");
     } catch {}
+    try {
+      receiveAddr = await invoke<string>("get_receive_address");
+    } catch {}
   }
 
   $effect(() => {
@@ -146,6 +155,12 @@
     navigator.clipboard?.writeText(pk);
     copied = true;
     setTimeout(() => copied = false, 2000);
+  }
+
+  function copyReceiveAddr() {
+    navigator.clipboard?.writeText(receiveAddr);
+    addrCopied = true;
+    setTimeout(() => addrCopied = false, 2000);
   }
 
   function shortPk(k: string) {
@@ -183,10 +198,16 @@
       <Identicon pubkey={pk} size={72} />
       <div class="id-main">
         <div class="id-handle" class:unnamed={!username}>{username ? '@' + username : t('pf.noUsername')}</div>
-        <button class="addr-chip" onclick={copyPk}>
-          <span class="addr-lbl">{t('pf.publicKey')}</span>
-          <span class="addr-val mono">{#if copied}✓ {t('pf.copied')}{:else}{shortPk(pk)}{/if}</span>
-        </button>
+        <div class="addr-chips">
+          <button class="addr-chip" onclick={copyReceiveAddr} disabled={!receiveAddr} title={t('pf.receiveAddressHint')}>
+            <span class="addr-lbl">{t('pf.receiveAddress')}</span>
+            <span class="addr-val mono">{#if addrCopied}✓ {t('pf.copied')}{:else}{receiveAddr ? shortPk(receiveAddr) : '—'}{/if}</span>
+          </button>
+          <button class="addr-chip" onclick={copyPk}>
+            <span class="addr-lbl">{t('pf.publicKey')}</span>
+            <span class="addr-val mono">{#if copied}✓ {t('pf.copied')}{:else}{shortPk(pk)}{/if}</span>
+          </button>
+        </div>
       </div>
       <div class="id-meta">
         <div>
@@ -407,14 +428,17 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .id-handle.unnamed { color: var(--color-text-3); font-weight: 600; }
+  .addr-chips { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; max-width: 100%; }
   .addr-chip {
     display: inline-flex; align-items: baseline; gap: 10px;
     padding: 8px 13px; border-radius: var(--radius-sm);
     background: var(--color-bg-1); border: 1px solid var(--color-border);
     cursor: pointer; max-width: 100%;
+    font-family: inherit;
     transition: border-color 0.15s, background 0.15s;
   }
   .addr-chip:hover { border-color: var(--color-border-hover); background: var(--color-bg-2); }
+  .addr-chip:disabled { cursor: default; opacity: 0.6; }
   .addr-lbl {
     font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
     text-transform: uppercase; color: var(--color-text-3); flex-shrink: 0;
