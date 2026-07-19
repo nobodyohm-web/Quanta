@@ -120,6 +120,18 @@
   let totalHashes = $state(0);      // total calculés depuis l'ouverture
   let appVersion = $state("");      // version affichée — fin du doute sur le build
   const input = new Uint8Array(48); // 32 o (dernier hash bloc) + 8 o nonce + 8 o slot
+  // Départ de nonce aléatoire (CSPRNG) : deux lancements ne produisent jamais
+  // la même cascade — l'unicité du flux se vérifie d'un regard.
+  if (typeof crypto !== "undefined") crypto.getRandomValues(input.subarray(32, 40));
+  // ++ nonce big-endian, retenue correcte. Piège JS : sur un Uint8Array,
+  // `++a[k]` retourne la valeur CALCULÉE (256) et non la valeur STOCKÉE (0),
+  // donc `if (++a[k] !== 0) break` ne propage jamais la retenue → le nonce
+  // bouclait sur 256 valeurs et l'affichage alternait entre 2 digests
+  // (le bug « les mêmes hashs en boucle »). Relire input[k] après l'écriture
+  // donne la valeur wrappée réelle.
+  function bumpNonce() {
+    for (let k = 39; k >= 32; k--) { input[k]++; if (input[k] !== 0) break; }
+  }
 
   function seedInput() {
     // Chaîne le cœur sur le VRAI dernier hash de bloc : chaque hash calculé
@@ -201,7 +213,7 @@
     if (!running) return;
     let digest = input;
     for (let n = 0; n < BATCH; n++) {
-      for (let k = 39; k >= 32; k--) { if (++input[k] !== 0) break; } // ++ nonce (big-endian)
+      bumpNonce();
       digest = blake3(input);
     }
     // Cascade : le digest courant descend dans la traîne — le calcul se VOIT couler.
@@ -291,7 +303,7 @@
     // l'effet dépendant d'un état réécrit toutes les 90 ms par computeBatch
     // (→ re-création interval/observers 11×/s).
     untrack(() => {
-      if (!coreHash) { for (let k = 39; k >= 32; k--) { if (++input[k] !== 0) break; } coreHash = bytesToHex(blake3(input)); }
+      if (!coreHash) { bumpNonce(); coreHash = bytesToHex(blake3(input)); }
     });
     return () => {
       clearInterval(iv);
