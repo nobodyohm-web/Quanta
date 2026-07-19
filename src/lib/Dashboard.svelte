@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import MiningTerminal from "./MiningTerminal.svelte";
+  import ForgeEngine from "./ForgeEngine.svelte";
   import { t, locale } from "./i18n.svelte";
 
   // ── Données vivantes du nœud (ZÉRO énergie, ZÉRO 3D) ────────────
@@ -240,9 +240,9 @@
     </div>
   </div>
 
-  <!-- ── La forge, en direct — le terminal EST la pièce maîtresse ──── -->
+  <!-- ── Le moteur de consensus, en direct — la pièce maîtresse ──── -->
   <div class="forge">
-    <MiningTerminal />
+    <ForgeEngine />
   </div>
 
   <!-- ── Chiffres du nœud (zéro énergie) ───────────────────────────── -->

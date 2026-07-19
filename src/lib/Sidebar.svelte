@@ -28,7 +28,10 @@
   $effect(() => {
     let un: (() => void) | undefined;
     let to: ReturnType<typeof setTimeout> | undefined;
-    listen("quanta://block-sealed", () => {
+    listen<{ mine?: boolean }>("quanta://block-sealed", (e) => {
+      // Ne pulser que pour NOS blocs — pas les centaines reçus pendant une sync
+      // (sinon rafale d'écritures $state + re-key du logo pendant toute la sync).
+      if (!e?.payload?.mine) return;
       sealing = true;
       clearTimeout(to);
       to = setTimeout(() => (sealing = false), 80);

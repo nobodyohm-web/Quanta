@@ -59,7 +59,9 @@
   let connectSuccess = $state(false);
   let connecting = $state(false);
   let networkCanvas: HTMLCanvasElement;
-  let animFrame = $state(0);
+  // Variable simple (PAS $state) : réécrite 60 fps par la boucle canvas, elle
+  // n'a aucun lecteur réactif — la garder en $state planifiait 60 flushs/s inutiles.
+  let animFrame = 0;
 
   // NET-9/NET-10/NET-15: Per-peer metrics + display name (NET-15)
   type PeerMetric = {
@@ -169,12 +171,15 @@
 
   // NET-16: subscribe to chain-sync progress events from the backend.
   $effect(() => {
+    let alive = true;
     let unlisten: UnlistenFn | null = null;
     listen<SyncProgress>("quanta://chain-sync-progress", (e) => {
       syncProgress = e.payload;
       syncProgressAt = Date.now();
-    }).then((fn) => { unlisten = fn; }).catch(() => {});
-    return () => { if (unlisten) unlisten(); };
+    }).then((fn) => { if (!alive) fn(); else unlisten = fn; }).catch(() => {});
+    // garde `alive` : si on quitte l'écran avant que listen() résolve, on retire
+    // quand même le listener (sinon fuite qui s'accumule à chaque aller-retour).
+    return () => { alive = false; if (unlisten) unlisten(); };
   });
 
   // Hide the banner once sync caught up AND the last event is older than 8s.
