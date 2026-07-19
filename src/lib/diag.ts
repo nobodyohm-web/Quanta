@@ -41,13 +41,21 @@ function runSealForensics(index: number): void {
     if (now - t0 >= 3000) {
       clearInterval(iv);
       const chime = lastChimeAgoMs();
+      // Battement de la scène 3D : vivante (âge de sa dernière frame),
+      // absente (page sans scène) ou MORTE (montée mais figée) — le composant
+      // peut geler seul pendant que le pipeline global reste fluide.
+      const sb = (window as unknown as { __quantaSceneBeat?: number }).__quantaSceneBeat;
+      const scene =
+        sb === undefined ? "jamais-montée"
+        : sb === -1 ? "absente"
+        : `${Math.round(now - sb)}ms`;
       const recent = ring
         .filter((e) => now - e.t < 3500)
         .map((e) => `${e.k}:${e.d}`)
         .join(" | ");
       const line =
         `FORENSIQUE bloc #${index} : pire_trou_js=${Math.round(jsWorst)}ms ` +
-        `pire_trou_rendu=${Math.round(rafWorst)}ms ` +
+        `pire_trou_rendu=${Math.round(rafWorst)}ms scène=${scene} ` +
         `carillon=${chime >= 0 ? `${chime}ms` : "jamais"} :: ${recent}`.slice(0, 900);
       try { localStorage.setItem("quanta.lastSeal", `${new Date().toISOString()} ${line}`); } catch { /* best-effort */ }
       try { void rawInvoke?.("ui_diag", { msg: line }); } catch { /* best-effort */ }
@@ -200,10 +208,21 @@ export function startDiag(): void {
   // ── 5. Forensique par scellement — la demande d'Alex : « des logs pour
   // comprendre ». À CHAQUE bloc scellé, fenêtre de 3 s échantillonnée à
   // 100 ms, TOUJOURS écrite (aucun seuil) : pire trou JS, pire trou de rendu,
-  // délai depuis le carillon (corrélation audio ⇄ gel), anneau récent.
+  // battement de la scène 3D, délai depuis le carillon, anneau récent.
   listen<{ index?: number }>("quanta://block-sealed", (e) => {
     try { runSealForensics(e.payload?.index ?? -1); } catch { /* best-effort */ }
   }).catch(() => { /* best-effort */ });
+
+  // ── 6. Erreurs globales : une exception dans un callback rAF/timer tue sa
+  // boucle EN SILENCE (aucun boundary ne la voit) — ici elle entre dans
+  // l'anneau ET déclenche un rapport. Plus jamais de mort silencieuse.
+  window.addEventListener("error", (e) => {
+    note("js-erreur", `${String(e.message).slice(0, 100)} @${String(e.filename).split("/").pop()}:${e.lineno}`);
+    report("js-erreur", 0);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    note("promesse-rejetée", String(e.reason).slice(0, 100));
+  });
 
   // ── 3. Longtasks (moteurs qui l'exposent) ──
   try {

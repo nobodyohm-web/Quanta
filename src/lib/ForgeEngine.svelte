@@ -374,13 +374,26 @@
         const f = localStorage.getItem("quanta.lastSeal");
         if (f && f !== seenSeal) { seenSeal = f; push("hash", f.slice(25, 245)); }
       } catch { /* best-effort */ }
+      // Garde-vie : si `visible` est resté bloqué à faux alors que le moteur
+      // est réellement à l'écran (état stale d'observer), on répare et relance.
+      if (!visible && rootEl && !document.hidden) {
+        const r = rootEl.getBoundingClientRect();
+        if (r.bottom > 0 && r.top < window.innerHeight && r.width > 0) {
+          visible = true;
+          play();
+        }
+      }
     }, 5000);
     // pause hors écran / onglet caché (perf + honnêteté : rien ne tourne caché)
     const onVis = () => { visible = !document.hidden; play(); };
     document.addEventListener("visibilitychange", onVis);
     let io: IntersectionObserver | undefined;
     if (rootEl && typeof IntersectionObserver !== "undefined") {
-      io = new IntersectionObserver((es) => { visible = es[0]?.isIntersecting ?? true; play(); }, { threshold: 0.01 });
+      // Dernière entrée du lot (es[0] = la plus ANCIENNE) : sous un reflow —
+      // par ex. les lignes poussées dans le journal AU SCELLEMENT — le lot
+      // [sorti, revenu] laissait `visible` bloqué à faux → cascade de hash
+      // FIGÉE à l'écran. La signature exacte du « ça gèle quand un bloc est fait ».
+      io = new IntersectionObserver((es) => { visible = es[es.length - 1]?.isIntersecting ?? true; play(); }, { threshold: 0.01 });
       io.observe(rootEl);
     }
     // untrack : play() lit `visible` ($state) — sans lui l'effet entier se

@@ -26,6 +26,10 @@
   let canvas = $state<HTMLCanvasElement>();
   let wrap = $state<HTMLDivElement>();
   let glOk = $state(true);
+  // Génération du contexte GL : incrémentée à chaque perte de contexte →
+  // {#key} recrée le canvas et l'effet repart sur un contexte frais (sans ça,
+  // une perte de contexte figeait la scène sur sa dernière image, à jamais).
+  let glGen = $state(0);
   // Compteurs coarse pour la légende (mis à jour 1×/s hors boucle de rendu).
   let evtCount = $state(0);
   let lastEvtAgo = $state(-1);
@@ -313,8 +317,11 @@
     // ── Boucle : pause hors-viewport / onglet caché ; reduced-motion = statique ──
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let raf = 0, visible = true, inView = true, running = false;
+    // La DERNIÈRE entrée du lot fait foi : sous un défilement rapide, le lot
+    // arrive [sorti, revenu] — lire es[0] laissait inView bloqué à faux et la
+    // scène gelée À L'ÉCRAN (boucle stoppée, dernière image affichée).
     const io = new IntersectionObserver((es) => {
-      inView = es[0]?.isIntersecting ?? true; ensure();
+      inView = es[es.length - 1]?.isIntersecting ?? true; ensure();
     }, { threshold: 0.05 });
     io.observe(cv);
     const onVis = () => { visible = !document.hidden; ensure(); };
@@ -351,26 +358,76 @@
       gl!.uniform1f(uDpr, dpr);
       gl!.uniformMatrix4fv(uVP, false, vp);
       gl!.drawArrays(gl!.POINTS, 0, TOTAL);
+      // Battement de scène : la forensique par bloc lit cet horodatage —
+      // « la scène était-elle VIVANTE au scellement ? » devient mesurable.
+      (window as unknown as { __quantaSceneBeat?: number }).__quantaSceneBeat = performance.now();
       // Coût de frame anormal → dans l'anneau (visible en forensique).
       const cost = performance.now() - t0;
       if (cost > 40) note("gl-frame", `${Math.round(cost)}ms`);
-      if (!reduced) raf = requestAnimationFrame(frame);
+      if (!reduced) raf = requestAnimationFrame(frameSafe);
       else running = false;
     }
+    // La boucle ne doit JAMAIS mourir en silence : toute exception dans frame()
+    // tuait la chaîne rAF (running restait true → ensure() ne relançait plus)
+    // et la scène gelait sur sa dernière image. Capture + trace + relance.
+    const frameSafe = () => {
+      try {
+        frame();
+      } catch (err) {
+        note("gl-err", String(err).slice(0, 120));
+        running = false;
+        raf = 0;
+      }
+    };
     function ensure() {
-      if (!running && visible && inView && !raf) { running = true; raf = requestAnimationFrame(frame); }
+      if (!running && visible && inView && !raf) { running = true; raf = requestAnimationFrame(frameSafe); }
     }
     // reduced-motion : une frame par événement réel (file drainée), pas de boucle.
     let evIv: ReturnType<typeof setInterval> | undefined;
     if (reduced) evIv = setInterval(() => { if (queue.length) ensure(); }, 500);
+    // Auto-résurrection : si la scène est visible mais qu'aucune frame n'est
+    // sortie depuis > 2 s (boucle morte, quelle qu'en soit la cause), on
+    // le note, on force la relance — et la forensique du bloc suivant le dira.
+    const heal = setInterval(() => {
+      if (reduced) return;
+      // Vérité géométrique directe : si le canvas est réellement à l'écran
+      // mais qu'un état stale (inView faux à tort) tient la boucle arrêtée,
+      // on répare l'état AVANT de relancer.
+      if (!inView) {
+        const r = cv.getBoundingClientRect();
+        if (r.bottom > 0 && r.top < window.innerHeight && r.width > 0) {
+          note("gl-inview-réparé", "état stale corrigé");
+          inView = true;
+        }
+      }
+      if (!(visible && inView)) return;
+      const b = (window as unknown as { __quantaSceneBeat?: number }).__quantaSceneBeat ?? 0;
+      if (b > 0 && performance.now() - b > 2000) {
+        note("gl-résurrection", `${Math.round(performance.now() - b)}ms sans frame`);
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+        running = false;
+        ensure();
+      }
+    }, 1000);
     ensure();
 
-    const onLost = (e: Event) => { e.preventDefault(); note("gl", "contexte perdu"); glOk = false; };
+    // Perte de contexte GL (redémarrage du process GPU, pression mémoire…) :
+    // AVANT, la scène restait figée sur sa dernière image pour toujours.
+    // Maintenant : on recrée canvas + contexte via {#key glGen}.
+    const onLost = (e: Event) => {
+      e.preventDefault();
+      note("gl", "contexte perdu — recréation");
+      glGen += 1;
+    };
     cv.addEventListener("webglcontextlost", onLost);
 
     return () => {
       if (raf) cancelAnimationFrame(raf);
       if (evIv) clearInterval(evIv);
+      clearInterval(heal);
+      // Scène démontée : battement marqué absent (la forensique dira « absente »).
+      (window as unknown as { __quantaSceneBeat?: number }).__quantaSceneBeat = -1;
       io.disconnect();
       document.removeEventListener("visibilitychange", onVis);
       cv.removeEventListener("pointerdown", onDown);
@@ -385,7 +442,9 @@
 
 <div class="scene-wrap" bind:this={wrap}>
   {#if glOk}
-    <canvas bind:this={canvas} class="scene-canvas" aria-label={t('net3d.aria')}></canvas>
+    {#key glGen}
+      <canvas bind:this={canvas} class="scene-canvas" aria-label={t('net3d.aria')}></canvas>
+    {/key}
     <div class="scene-legend">
       <span class="lg"><span class="sw sw-evt"></span>{t('net3d.legendEvent')}</span>
       <span class="lg"><span class="sw sw-peer"></span>{peerCount} {peerCount === 1 ? t('wallet.peer') : t('wallet.peers')}</span>
