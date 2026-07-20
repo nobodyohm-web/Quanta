@@ -133,6 +133,94 @@
   --quanta-positive: var(--color-green);
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   Thème SOMBRE — « Aurora nuit ». Style Apple sombre (Mail/Notes) :
+   calme, contrasté juste, AUCUN néon/glow. On ne redéfinit QUE les
+   tokens de :root ci-dessus → toute l'app (et les alias --quanta-*,
+   qui sont des var()) suit par cascade, zéro couleur en dur à changer.
+   Le teal joyau est conservé ; on le rehausse (bright) là où il sert
+   d'encre pour rester lisible sur fond profond. Défaut de la marque =
+   clair : sans [data-theme="dark"], les tokens clairs s'appliquent.
+   ═══════════════════════════════════════════════════════════════ */
+:root[data-theme="dark"] {
+  /* Accent teal — encre rehaussée (bright) pour la lisibilité sur sombre ;
+     les FONDS de boutons gardent le teal profond (texte blanc, parité clair). */
+  --cyan: #14C8B8;
+  --cyan-dim: rgba(20,200,184,0.12);
+  --cyan-mid: rgba(20,200,184,0.30);
+
+  /* Surfaces — gamme slate froide, jamais de noir pur (#0f1115 → #2f3641) */
+  --color-bg-0: #0f1115;
+  --color-bg-1: #14171c;
+  --color-bg-2: #1b1f26;
+  --color-bg-3: #242a33;
+  --color-bg-4: #2f3641;
+  --color-bg-hover: #1b1f26;
+  --color-bg-elevated: #1c2129;
+
+  /* Bordures — voile clair très basse alpha (fines, discrètes) */
+  --color-border: rgba(255,255,255,0.09);
+  --color-border-hover: rgba(255,255,255,0.17);
+  --color-border-focus: #14C8B8;
+
+  /* Texte — blanc cassé hiérarchisé (jamais #fff pur) */
+  --color-text-0: #f2f4f7;
+  --color-text-1: #c4cad3;
+  --color-text-2: #929aa6;
+  --color-text-3: #6b7280;
+
+  --color-accent: #0BA5A0;        /* fill de bouton — texte blanc, parité clair */
+  --color-accent-hover: #14C8B8;  /* encre active (nav/lien) + hover bg */
+  --color-accent-dim: rgba(20,200,184,0.12);
+  --color-accent-bright: #2fd6c8;
+
+  /* Statuts — teintes vives « dark » (Apple), lisibles sur profond */
+  --color-green: #30d158;
+  --color-red: #ff5b52;
+  --color-amber: #ff9f0a;
+  --color-blue: #14C8B8;
+  --color-purple: #a97bff;
+
+  /* Canvas/surfaces — le canvas est le plus profond, les cartes flottent au-dessus */
+  --canvas: #0f1115;
+  --surface: #171a20;
+
+  /* Ombres — plus profondes en noir, plus discrètes (sur sombre l'ombre porte peu) */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.40);
+  --shadow: 0 1px 3px rgba(0,0,0,0.40), 0 10px 26px -8px rgba(0,0,0,0.55);
+  --shadow-lg: 0 2px 6px rgba(0,0,0,0.45), 0 30px 62px -18px rgba(0,0,0,0.70);
+  --shadow-teal: 0 1px 2px rgba(0,0,0,0.50);
+
+  /* Échelle teal — les tons clairs (50/100/200) servent d'encre/voile sur sombre :
+     on les réaligne vers le bright pour éviter « clair sur clair » (ex. ::selection). */
+  --teal-50:  #0b2a2b;
+  --teal-100: #0e3a3a;
+  --teal-200: #14555a;   /* fond de sélection lisible sur sombre */
+
+  /* Rôles de marque — le bloc scellé reste minéral mais remonte d'un cran
+     pour ne pas disparaître dans le canvas ; l'éclat de scellement inchangé. */
+  --color-mark: var(--teal-400);
+  --color-mark-monument: var(--teal-300);
+  --color-sealed-stone: #0e6b6a;
+}
+
+/* Sélection lisible sur sombre (le texte reste clair) */
+:root[data-theme="dark"] ::selection { background: var(--teal-200); color: var(--color-text-0); }
+
+/* Scrollbar — pouce clair sur sombre (le noir sur noir serait invisible) */
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.16); }
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.26); }
+
+/* Transition de thème douce (chrome uniquement, jamais le texte/anim) */
+.sidebar, .main-content, .card, .modal, .input, .btn, .seg, .charter {
+  transition-property: background-color, border-color, box-shadow, color;
+  transition-duration: var(--dur-fast, 0.15s);
+  transition-timing-function: var(--ease-out, ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .main-content, .card, .modal, .input, .btn, .seg, .charter { transition: none; }
+}
+
 /* ── Reset ── */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -369,7 +457,7 @@ html, body {
   animation: fadein 0.15s ease;
 }
 .modal {
-  background: #ffffff; border: 1px solid var(--color-border);
+  background: var(--surface); border: 1px solid var(--color-border);
   border-radius: 16px; padding: 28px; width: 420px; max-width: 90vw;
   box-shadow: var(--shadow-lg);
 }

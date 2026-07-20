@@ -54,10 +54,15 @@ export function setPrefs(p: Prefs): void {
 
 export function applyTheme(theme: Theme): void {
   const root = document.documentElement;
+  let resolved: "light" | "dark";
   if (theme === "auto") {
     const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-    root.dataset.theme = prefersDark ? "dark" : "light";
+    resolved = prefersDark ? "dark" : "light";
   } else {
-    root.dataset.theme = theme;
+    resolved = theme;
   }
+  root.dataset.theme = resolved;
+  // Keep the inline root background (set by the anti-flash boot script) in sync
+  // with runtime theme switches, so there is never a stale white/dark backdrop.
+  root.style.backgroundColor = resolved === "dark" ? "#0f1115" : "#ffffff";
 }

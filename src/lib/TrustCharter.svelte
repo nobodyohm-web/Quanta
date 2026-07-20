@@ -47,7 +47,7 @@
 </div>
 
 <style>
-  .charter { background: #fff; border: 1px solid var(--color-border); border-radius: 16px; padding: 22px 24px; box-shadow: var(--shadow-sm); }
+  .charter { background: var(--surface); border: 1px solid var(--color-border); border-radius: 16px; padding: 22px 24px; box-shadow: var(--shadow-sm); }
   .ch-head { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 18px; }
   .ch-title { font-size: 15px; font-weight: 700; color: var(--color-text-0); }
   .ch-sub { font-size: 12px; color: var(--color-text-2); margin-top: 2px; max-width: 540px; line-height: 1.5; }

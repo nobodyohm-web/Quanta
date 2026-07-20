@@ -399,6 +399,14 @@
     pointer-events: none;
     z-index: 0;
   }
+  /* Sur sombre le lavis doit remonter en intensité pour rester perceptible
+     (le blanc dominant n'existe plus) — sans jamais devenir un néon. */
+  :global(:root[data-theme="dark"]) .hero::before {
+    background:
+      radial-gradient(58% 58% at 26% 30%, rgba(20, 200, 184, 0.30), transparent 72%),
+      radial-gradient(46% 46% at 82% 16%, rgba(124, 58, 237, 0.20), transparent 72%);
+    filter: blur(14px);
+  }
   .hero > * { position: relative; z-index: 1; }
   .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
   .wordmark {

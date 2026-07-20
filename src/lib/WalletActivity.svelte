@@ -262,7 +262,7 @@
   .w-ic-mine  { background: var(--cyan-dim); color: var(--cyan); }
   .w-ic-stake { background: var(--cyan-dim); color: var(--teal-700); }
   .w-ic-burn  { background: var(--color-bg-3); color: var(--color-text-1); }
-  .w-ic-slash { background: var(--color-text-0); color: #fff; }
+  .w-ic-slash { background: var(--color-text-0); color: var(--color-bg-0); }
 
   /* Filtres — vocabulaire global .filter-tabs/.filter-tab ; seul le wrap est local */
   .w-filters { flex-wrap: wrap; margin-bottom: var(--space-3); }

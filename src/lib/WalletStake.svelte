@@ -206,7 +206,7 @@
   }
   .stk-warn-ic {
     width: 18px; height: 18px; min-width: 18px; border-radius: 50%;
-    background: var(--color-text-0); color: #fff;
+    background: var(--color-text-0); color: var(--color-bg-0);
     display: flex; align-items: center; justify-content: center;
     font-size: var(--text-xs); font-weight: 700;
   }
