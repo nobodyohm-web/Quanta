@@ -116,7 +116,7 @@
     {/if}
   </div>
 
-  <!-- Ajouter un proche -->
+  <!-- Ajouter un contact -->
   <div class="card card-gap">
     <div class="card-title">{t('ct.addTitle')}</div>
     <div class="add-grid">
@@ -137,7 +137,7 @@
     {#if addOk}<div class="form-msg ok">{addOk}</div>{/if}
   </div>
 
-  <!-- Mes proches -->
+  <!-- Mes contacts -->
   <div class="card">
     <div class="card-title">{t('ct.myContacts')} · {contacts.length}</div>
     {#if contacts.length === 0}

@@ -142,7 +142,7 @@ const fr: Dict = {
   "loading": "Chargement…",
   "lang.en": "English", "lang.fr": "Français", "lang.es": "Español", "lang.ru": "Русский", "lang.zh": "中文", "lang.ja": "日本語",
   "node.label": "Nœud",
-  "nav.wallet": "Portefeuille", "nav.contacts": "Proches", "nav.dashboard": "Minage", "nav.network": "Réseau", "nav.profile": "Profil", "nav.whitepaper": "Livre blanc",
+  "nav.wallet": "Portefeuille", "nav.contacts": "Contacts", "nav.dashboard": "Minage", "nav.network": "Réseau", "nav.profile": "Profil", "nav.whitepaper": "Livre blanc",
   "welcome.headline": "La monnaie que tu forges,<br/>que personne ne peut t'enlever.",
   "welcome.sub": "Souveraine, rare, post-quantique. <br/> Aucun serveur, aucune banque — rien que toi et tes clés.",
   "welcome.password": "Mot de passe (min. 10, lettres + chiffres)",

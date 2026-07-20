@@ -2,19 +2,29 @@
   import Identicon from "./Identicon.svelte";
   import { t } from "./i18n.svelte";
   import { translateError } from "./errors";
-  import { copySensitive, FEEDBACK_COPY_MS, FEEDBACK_OK_MS } from "./quanta";
+  import { copySensitive, FEEDBACK_COPY_MS, FEEDBACK_OK_MS, fmtQ, TICKER, formatUptime } from "./quanta";
   import {
     getNodeMode, getReceiveAddress, getDisplayName, setDisplayName,
     biometricStatus, enableBiometricUnlock, disableBiometricUnlock,
     unlockIdentity, getRecoveryKey,
   } from "./api";
-  import { myReputation, myUsername, myConnectionCode } from "./stores.svelte";
+  import { myReputation, myUsername, myConnectionCode, finalityStatus, walletOverview } from "./stores.svelte";
 
   // Identité + réputation = stores partagés (un seul sondage app-wide).
   const pk = $derived(myReputation.value?.public_key ?? "");
   const joined = $derived(myReputation.value?.joined_at ?? "");
   const username = $derived(myUsername.value);
   const myCode = $derived(myConnectionCode.value ?? "");
+
+  // ─── Ton nœud (validateur + contribution) & Portefeuille en bref ──
+  // Stores partagés (déjà sondés ailleurs — Minage/Réseau/Wallet) : aucun
+  // nouveau sondage réseau, juste un abonnement de plus au refcount.
+  const fin = $derived(finalityStatus.value);
+  const wallet = $derived(walletOverview.value);
+  const nodeLoaded = $derived(myReputation.loaded && finalityStatus.loaded);
+  const nodeError = $derived(myReputation.error || finalityStatus.error);
+  const walletLoaded = $derived(walletOverview.loaded);
+  const walletError = $derived(walletOverview.error);
 
   // Données propres au Profil (quasi statiques) — chargées une fois au montage.
   // Le Profil est remonté à chaque navigation ({#key view}), donc une revisite
@@ -155,6 +165,8 @@
   $effect(() => myReputation.subscribe());
   $effect(() => myUsername.subscribe());
   $effect(() => myConnectionCode.subscribe());
+  $effect(() => finalityStatus.subscribe());
+  $effect(() => walletOverview.subscribe());
   // Chargement local une fois (pas d'interval : ces champs ne bougent pas
   // pendant une session, et le Profil est remonté à chaque navigation).
   $effect(() => {
@@ -174,6 +186,24 @@
     navigator.clipboard?.writeText(receiveAddr);
     addrCopied = true;
     setTimeout(() => addrCopied = false, FEEDBACK_COPY_MS);
+  }
+
+  // ─── Adresse complète + code de connexion — copie (Identité) ───
+  let fullAddrCopied = $state(false);
+  let codeCopied = $state(false);
+
+  function copyFullAddr() {
+    if (!receiveAddr) return;
+    navigator.clipboard?.writeText(receiveAddr);
+    fullAddrCopied = true;
+    setTimeout(() => fullAddrCopied = false, FEEDBACK_COPY_MS);
+  }
+
+  function copyCode() {
+    if (!myCode) return;
+    navigator.clipboard?.writeText(myCode);
+    codeCopied = true;
+    setTimeout(() => codeCopied = false, FEEDBACK_COPY_MS);
   }
 
   function shortPk(k: string) {
@@ -224,6 +254,31 @@
       </div>
     </div>
 
+    <!-- Adresse complète + code de connexion — partage (Identité) -->
+    <div class="card">
+      <div class="section-label">{t('pf.receiveAddress')}</div>
+      <div class="sec-phrase-box">
+        <code class="mono sec-phrase">{receiveAddr || '—'}</code>
+      </div>
+      <div class="sec-row">
+        <span class="sec-hint sec-hint-flex">{t('pf.receiveAddressHint')}</span>
+        <button class="copy-btn" onclick={copyFullAddr} disabled={!receiveAddr}>
+          {fullAddrCopied ? t('pf.copied') : t('pf.copy')}
+        </button>
+      </div>
+
+      <div class="pk-sep">
+        <div class="section-label">{t('pf.connectionCode')}</div>
+        <div class="sec-row">
+          <code class="mono sec-code">{myCode || '—'}</code>
+          <button class="copy-btn" onclick={copyCode} disabled={!myCode}>
+            {codeCopied ? t('pf.copied') : t('pf.copy')}
+          </button>
+        </div>
+        <div class="sec-hint">{t('pf.connectionCodeHint')}</div>
+      </div>
+    </div>
+
     <!-- Surnom public (NET-15) — identité, juste sous le @pseudo -->
     <div class="card name-panel">
       <div class="name-row">
@@ -249,10 +304,46 @@
       {/if}
     </div>
 
-    <!-- Ta contribution — « tu as forgé ça » (le minage est une vraie contribution) -->
+    <!-- Ton nœud — statut validateur + contribution mesurée (nouveau) -->
     <div class="card">
-      <div class="card-title">{t('pf.contribTitle')}</div>
+      <div class="node-head">
+        <div class="card-title">{t('pf.nodeTitle')}</div>
+        <span class="chip" class:chip-attn={nodeLoaded && fin?.i_am_validator}>
+          {nodeLoaded ? (fin?.i_am_validator ? t('pf.validatorActive') : t('pf.validatorInactive')) : '—'}
+        </span>
+      </div>
       <p class="contrib-text">{@html t('pf.contribText')}</p>
+      <div class="node-stats">
+        <div>
+          <div class="section-label">{t('pf.myStake')}</div>
+          <div class="meta-v mono">{nodeLoaded ? `${fmtQ(fin?.my_stake ?? 0)} ${TICKER}` : '—'}</div>
+        </div>
+        <div>
+          <div class="section-label">{t('db.uptime')}</div>
+          <div class="meta-v mono">{nodeLoaded ? formatUptime(myReputation.value?.uptime_minutes ?? 0) : '—'}</div>
+        </div>
+      </div>
+      {#if nodeError}<div class="pf-load-err">{t('common.errLoad')}</div>{/if}
+    </div>
+
+    <!-- Portefeuille en bref — vérité on-chain (nouveau) -->
+    <div class="card">
+      <div class="card-title">{t('pf.walletTitle')}</div>
+      <div class="node-stats">
+        <div>
+          <div class="section-label">{t('wallet.forged')}</div>
+          <div class="meta-v mono">{walletLoaded ? `+${fmtQ(wallet?.earned ?? 0)} ${TICKER}` : '—'}</div>
+        </div>
+        <div>
+          <div class="section-label">{t('wallet.inStaking')}</div>
+          <div class="meta-v mono">{walletLoaded ? `${fmtQ(wallet?.staked ?? 0)} ${TICKER}` : '—'}</div>
+        </div>
+        <div>
+          <div class="section-label">{t('db.height')}</div>
+          <div class="meta-v mono">{walletLoaded ? (wallet?.height ?? '—') : '—'}</div>
+        </div>
+      </div>
+      {#if walletError}<div class="pf-load-err">{t('common.errLoad')}</div>{/if}
     </div>
 
     <!-- Sécurité & Récupération -->
@@ -263,16 +354,6 @@
         <span class="chip" class:chip-attn={!backedUp}>{backedUp ? t('pf.backedUp') : t('pf.toBackup')}</span>
       </div>
       <p class="sec-intro">{@html t('pf.secIntro')}</p>
-
-      <!-- Code de connexion -->
-      <div class="sec-block">
-        <div class="section-label">{t('pf.connectionCode')}</div>
-        <div class="sec-row">
-          <code class="mono sec-code">{myCode || '—'}</code>
-          <button class="copy-btn" onclick={() => { navigator.clipboard?.writeText(myCode); }}>{t('pf.copy')}</button>
-        </div>
-        <div class="sec-hint">{t('pf.connectionCodeHint')}</div>
-      </div>
 
       <!-- Phrase de récupération -->
       <div class="sec-block">
@@ -438,6 +519,15 @@
 
   /* ── Contribution ── */
   .contrib-text { font-size: var(--text-base); color: var(--color-text-2); line-height: 1.65; }
+
+  /* ── Adresse complète + code — séparateur entre les deux blocs ── */
+  .pk-sep { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--color-border); }
+
+  /* ── Ton nœud / Portefeuille en bref — titre + chip, stats sobres ── */
+  .node-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .node-head .card-title { margin-bottom: 0; }
+  .node-stats { display: flex; gap: var(--space-8); flex-wrap: wrap; margin-top: 14px; }
+  .pf-load-err { color: var(--color-text-2); font-size: var(--text-sm); margin-top: 10px; }
 
   /* ── Surnom public (NET-15) — repris de Réseau, identité seule ── */
   .name-panel { padding: 22px 24px; }
