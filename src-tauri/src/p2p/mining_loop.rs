@@ -277,12 +277,17 @@ async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
         // Live UX: block-seal pulse for the 3D scenes + toast.
         if let Some(handle) = state.app_handle.read().await.as_ref() {
             use tauri::Emitter;
+            // Symétrie avec le chemin distant : la scène Réseau affiche AUSSI
+            // qui a scellé nos propres blocs (notre @pseudo s'il existe).
+            let miner_name = state.node.usernames.read().await.username_of(addr);
             let _ = handle.emit(
                 "quanta://block-sealed",
                 serde_json::json!({
                     "index": b.index,
                     "txs": b.transactions.len(),
                     "mine": true,
+                    "miner": crate::p2p::ledger::short(addr, 16),
+                    "miner_name": miner_name,
                     // Le VRAI hash du bloc que NOUS venons de sceller + son
                     // parent — l'enchaînement prev ← hash devient visible.
                     "hash": b.hash.clone(),

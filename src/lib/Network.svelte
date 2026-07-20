@@ -27,6 +27,7 @@
   const pendingTx = $derived(chainOverview.value?.pending ?? 0);
   const blocks = $derived(chainOverview.value?.blocks ?? []);
   const finalityFloor = $derived(finalityStatus.value?.finalized_floor ?? 0);
+  const epoch = $derived(finalityStatus.value?.epoch ?? 0);
   const peerMetrics = $derived(peerMetricsStore.value ?? []);
 
   // États de chargement — tant que !loaded, le résumé affiche « — » (pas 0) ;
@@ -167,7 +168,7 @@
        (signature, vérification, scellement, minage, snapshot) ; les sphères
        en orbite sont les pairs mesurés. WebGL2 pur, zéro dépendance. -->
   <div class="card net-live">
-    <NetworkScene3D {peerCount} {blocks} {finalityFloor} />
+    <NetworkScene3D {peerCount} peers={peerMetrics} {blocks} {finalityFloor} height={chainHeight} {epoch} />
   </div>
 
   <!-- Blockchain en direct -->

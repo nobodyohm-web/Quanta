@@ -1252,6 +1252,9 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
             // Live UX: remote block landed — pulse the 3D scenes.
             if let Some(handle) = state.app_handle.read().await.as_ref() {
                 use tauri::Emitter;
+                // « Qui a trouvé le bloc » : le @pseudo du scelleur quand son
+                // adresse est enregistrée (lecture courte, hors lock ledger).
+                let miner_name = state.node.usernames.read().await.username_of(&block.miner);
                 let _ = handle.emit(
                     "quanta://block-sealed",
                     serde_json::json!({
@@ -1263,6 +1266,7 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
                         "hash": block.hash.clone(),
                         "prev": block.prev_hash.clone(),
                         "miner": short(&block.miner, 16),
+                        "miner_name": miner_name,
                     }),
                 );
             }
