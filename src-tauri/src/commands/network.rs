@@ -102,6 +102,7 @@ pub async fn get_security_audit(state: tauri::State<'_, Arc<AppState>>) -> Resul
         "pq_pending": cbom.pq_migration_count(),
         "signing": cbom.signing,
         "key_exchange": cbom.key_exchange,
+        "transport_auth": cbom.transport_auth,
         "hashing": cbom.hashing,
         "symmetric": cbom.symmetric,
         "kdf": cbom.kdf,

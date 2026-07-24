@@ -102,6 +102,11 @@
               <div class="hc-value">{audit.hashing?.name}</div>
               <div class="hc-meta">{audit.hashing?.standard}</div>
             </div>
+            <div class="help-cell">
+              <div class="hc-label">{t('help.sec_transport')}</div>
+              <div class="hc-value">{audit.transport_auth?.name}</div>
+              <div class="hc-meta">{audit.transport_auth?.standard}</div>
+            </div>
           </div>
         {/if}
         <p class="help-tip">

@@ -182,6 +182,9 @@ export interface SecurityAudit {
   symmetric?: SecurityAuditPrimitive;
   kdf?: SecurityAuditPrimitive;
   hashing?: SecurityAuditPrimitive;
+  /** Identité de transport du nœud (NodeId Iroh) — le seul primitif classique
+   *  restant, affiché tel quel plutôt que dissimulé (M3, audit 2026-07-25). */
+  transport_auth?: SecurityAuditPrimitive;
 }
 
 // ─── Données vivantes (lues en boucle par les stores / composants) ──────────
