@@ -532,10 +532,13 @@ mod security_tests {
         for r in ["r1", "r2", "r3"] { tracker.record_report("p1", r); }
         for r in ["r1", "r2", "r3"] { tracker.record_report("p2", r); }
 
+        // H6: bans are keyed by the peer digest, so the snapshot returns digests.
+        // `is_banned` takes the real key and normalises internally — that is the
+        // API callers use, so assert through it as well as on the raw snapshot.
         let banned = tracker.banned_peers();
         assert_eq!(banned.len(), 2);
-        assert!(banned.contains("p1"));
-        assert!(banned.contains("p2"));
+        assert!(tracker.is_banned("p1"));
+        assert!(tracker.is_banned("p2"));
     }
 
     /// SEC-COUNTRY-1 : la normalisation d'un code pays fournit un token

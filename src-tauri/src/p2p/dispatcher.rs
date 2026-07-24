@@ -66,6 +66,29 @@ pub const REPORT_BAN_TTL_SECS: u64 = 3600;
 /// limit. When the cap is hit we prune expired bans and the weakest
 /// (fewest-reporter, sub-threshold) entries. §4 policy: exact value is a choice.
 const MAX_TRACKED_REPORTS: usize = 10_000;
+
+/// H6 (AUDIT-2026-07-25) — hard cap on the *reporters* stored per target.
+/// [`REPORT_BAN_THRESHOLD`] is 3; keeping a small margin above it preserves the
+/// evidence a ban rests on while making the set impossible to inflate.
+const MAX_REPORTERS_PER_TARGET: u32 = 8;
+
+/// H6 — the key under which a peer is tracked in the `NonceTracker` maps.
+///
+/// Every per-peer map used to be keyed by the raw sender string. That was sized
+/// for Ed25519 (64 hex chars) — but since PQ-ENVELOPE-1 the sender is an
+/// **ML-DSA-65 public key**, i.e. 1952 bytes rendered as 3904 hex characters.
+/// With `MAX_TRACKED_SENDERS = 100_000` that is roughly 390 MB of keys alone,
+/// reachable by anyone willing to mint keypairs (microseconds each) and send one
+/// signed envelope per key, which never trips the per-sender rate limit.
+///
+/// Hashing to a 32-byte BLAKE3 digest (64 hex chars) cuts that ~61× with no
+/// security trade-off: the maps only ever test key equality, and a full 256-bit
+/// digest leaves no collision margin worth attacking. Normalisation happens
+/// *inside* each public method, so callers keep passing the real public key and
+/// the maps cannot disagree about what a peer is called.
+fn peer_key(public_key_hex: &str) -> String {
+    hex::encode(blake3::hash(public_key_hex.as_bytes()).as_bytes())
+}
 /// SEC-COUNTRY-1: absolute cap on distinct country codes tracked for the energy
 /// oracle. The code is peer-supplied via `Hello`; sanitised to an ISO-shaped
 /// short token and bounded here so a peer can't grow the map with novel codes.
@@ -143,6 +166,7 @@ impl NonceTracker {
     /// Returns `true` if this nonce is valid (strictly greater than the last
     /// seen). Also updates the tracker on acceptance.
     pub fn check_and_advance(&mut self, sender_pk: &str, nonce: u64) -> bool {
+        let sender_pk = &peer_key(sender_pk);
         let entry = self.last_nonces.entry(sender_pk.to_string()).or_insert(0);
         let ok = if nonce > *entry {
             *entry = nonce;
@@ -221,6 +245,7 @@ impl NonceTracker {
     /// has exceeded the adaptive per-peer message budget for the current
     /// window.
     pub fn check_rate_limit(&mut self, sender_pk: &str, peer_count: usize) -> bool {
+        let sender_pk = &peer_key(sender_pk);
         let now = now_epoch_secs();
         let limit = Self::adaptive_limit_for(peer_count);
 
@@ -251,6 +276,8 @@ impl NonceTracker {
     /// to any target's count, regardless of how many (or how varied) its reports
     /// are. A peer reporting itself is ignored (nonsensical, and can't self-ban).
     pub fn record_report(&mut self, peer_id: &str, reporter_pk: &str) -> u32 {
+        let peer_id = &peer_key(peer_id);
+        let reporter_pk = &peer_key(reporter_pk);
         if peer_id == reporter_pk {
             // A peer cannot report itself into (or pad) a ban.
             return self
@@ -263,7 +290,15 @@ impl NonceTracker {
             .report_counts
             .entry(peer_id.to_string())
             .or_default();
-        reporters.insert(reporter_pk.to_string());
+        // H6: a ban needs REPORT_BAN_THRESHOLD distinct reporters, so storing more
+        // than a small margin buys nothing — and `prune_reports_and_bans` only ever
+        // bounded the number of TARGETS, never the reporters of one target. Without
+        // this cap, an attacker minting fresh ML-DSA keypairs (microseconds each,
+        // one message per key so the per-sender rate limit never fires) grows a
+        // single set without bound.
+        if (reporters.len() as u32) < MAX_REPORTERS_PER_TARGET {
+            reporters.insert(reporter_pk.to_string());
+        }
         let new_count = reporters.len() as u32;
         if new_count >= REPORT_BAN_THRESHOLD {
             self.bans
@@ -317,6 +352,7 @@ impl NonceTracker {
     /// Returns `true` if `peer_id` is currently banned. Auto-evicts expired
     /// entries (and resets their report count) so a peer can rejoin after TTL.
     pub fn is_banned(&mut self, peer_id: &str) -> bool {
+        let peer_id = &peer_key(peer_id);
         let Some(&expires_at) = self.bans.get(peer_id) else {
             return false;
         };
@@ -1721,12 +1757,12 @@ mod tests {
 
         let tracker = state.node.nonce_tracker.read().await;
         assert_eq!(
-            tracker.last_nonces.get(&pk),
+            tracker.last_nonces.get(&peer_key(&pk)),
             Some(&1),
             "a valid sender's nonce high-water must be recorded"
         );
         assert!(
-            tracker.rate_counters.contains_key(&pk),
+            tracker.rate_counters.contains_key(&peer_key(&pk)),
             "a valid sender must be tracked for rate limiting"
         );
     }
@@ -1750,13 +1786,56 @@ mod tests {
         // A fresh, active sender via the real path pushes over the cap → prune
         // runs, expiring the idle entries and keeping the active one.
         assert!(t.check_and_advance("fresh_active", 1));
+        // H6: the maps are keyed by peer_key(), so look the active sender up the
+        // same way the tracker stores it.
+        let active = peer_key("fresh_active");
         assert!(t.last_seen.len() <= MAX_TRACKED_SENDERS, "maps stay bounded under flood");
         assert!(t.last_nonces.len() <= MAX_TRACKED_SENDERS, "nonce map bounded");
-        assert!(t.last_seen.contains_key("fresh_active"), "the ACTIVE sender is retained");
+        assert!(t.last_seen.contains_key(&active), "the ACTIVE sender is retained");
         assert!(
             t.last_seen.len() < MAX_TRACKED_SENDERS,
             "idle (replay-safe) entries were expired, not the active one"
         );
+    }
+
+    /// H6 (AUDIT-2026-07-25): `prune_reports_and_bans` bounds the number of
+    /// TARGETS, never the reporters of one target — so a single victim's reporter
+    /// set grew without limit. Each entry used to be a 3904-char ML-DSA key, and
+    /// minting keypairs is microseconds work with one message per key, which never
+    /// trips the per-sender rate limit. Assert the set is capped, and that a ban
+    /// still forms (the cap must not break the mechanism it bounds).
+    #[test]
+    fn h6_reporter_set_is_capped_per_target() {
+        let mut t = NonceTracker::new();
+        for i in 0..10_000 {
+            t.record_report("victim", &format!("reporter-{i}"));
+        }
+        let stored = t
+            .report_counts
+            .get(&peer_key("victim"))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        assert!(
+            stored <= MAX_REPORTERS_PER_TARGET as usize,
+            "reporter set must stay capped, got {stored}"
+        );
+        assert!(t.is_banned("victim"), "the ban still forms from distinct reporters");
+    }
+
+    /// H6: keys are stored hashed, so a map entry is 64 hex chars regardless of
+    /// how long the sender's public key is — the property that turns ~390 MB of
+    /// worst-case key storage into ~6 MB.
+    #[test]
+    fn h6_peer_keys_are_stored_hashed_not_raw() {
+        let mldsa_sized = "a".repeat(3904);
+        let mut t = NonceTracker::new();
+        assert!(t.check_and_advance(&mldsa_sized, 1));
+        assert!(
+            !t.last_nonces.contains_key(&mldsa_sized),
+            "the raw 3904-char key must never be a map key"
+        );
+        let k = t.last_nonces.keys().next().expect("one entry");
+        assert_eq!(k.len(), 64, "stored key is a BLAKE3 digest in hex");
     }
 
     /// TX-AUTH-NONCE-1 §5: the ABSOLUTE size bound must hold even when NOTHING is
