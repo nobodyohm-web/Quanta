@@ -144,7 +144,7 @@ function blockRow(b, finalized) {
   const fin = b.index <= finalized;
   return `<tr class="clk" data-h="${b.index}">
     <td class="num">${b.index}</td>
-    <td class="mono">${short(b.hash)}</td>
+    <td class="mono">${esc(short(b.hash))}</td>
     <td class="num r">${b.transactions ? b.transactions.length : 0}</td>
     <td class="r">${fin ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</td>
   </tr>`;
@@ -174,7 +174,7 @@ async function showBlock(h) {
     const info = await rpc("getinfo");
     const fin = Number(b.index) <= Number(info.finalized_height);
     const txs = (b.transactions || []).map((t) =>
-      `<div class="row"><div class="rk">${esc(t.tx_type)}</div><div class="rv mono">${short(t.from)} → ${short(t.to)} · ${fmtQ(t.amount)} QTA</div></div>`).join("") || `<div class="row"><div class="rv" style="color:var(--muted)">no transactions</div></div>`;
+      `<div class="row"><div class="rk">${esc(t.tx_type)}</div><div class="rv mono">${esc(short(t.from))} → ${esc(short(t.to))} · ${fmtQ(t.amount)} QTA</div></div>`).join("") || `<div class="row"><div class="rv" style="color:var(--muted)">no transactions</div></div>`;
     $("result").innerHTML = `<h2>Block #${b.index} ${fin ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</h2>` +
       kvBox([["hash", esc(b.hash)], ["prev", esc(b.prev_hash)], ["miner", esc(b.miner)], ["timestamp", esc(b.timestamp)]]) +
       `<h2>Transactions (${(b.transactions || []).length})</h2><div class="kv">${txs}</div>`;
@@ -186,7 +186,7 @@ async function showAddress(addr) {
   const bal = await rpc("getbalance", { address: addr });
   const list = await rpc("listtransactions", { address: addr, limit: 50 });
   const rows = (list.transactions || []).map((t) =>
-    `<tr><td>${t.direction === "in" ? "▼ in" : "▲ out"}</td><td class="mono">${short(t.hash)}</td><td class="num r">${fmtQ(t.amount_uqta)}</td><td class="num r">${t.height}</td><td class="r">${t.finalized ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</td></tr>`).join("") ||
+    `<tr><td>${t.direction === "in" ? "▼ in" : "▲ out"}</td><td class="mono">${esc(short(t.hash))}</td><td class="num r">${fmtQ(t.amount_uqta)}</td><td class="num r">${t.height}</td><td class="r">${t.finalized ? '<span class="pill fin">final</span>' : '<span class="pill pend">pending</span>'}</td></tr>`).join("") ||
     `<tr><td colspan="5" style="color:var(--muted)">no transactions in range</td></tr>`;
   $("result").innerHTML = `<h2>Address</h2>` +
     kvBox([["address", esc(bal.address)], ["spendable", fmtQ(bal.spendable_uqta) + " QTA"], ["staked", fmtQ(bal.staked_uqta) + " QTA"]]) +

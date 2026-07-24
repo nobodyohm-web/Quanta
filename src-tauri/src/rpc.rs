@@ -613,6 +613,21 @@ mod tests {
         Arc::new(AppState::new())
     }
 
+    /// H7 (AUDIT-2026-07-25) — every chain-controlled string interpolated into
+    /// `innerHTML` must be escaped. A transaction's `to` is attacker-chosen (the
+    /// protocol imposes no shape on it) and `short()` returns any string of ≤18
+    /// characters **verbatim**, so `${short(x)}` was a stored HTML injection: a
+    /// transfer to `<base href=//a.co>` re-pointed every relative fetch of anyone
+    /// browsing that block, including the explorer's own RPC calls. The escaped
+    /// form is `${esc(short(x))}`, which does not contain the pattern below.
+    #[test]
+    fn h7_explorer_never_interpolates_short_unescaped() {
+        assert!(
+            !EXPLORER_HTML.contains("${short("),
+            "unescaped short() interpolation in explorer.html — wrap it in esc()"
+        );
+    }
+
     #[tokio::test]
     async fn validateaddress_accepts_qta1_and_rejects_garbage() {
         let state = test_state().await;
