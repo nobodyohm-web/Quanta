@@ -127,9 +127,40 @@ pub(crate) async fn unlock_wallet(
             dbref
                 .save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce))
                 .await?;
+            // M4 (AUDIT-2026-07-25) — a brand-new identity invalidates quick unlock.
+            invalidate_biometric_wrap(dbref).await;
         }
     }
     Ok(id)
+}
+
+/// M4 — drop the Keychain KEK and the stored wrap.
+///
+/// Neither `create_wallet` nor `restore_wallet` used to do this, so the KEK and the
+/// on-disk wrap of the OLD identity's Argon2id-derived keys survived a new or
+/// restored wallet. `biometric_status` then reported `enabled: true`, the user
+/// tapped Touch ID, the OS happily returned the stale KEK, AES-GCM failed on the
+/// new vault blobs — and every attempt burned the brute-force backoff shared with
+/// password unlock. The scenario is exactly the one RECOVER-1 exists for: forgot
+/// the password, restore from the phrase.
+///
+/// Failures are logged, never fatal: an unusable Keychain must not make wallet
+/// creation fail, and the wrap row is what `biometric_status` actually reads.
+///
+/// # Why there is no unit test here
+/// The real path calls `delete_kek`, which operates on the **live macOS
+/// Keychain** — a test exercising it would delete the developer's own Touch ID
+/// KEK on every `cargo test` run. Testing only the DB half would assert nothing
+/// the type system does not already give us. Verified by review instead; the
+/// behaviour is a two-line reuse of `disable_biometric_unlock`, which is the
+/// same code path users already exercise from Settings.
+async fn invalidate_biometric_wrap(dbref: &crate::storage::db::Database) {
+    if let Err(e) = tokio::task::spawn_blocking(security::biometric::delete_kek).await {
+        log::warn!("◈ [Security] Keychain KEK non supprimé : {e}");
+    }
+    if let Err(e) = dbref.save_state(BIOMETRIC_WRAP_KEY, "").await {
+        log::warn!("◈ [Security] wrap biométrique non effacé : {e}");
+    }
 }
 
 /// RECOVER-1 — the wallet's **recovery phrase**: a 24-word BIP39 mnemonic of the
@@ -199,6 +230,10 @@ pub(crate) async fn restore_wallet(
     dbref
         .save_state(PQ_IDENTITY_KEY, &pq_identity_blob(&pq_pk, &pq_enc, &pq_nonce))
         .await?;
+    // M4 (AUDIT-2026-07-25) — the restored vault is encrypted under a NEW password,
+    // so the previous identity's Keychain KEK can only ever fail against it while
+    // reporting "enabled" and consuming the shared unlock backoff.
+    invalidate_biometric_wrap(dbref).await;
     Ok(id)
 }
 
