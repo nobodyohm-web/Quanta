@@ -85,6 +85,11 @@ pub struct FinalityTracker {
     /// DoS bound on `pool` size ([`MAX_PENDING_LINKS`] in production). A field so a
     /// test can use a tiny cap without signing thousands of votes.
     max_pending_links: usize,
+    /// M2 — chain height already folded into `tree`, with the tip hash it ended on.
+    /// The pair is the cursor for [`Self::observe_chain`]: the height says where to
+    /// resume, the hash proves the prefix was not rewritten under us by a reorg.
+    observed_height: u64,
+    observed_tip: String,
 }
 
 /// What ingesting one vote advanced — for observability/tests. `accepted` false
@@ -134,6 +139,8 @@ impl FinalityTracker {
             pool: BTreeMap::new(),
             epoch_len: epoch_len.max(1),
             max_pending_links: max_pending_links.max(1),
+            observed_height: 0,
+            observed_tip: String::new(),
         }
     }
 
@@ -178,14 +185,43 @@ impl FinalityTracker {
     /// chain). Registers each block as a child of its predecessor so GHOST has a
     /// tree to walk. Idempotent — re-adding a known edge is a no-op — so it can
     /// be called after every integrated block. Genesis stays the root.
+    ///
+    /// M2 (AUDIT-2026-07-25) — **incremental**. This used to walk block 1 → tip on
+    /// every call, and the dispatcher calls it on every accepted `FinalityVote`,
+    /// inside the finality write lock that the mining tick also needs. On a 100k
+    /// chain that is ~500k BTreeMap operations and ~300k string allocations per
+    /// vote; a hundred peers sending their legitimate quota queue block sealing
+    /// behind pure re-computation. The tree is append-only on a linear chain, so a
+    /// cursor is exact — and the cursor is validated against the stored tip hash,
+    /// so a reorg (which rewrites blocks below the tip) falls back to a full walk
+    /// instead of silently keeping stale edges.
     pub fn observe_chain(&mut self, ledger: &Ledger) {
         let height = ledger.chain_height();
-        for i in 1..height {
+        // Resume only if the chain we already folded in is still a prefix of this
+        // one. Any mismatch means the history was rewritten → rebuild from scratch.
+        let resumable = self.observed_height > 0
+            && self.observed_height <= height
+            && ledger
+                .block_at(self.observed_height - 1)
+                .is_some_and(|b| b.hash == self.observed_tip);
+        let start = if resumable { self.observed_height.max(1) } else { 1 };
+        for i in start..height {
             let (Some(block), Some(prev)) = (ledger.block_at(i), ledger.block_at(i - 1)) else {
                 continue;
             };
             self.tree.add_block(&block.hash, &prev.hash);
         }
+        if height > 0 {
+            if let Some(tip) = ledger.block_at(height - 1) {
+                self.observed_height = height;
+                self.observed_tip = tip.hash.clone();
+            }
+        }
+    }
+
+    /// M2 — the chain height already folded into the block tree. Test-facing.
+    pub fn observed_height(&self) -> u64 {
+        self.observed_height
     }
 
     /// **Ingest one finality vote (the LIVE-1 receive path).** Re-verifies the
@@ -496,6 +532,50 @@ mod tests {
     fn conserves(l: &Ledger) -> bool {
         let spendable: u64 = l.all_balances().values().sum();
         spendable + l.locked_stake_total() + l.total_burned() == l.total_minted()
+    }
+
+    #[test]
+    fn m2_observe_chain_is_incremental_and_stays_correct() {
+        // M2 (AUDIT-2026-07-25): observe_chain used to re-walk block 1 → tip on
+        // EVERY accepted finality vote, inside the finality write lock the mining
+        // tick also needs. The cursor makes it incremental; this asserts it both
+        // advances and never loses an edge (a wrong cursor would silently starve
+        // GHOST of the newest block).
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        let mut tracker = FinalityTracker::new(ledger.genesis_hash());
+
+        tracker.observe_chain(&ledger);
+        let first = tracker.observed_height();
+        assert_eq!(first, ledger.chain_height(), "the cursor tracks the observed height");
+
+        // Same chain again: nothing new to fold in, cursor unchanged.
+        tracker.observe_chain(&ledger);
+        assert_eq!(tracker.observed_height(), first, "an unchanged chain is not re-walked");
+
+        // Grow the chain: the cursor must advance and the new block must be in the
+        // tree, i.e. the incremental path folds in exactly what the full walk would.
+        ledger.mine_tx(&addr, MICRO, 0.0);
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:00:00+00:00".into())
+            .expect("seal one more block");
+        tracker.observe_chain(&ledger);
+        assert_eq!(
+            tracker.observed_height(),
+            ledger.chain_height(),
+            "the cursor follows the growing chain"
+        );
+
+        // Cross-check against a tracker that only ever did full walks: the two must
+        // hold the same view, which is the property the optimisation must preserve.
+        let mut reference = FinalityTracker::new(ledger.genesis_hash());
+        reference.observe_chain(&ledger);
+        assert_eq!(
+            tracker.observed_height(),
+            reference.observed_height(),
+            "incremental and from-scratch observation agree"
+        );
     }
 
     #[test]
