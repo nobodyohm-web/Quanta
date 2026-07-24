@@ -63,7 +63,7 @@ Toutes les méthodes : `POST /` JSON-RPC 2.0. Montants en **µQTA entiers**
 
 ```bash
 RPC=http://127.0.0.1:8645
-q() { curl -s -X POST "$RPC" -d "$1"; echo; }
+q() { curl -s -X POST "$RPC" -H 'Content-Type: application/json' -d "$1"; echo; }
 
 q '{"method":"listmethods"}'                                   # les 17 méthodes
 q '{"method":"getinfo"}'                                       # hauteur, supply, protocole (6)
@@ -75,12 +75,26 @@ q '{"method":"getbalance","params":{"address":"qta1…"}}'
 q '{"method":"listtransactions","params":{"address":"qta1…"}}' # scan de dépôts
 ```
 
-Nœud-wallet uniquement (pas en `--public`) :
+Nœud-wallet uniquement (pas en `--public`). Ces méthodes touchent des clés ou
+déplacent de l'argent : elles exigent le **jeton du cookie**, un `Content-Type:
+application/json` et une requête de même origine. Le jeton est écrit au démarrage
+dans `<data_dir>/.cookie` (permissions `0600`) et son chemin est affiché dans le
+journal du nœud.
+
 ```bash
-q '{"method":"getwalletinfo"}'
-q '{"method":"getnewaddress"}'
-q '{"method":"sendtoaddress","params":{"address":"qta1…","amount_uqta":1000000}}'
+COOKIE=$(cat "$HOME/Library/Application Support/quanta-protocol/.cookie")
+qa() { curl -s -X POST "$RPC" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $COOKIE" -d "$1"; echo; }
+
+qa '{"method":"getwalletinfo"}'
+qa '{"method":"getnewaddress"}'
+qa '{"method":"sendtoaddress","params":{"address":"qta1…","amount_uqta":1000000}}'
 ```
+
+> Sans ce garde, n'importe quelle page web ouverte sur la même machine pouvait
+> atteindre `sendtoaddress` par un simple `fetch()` — le bind sur `127.0.0.1`
+> écarte l'internet, pas le navigateur, qui est déjà local (C4, audit 2026-07-25).
 
 ---
 
