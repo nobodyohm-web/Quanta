@@ -457,12 +457,34 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
     }
 
+    // H1 (AUDIT-2026-07-25): the id must be the canonical digest of the SIGNED
+    // pre-image. It used to be a free-form String taken straight off the wire and
+    // nothing recomputed it, so an unauthenticated peer could choose arbitrary
+    // dedup keys — e.g. precompute the ids of the RequestChain messages every node
+    // emits and poison them in advance, censoring chain sync for free. Rejected
+    // here, before the LRU is touched.
+    if env.id != GossipRouter::envelope_id(&env.sender, env.nonce, &env.timestamp, &env.payload) {
+        log::warn!(
+            "◈ [Dispatch] ⚠ identifiant d'enveloppe non canonique from {} → drop",
+            short(&env.sender, 12)
+        );
+        return;
+    }
+
     // Anti-replay : si on a déjà vu cet ID, ignorer.
+    //
+    // H1: this is a READ-ONLY probe. The insertion moved below the signature gate,
+    // because inserting here let an unauthenticated peer fill the 100 K LRU with
+    // garbage and evict real message ids. The rate limiter could not slow that
+    // down — it runs after the signature check the attacker never reaches.
     {
-        let mut g = state.node.gossip.write().await;
-        if !g.mark_seen(&env.id) {
+        let g = state.node.gossip.read().await;
+        if g.has_seen(&env.id) {
             return;
         }
+    }
+    {
+        let mut g = state.node.gossip.write().await;
         g.stats.messages_received += 1;
         g.stats.bytes_received += raw.len() as u64;
     }
@@ -513,6 +535,13 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         .await;
         state.node.gossip.write().await.stats.peers_reported += 1;
         state.node.gossip.write().await.stats.dropped_signature += 1;
+        return;
+    }
+
+    // H1 (AUDIT-2026-07-25): NOW the id may enter the dedup LRU — the envelope is
+    // authenticated, so only a real signer can consume a slot. A `false` here means
+    // a concurrent task admitted the same envelope first; treat it as a duplicate.
+    if !state.node.gossip.write().await.mark_seen(&env.id) {
         return;
     }
 
@@ -1764,6 +1793,41 @@ mod tests {
         assert!(
             tracker.rate_counters.contains_key(&peer_key(&pk)),
             "a valid sender must be tracked for rate limiting"
+        );
+    }
+
+    /// H1 (AUDIT-2026-07-25): the dedup LRU was written at stage ④ while the
+    /// signature was only checked at stage ⑧, and `env.id` was a free-form String
+    /// nothing recomputed. So an unauthenticated peer could precompute the ids of
+    /// the RequestChain messages every node emits, poison them for free, and have
+    /// every genuine sync request silently dropped — censorship, no stake, no rate
+    /// limit (the limiter runs after the signature gate the attacker never reaches).
+    #[tokio::test]
+    async fn h1_forged_envelope_id_cannot_poison_the_dedup_lru() {
+        let state = test_app_state();
+        let mut signer = CryptoEngine::new();
+        signer.generate_pq_identity().expect("ml-dsa primary");
+        let pk = signer.pq_identity_hex().expect("ml-dsa primary");
+        let msg = GossipMessage::Ping { nonce: 7 };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let nonce = 1_u64;
+        let signable = GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
+        let sig = signer.sign_pq(&signable).unwrap();
+        let mut env =
+            GossipRouter::build_signed_envelope(pk.clone(), msg, nonce, ts, &sig).unwrap();
+
+        // The id an honest node WILL later use for its own chain request.
+        let victim_payload = GossipMessage::RequestChain { from_height: 0, max_blocks: 50 };
+        let victim_id =
+            GossipRouter::envelope_id("some-honest-peer", 9, "2026-07-25T00:00:00Z", &victim_payload);
+        env.id = victim_id.clone();
+        let raw = serde_json::to_vec(&env).unwrap();
+
+        dispatch_incoming(&state, &raw).await;
+
+        assert!(
+            !state.node.gossip.read().await.has_seen(&victim_id),
+            "a forged id must never reach the dedup LRU"
         );
     }
 

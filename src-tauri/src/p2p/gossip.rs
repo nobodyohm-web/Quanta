@@ -335,6 +335,13 @@ impl GossipRouter {
     /// Marque un message comme vu.
     /// Retourne `false` si le message était déjà connu (duplicate/replay).
     /// MOD-2: Evicts oldest entries when the seen set exceeds MAX_SEEN_MESSAGES.
+    /// H1 (AUDIT-2026-07-25) — read-only dedup probe. Lets the dispatcher shed
+    /// retransmits early WITHOUT inserting anything, so an unauthenticated peer can
+    /// no longer seed the LRU before its signature has been checked.
+    pub fn has_seen(&self, msg_id: &str) -> bool {
+        self.seen_messages.contains(msg_id)
+    }
+
     pub fn mark_seen(&mut self, msg_id: &str) -> bool {
         let is_new = self.seen_messages.insert(msg_id.to_string());
         if is_new {
@@ -421,6 +428,33 @@ impl GossipRouter {
     /// fields can be tampered with after signing.
     ///
     /// This is the ONLY function callers should use to produce signable data.
+    /// **H3 (AUDIT-2026-07-25) — the dedup identifier.**
+    ///
+    /// BLAKE3 over the exact bytes the signature covers (sender, nonce, timestamp,
+    /// payload). It used to be `BLAKE3(payload_json)` alone, excluding all three of
+    /// the fields the signature binds — so any two envelopes carrying a
+    /// byte-identical payload shared ONE dedup slot, network-wide and permanently
+    /// (the LRU is persisted in the gossip snapshot).
+    ///
+    /// `RequestChain{from_height, max_blocks}` and `Ping{nonce}`/`Pong{nonce}` are
+    /// exactly such payloads — no per-sender, per-attempt entropy. So the second
+    /// node to request the same chain range had its request silently dropped by
+    /// every peer that had already answered the first, and never synced.
+    ///
+    /// Binding the id to the full pre-image also closes H1: the id becomes a pure
+    /// function of signed material, so `validate_envelope_id` can reject a forged
+    /// one before it ever touches the dedup LRU. Anti-replay is unaffected — it is
+    /// carried by the per-sender monotonic nonce and the freshness window.
+    pub fn envelope_id(
+        sender: &str,
+        nonce: u64,
+        timestamp: &str,
+        payload: &GossipMessage,
+    ) -> String {
+        let full = Self::signable_envelope_bytes(sender, nonce, timestamp, payload);
+        hex::encode(blake3::hash(&full).as_bytes())
+    }
+
     pub fn signable_envelope_bytes(
         sender: &str,
         nonce: u64,
@@ -480,8 +514,9 @@ impl GossipRouter {
         timestamp: String,
         sig_bytes: &[u8],
     ) -> Result<GossipEnvelope, String> {
-        let payload_json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-        let id = hex::encode(blake3::hash(&payload_json).as_bytes());
+        // H3 (AUDIT-2026-07-25): the id is derived from the CANONICAL SIGNED
+        // PRE-IMAGE, not from the payload alone — see `envelope_id`.
+        let id = Self::envelope_id(&sender, nonce, &timestamp, &payload);
         Ok(GossipEnvelope {
             id,
             sender,
@@ -551,6 +586,41 @@ impl GossipRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h3_same_payload_from_two_senders_gets_distinct_ids() {
+        // H3 (AUDIT-2026-07-25): the id was BLAKE3(payload) alone, excluding
+        // sender, nonce and timestamp — all three of which the signature binds. So
+        // two nodes requesting the same chain range shared ONE dedup slot,
+        // network-wide and permanently (the LRU is persisted). The second node's
+        // RequestChain was silently dropped by every peer that had answered the
+        // first, and it never synced.
+        let payload = GossipMessage::RequestChain { from_height: 0, max_blocks: 50 };
+        let a = GossipRouter::envelope_id("sender-a", 1, "2026-07-25T00:00:00Z", &payload);
+        let b = GossipRouter::envelope_id("sender-b", 1, "2026-07-25T00:00:00Z", &payload);
+        assert_ne!(a, b, "the dedup key must bind the sender");
+
+        // Same sender retrying with a fresh nonce must also get a fresh slot.
+        let retry = GossipRouter::envelope_id("sender-a", 2, "2026-07-25T00:00:00Z", &payload);
+        assert_ne!(a, retry, "a retry must not collide with the original attempt");
+    }
+
+    #[test]
+    fn h3_envelope_id_is_the_canonical_signed_preimage_digest() {
+        // The id must be a pure function of the signed material, so a receiver can
+        // recompute it and refuse an attacker-chosen one (that is what closes H1).
+        let payload = GossipMessage::Ping { nonce: 7 };
+        let expected = hex::encode(
+            blake3::hash(&GossipRouter::signable_envelope_bytes(
+                "s", 3, "2026-07-25T00:00:00Z", &payload,
+            ))
+            .as_bytes(),
+        );
+        assert_eq!(
+            GossipRouter::envelope_id("s", 3, "2026-07-25T00:00:00Z", &payload),
+            expected
+        );
+    }
 
     #[test]
     fn mark_seen_deduplication() {
