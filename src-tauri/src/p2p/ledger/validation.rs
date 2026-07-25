@@ -344,11 +344,13 @@ impl Ledger {
     /// an uncovered spend (the FORK-CAP lesson: one check, on the shared
     /// validator). A `#[cfg(test)]` no-drift guard asserts this equals the live
     /// cache for a pending-free chain.
-    pub(super) fn onchain_spendable_before(&self, prev: &Block) -> HashMap<String, i128> {
+    pub(crate) fn onchain_spendable_before(&self, prev: &Block) -> HashMap<String, i128> {
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
         let mut bal: HashMap<String, i128> = HashMap::new();
         // pk → list of (amount, unlock_height) still locked in the unbonding pool.
-        let mut unbonding: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+        // H4: (amount, unlock_height, origin_tx_hash) — the hash lets a Slash
+        // consume exactly the entries its carried breakdown names.
+        let mut unbonding: HashMap<String, Vec<(u64, u64, String)>> = HashMap::new();
         for block in self.chain.iter().filter(|b| b.index <= prev.index) {
             for tx in &block.transactions {
                 if matches!(tx.tx_type, TxType::Unstake) {
@@ -357,13 +359,36 @@ impl Ledger {
                     unbonding.entry(tx.from.clone()).or_default().push((
                         tx.amount,
                         block.index.saturating_add(UNBONDING_PERIOD_BLOCKS),
+                        tx.hash.clone(),
                     ));
                     continue;
                 }
                 // LIVE-3: a Slash destroys locked stake (STAKE sink → burned); it has
                 // NO spendable effect, so it must not debit the offender's spendable
-                // here (mirrors `cache_apply_tx`, which touches only the sink). Skip.
+                // balance here.
+                //
+                // H4 (AUDIT-2026-07-25): it used to `continue` outright, which was
+                // wrong twice. (1) `cache_apply_tx` debits the STAKE sink by
+                // `tx.amount`; skipping left the replay's sink permanently higher
+                // than the live one. (2) LIVE-3B slashes DESTROY unbonding entries,
+                // and `apply_block_stake_effects` removes them so they never mature —
+                // but the replay kept them and credited the offender at
+                // `unlock_height` with coins the chain had already burned. Since this
+                // map seeds COVER-1/COVER-2 on every admission path, every node
+                // agreed those phantom coins were spendable.
                 if matches!(tx.tx_type, TxType::Slash) {
+                    *bal.entry(Self::STAKE_SINK.to_string()).or_insert(0) -= tx.amount as i128;
+                    if let Some(consumed) = &tx.slash_unbonding {
+                        if let Some(list) = unbonding.get_mut(&tx.from) {
+                            for c in consumed {
+                                if let Some(e) = list.iter_mut().find(|e| e.2 == c.tx_hash) {
+                                    e.0 = e.0.saturating_sub(c.amount);
+                                }
+                            }
+                            list.retain(|e| e.0 > 0);
+                        }
+                        unbonding.retain(|_, v| !v.is_empty());
+                    }
                     continue;
                 }
                 if !synthetic(&tx.to) {
@@ -377,7 +402,7 @@ impl Ledger {
             let height = block.index;
             let mut matured: Vec<(String, u64)> = Vec::new();
             for (pk, entries) in unbonding.iter_mut() {
-                entries.retain(|(amount, unlock)| {
+                entries.retain(|(amount, unlock, _)| {
                     if *unlock <= height {
                         matured.push((pk.clone(), *amount));
                         false

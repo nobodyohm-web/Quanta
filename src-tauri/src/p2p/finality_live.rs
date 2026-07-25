@@ -1076,6 +1076,58 @@ mod tests {
     }
 
     #[test]
+    fn h4_coverage_replay_consumes_slashed_unbonding() {
+        // H4 (AUDIT-2026-07-25): `onchain_spendable_before` — the single seed of the
+        // COVER-1/COVER-2 rule on EVERY admission path — rebuilt the unbonding pool
+        // from Unstake txs and matured it height by height, but skipped `Slash`
+        // entirely (`continue`). LIVE-3B slashes DESTROY unbonding entries, and the
+        // live path removes them, so the replay kept entries the chain had burned
+        // and would credit them back at maturation. Two views of one chain,
+        // permanently disagreeing — on the very map that decides what is spendable.
+        //
+        // The existing no-drift guard (cover1_onchain_replay_matches_live_cache)
+        // walks mine/transfer/burn/stake/unstake — no Slash — which is exactly why
+        // this survived.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-25T00:00:00+00:00".into(), true)
+            .expect("full unstake");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:01:00+00:00".into())
+            .expect("seal the unstake");
+        assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "coins in flight");
+
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        ledger.queue_slash(&proof).expect("an unbonding offender is slashable");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:02:00+00:00".into())
+            .expect("seal the slash");
+        assert_eq!(ledger.unbonding_of(&addr), 0, "the chain destroyed the entry");
+        assert_eq!(ledger.pending_count(), 0, "cache is chain-only");
+
+        let tip = ledger.block_at(ledger.chain_height() - 1).unwrap().clone();
+        let replay = ledger.onchain_spendable_before(&tip);
+        let stake_sink = replay.get(Ledger::STAKE_SINK).copied().unwrap_or(0);
+
+        // Everything the offender had locked was destroyed: bonded 0, unbonding 0,
+        // so the replayed STAKE sink must be 0 too. Skipping the Slash left the
+        // 5 QTA sitting there, still scheduled to mature into spendable coins.
+        assert_eq!(
+            ledger.staked_of(&addr) + ledger.unbonding_of(&addr),
+            0,
+            "the chain holds nothing locked for the offender"
+        );
+        assert_eq!(
+            stake_sink, 0,
+            "the coverage replay must consume what the slash destroyed — otherwise \
+             burned coins mature back into spendable balance on every node"
+        );
+    }
+
+    #[test]
     fn live3b_mixed_bonded_and_unbonding_slash_consumes_both() {
         // Partial unstake: 3 QTA still bonded, 2 QTA unbonding. The slash destroys
         // BOTH compartments (bonded first, then the entry), total = 5.
