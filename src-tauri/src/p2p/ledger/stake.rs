@@ -50,15 +50,25 @@ impl Ledger {
                 }
                 TxType::Unstake => {
                     let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
-                    *bonded = bonded.saturating_sub(tx.amount);
+                    // C3 (AUDIT-2026-07-25): the unbonding entry may never exceed
+                    // what was actually bonded. `validate_block_against_prev` now
+                    // rejects an over-unstake outright, but the apply path used
+                    // `tx.amount` verbatim while debiting with `saturating_sub` —
+                    // so a single missed check anywhere fabricated stake that
+                    // matured into spendable coins. Clamping here makes the apply
+                    // path structurally unable to create value, whatever reaches it.
+                    let moved = tx.amount.min(*bonded);
+                    *bonded = bonded.saturating_sub(moved);
                     if *bonded == 0 {
                         self.staked.remove(&tx.from);
                     }
-                    self.unbonding.entry(tx.from.clone()).or_default().push(UnbondEntry {
-                        amount: tx.amount,
-                        unlock_height: block.index.saturating_add(UNBONDING_PERIOD_BLOCKS),
-                        tx_hash: tx.hash.clone(),
-                    });
+                    if moved > 0 {
+                        self.unbonding.entry(tx.from.clone()).or_default().push(UnbondEntry {
+                            amount: moved,
+                            unlock_height: block.index.saturating_add(UNBONDING_PERIOD_BLOCKS),
+                            tx_hash: tx.hash.clone(),
+                        });
+                    }
                 }
                 // LIVE-3: a Slash **destroys** the offender's stake — NO unbonding
                 // entry created, NO spendable credit (the coins are burned). The

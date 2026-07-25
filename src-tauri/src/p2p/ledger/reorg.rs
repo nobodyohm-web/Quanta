@@ -84,10 +84,18 @@ impl Ledger {
         // stays valid by construction and an honest leader is never rejected by
         // its peers.
         let bad_synthetic = Self::illegal_synthetic_indices(&candidate, miner);
+        // C3 (AUDIT-2026-07-25, COVER-2 symmetry): exclude any Unstake exceeding the
+        // sender's bonded stake as of the parent — the same rule the shared
+        // validator now rejects with. `validator_stakes()` is the live bonded map,
+        // which at seal time is exactly the as-of-parent state (this block is not
+        // applied yet).
+        let bonded_before_seal = self.validator_stakes();
+        let overdrawn = Self::overdrawn_unstake_indices(&bonded_before_seal, &candidate);
         let txs = if uncovered.is_empty()
             && unbound.is_empty()
             && bad_slashes.is_empty()
             && bad_synthetic.is_empty()
+            && overdrawn.is_empty()
         {
             candidate
         } else {
@@ -96,6 +104,7 @@ impl Ledger {
                 .chain(unbound)
                 .chain(bad_slashes)
                 .chain(bad_synthetic)
+                .chain(overdrawn)
                 .collect();
             let mut kept = Vec::with_capacity(candidate.len());
             for (i, tx) in candidate.into_iter().enumerate() {

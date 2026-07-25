@@ -617,6 +617,19 @@ impl Ledger {
                 short(&tx.from, 12)
             ));
         }
+        // C3 (AUDIT-2026-07-25): an Unstake is exempt from spendable coverage, so
+        // without this rule nothing anywhere checked it against the bonded stake —
+        // and the fabricated unbonding entry matured into real spendable coins.
+        let overdrawn = Self::overdrawn_unstake_indices(bonded_before, &block.transactions);
+        if let Some(&i) = overdrawn.first() {
+            let tx = &block.transactions[i];
+            return Err(format!(
+                "bloc rejeté : tx {} — retrait de {} µQTA supérieur à l'enjeu bondé de {} (C3)",
+                i,
+                tx.amount,
+                short(&tx.from, 12)
+            ));
+        }
         for tx in &block.transactions {
             if !Self::verify_tx(tx)? {
                 return Err(format!(
@@ -691,6 +704,64 @@ impl Ledger {
     /// ([`Self::seal_block_at`]) EXCLUDES exactly these txs to build a
     /// valid-by-construction block (COVER-2). One rule ⇒ a self-sealed block always
     /// passes validation.
+    /// **C3 (AUDIT-2026-07-25) — an `Unstake` may not exceed the bonded stake.**
+    ///
+    /// `uncovered_tx_indices` exempts `Unstake` — correctly, since it moves bonded
+    /// stake rather than spendable balance — and *nothing else* checked the amount.
+    /// The only bonded-amount guard lived in `unstake_tx_at`, i.e. in the local
+    /// builder, which a modified node does not run. A validly-signed `Unstake` from
+    /// an account with zero bonded stake therefore propagated, got sealed by an
+    /// honest leader (COVER-2 did not exclude it either), and
+    /// `apply_block_stake_effects` created an unbonding entry for the full amount.
+    /// `UNBONDING_PERIOD_BLOCKS` later it matured into spendable coins that were
+    /// never minted, while `locked_stake_total()`'s `.max(0)` clamp hid the
+    /// negative STAKE sink and `onchain_spendable_before` replayed the same
+    /// permissive logic — so COVER-1 on every node agreed the phantom coins were
+    /// real.
+    ///
+    /// Sequential over a running bonded map seeded from `bonded_before` (the
+    /// as-of-parent stake PROPOSER-1 already computes and passes in), so a `Stake`
+    /// earlier in the same block counts, exactly like COVER credits intra-block
+    /// income. `Slash` shrinks the running bond so a later `Unstake` cannot draw on
+    /// stake the same block just burned.
+    pub(super) fn overdrawn_unstake_indices(
+        bonded_before: &HashMap<String, u64>,
+        txs: &[Transaction],
+    ) -> Vec<usize> {
+        let mut running: HashMap<String, u64> = bonded_before.clone();
+        let mut bad = Vec::new();
+        for (i, tx) in txs.iter().enumerate() {
+            match tx.tx_type {
+                TxType::Stake => {
+                    let e = running.entry(tx.from.clone()).or_insert(0);
+                    *e = e.saturating_add(tx.amount);
+                }
+                TxType::Unstake => {
+                    let have = running.get(&tx.from).copied().unwrap_or(0);
+                    if tx.amount > have {
+                        bad.push(i);
+                        continue; // rejected/excluded → do NOT move the running bond
+                    }
+                    let e = running.entry(tx.from.clone()).or_insert(0);
+                    *e = e.saturating_sub(tx.amount);
+                }
+                TxType::Slash => {
+                    // LIVE-3B: the slash consumes bonded stake first, then unbonding
+                    // entries. Only the bonded portion affects what a later Unstake
+                    // in this block may draw on; the exact split is re-verified by
+                    // `verify_block_slashes`.
+                    let consumed_unbonding: u64 =
+                        tx.slash_unbonding.iter().flatten().map(|e| e.amount).sum();
+                    let bonded_take = tx.amount.saturating_sub(consumed_unbonding);
+                    let e = running.entry(tx.from.clone()).or_insert(0);
+                    *e = e.saturating_sub(bonded_take);
+                }
+                _ => {}
+            }
+        }
+        bad
+    }
+
     /// **C2 (AUDIT-2026-07-25) — confine synthetic senders to the one place they
     /// are legitimate.**
     ///

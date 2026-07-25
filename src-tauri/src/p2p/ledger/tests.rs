@@ -1833,6 +1833,91 @@
         panic!("could not forge a block with hash above the threshold");
     }
 
+    /// **C3 (AUDIT-2026-07-25) — an `Unstake` beyond the bonded stake fabricates
+    /// coins.**
+    ///
+    /// `uncovered_tx_indices` exempts `Unstake` ("no spendable debit to cover" —
+    /// true), and nothing else ever checked `tx.amount <= bonded[tx.from]`. The
+    /// only bonded-amount guard lives in `unstake_tx_at`, the *local builder*,
+    /// which a modified node simply does not run. The signature is genuine (the
+    /// attacker signs for its own account), so the rejection must come from the
+    /// bonded rule, not from crypto.
+    ///
+    /// Left open, `apply_block_stake_effects` pushed an unbonding entry for the
+    /// full amount, which matured ~2 weeks of blocks later into spendable coins
+    /// that were never minted — while `locked_stake_total()`'s `.max(0)` clamp
+    /// quietly hid the negative STAKE sink.
+    #[test]
+    fn c3_overdrawn_unstake_block_is_rejected() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+        assert_eq!(l.staked_of(&alice), 0, "alice bonded nothing");
+
+        let evil = l
+            .build_signed_tx_at(
+                &alice,
+                Ledger::STAKE_SINK,
+                10_000 * MICRO,
+                TxType::Unstake,
+                &crypto_a,
+                "2026-07-25T00:00:00+00:00".into(),
+                false,
+            )
+            .expect("an over-unstake still produces a valid signature");
+        let block = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2026-07-25T00:00:01+00:00",
+            &alice,
+            vec![evil],
+        );
+
+        let err = l
+            .integrate_remote_block(block)
+            .expect_err("an unstake exceeding bonded stake must be rejected");
+        assert!(err.contains("enjeu bondé"), "rejected on the bonded rule, got: {err}");
+        assert_eq!(l.chain_height(), 2, "the chain did not grow");
+        assert_eq!(l.balance_of(&alice), 10 * MICRO, "no phantom coins");
+    }
+
+    /// **C3 — a legitimate `Stake` then `Unstake` in the SAME block stays valid.**
+    /// The rule walks the block sequentially over a running bonded map, exactly
+    /// like COVER does for spendable balance, so an earlier `Stake` counts.
+    #[test]
+    fn c3_sequential_stake_then_unstake_in_one_block_is_accepted() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let stake = l
+            .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Stake,
+                &crypto_a, "2026-07-25T00:00:00+00:00".into(), false)
+            .expect("stake tx");
+        let unstake = l
+            .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Unstake,
+                &crypto_a, "2026-07-25T00:00:01+00:00".into(), false)
+            .expect("unstake tx");
+        let block = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2026-07-25T00:00:02+00:00",
+            &alice,
+            vec![stake, unstake],
+        );
+
+        l.integrate_remote_block(block)
+            .expect("staking then unstaking the same amount in one block is legal");
+    }
+
     /// **C2 (AUDIT-2026-07-25) — a synthetic sender must not be able to mint.**
     ///
     /// Three guards protect money creation and a `Transfer` from `"NETWORK"` passed
