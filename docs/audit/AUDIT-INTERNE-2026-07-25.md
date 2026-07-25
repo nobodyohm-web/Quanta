@@ -10,6 +10,41 @@ ici. Les découvertes hors fan-out (§7) sont de la même main.
 
 ---
 
+## 0. État des corrections (mis à jour le 2026-07-25)
+
+Tout ce qui suit a été corrigé, chaque correctif accompagné d'un test qui échouait
+avant lui. Suite finale : **473 tests + 1 intégration deux-nœuds**, clippy
+`--all-targets` silencieux, svelte-check 0/0.
+
+| Constat | État | Commit |
+|---|---|---|
+| C1 auto-équivocation du validateur | **fermé** | `58b4696` |
+| C2 émission illimitée par expéditeur synthétique | **fermé** | `ba89597` |
+| C3 `Unstake` non borné par l'enjeu bondé | **fermé** | `7f3dfa0` |
+| C4 RPC monnaie sans authentification | **fermé** | `cd1a969` |
+| H1 + H3 identifiant d'enveloppe / dedup avant signature | **fermé** | `5b3accb` |
+| H2 halt de finalité par éviction inversée | **fermé** | `e5eb5ba` |
+| H4 relecture de couverture ignorant les slashes | **fermé** | `f09b90d` |
+| H5 tampon de réconciliation épinglable | **fermé** | `3b33413` |
+| H6 cartes de pairs non bornées | **fermé** | `ab9d4ee` |
+| H7 injection HTML dans l'explorateur | **fermé** | `716b05c` |
+| H8 annulation de bloc non-inverse | **fermé** | `0d93c19` |
+| M1 délais et plafonds RPC | **fermé** | `cd1a969` |
+| M2 arbre de blocs reconstruit à chaque vote | **fermé** | `540ebd7` |
+| M3 inventaire cryptographique mensonger | **fermé** | `441b47f` |
+| M4 Touch ID survivant à une restauration | **fermé** (sans test — voir §5) | `93fe20f` |
+
+Les changements de règle d'admission (C2, C3, H2, H1/H3) sont groupés derrière
+`TORUS_PROTOCOL_VERSION` 6→7 : un nœud v6 et un nœud v7 n'acceptent pas le même
+ensemble de blocs et d'enveloppes.
+
+**Reste ouvert et le demeure explicitement** : les onze constats moyens jamais passés
+au filtre adversarial, les onze de l'annexe — dont la phrase BIP39 jamais zeroizée —
+les trois points hors fan-out du §7, et l'intégralité des angles morts du §8. Rien de
+tout cela n'a été touché.
+
+---
+
 ## 1. Verdict
 
 Le noyau est sain et l'ingénierie est réelle : 449 tests passent sans une seule exception, clippy

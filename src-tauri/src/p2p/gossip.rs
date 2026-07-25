@@ -58,7 +58,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// byte-identical (no new `Transaction` wire field — the authority rides the existing
 /// optional fields), so genesis and all prior history are UNCHANGED; v5↔v6 nodes only
 /// diverge once a multisig tx is sealed.
-pub const TORUS_PROTOCOL_VERSION: u8 = 6;
+/// **6→7 (AUDIT-2026-07-25) — remediation hard fork.** Four admission rules
+/// changed, so a v6 node and a v7 node do not accept the same set of blocks and
+/// envelopes:
+/// - **C2** — a synthetic sender (`NETWORK`/`ESCROW`) is confined to the single
+///   legitimate coinbase. v6 accepts an unsigned `Transfer` from `NETWORK` that
+///   mints without limit; v7 rejects the block.
+/// - **C3** — an `Unstake` is checked against the sender's bonded stake as of the
+///   parent. v6 accepts one for any amount and matures it into spendable coins.
+/// - **H2** — a vote attesting an epoch beyond the chain's own is refused before
+///   pooling, so the pool's eviction order is no longer attacker-chosen.
+/// - **H1/H3** — the gossip envelope id is the BLAKE3 of the canonical **signed**
+///   pre-image (sender ‖ nonce ‖ timestamp ‖ payload), and a non-canonical id is
+///   rejected. v6 computes `BLAKE3(payload)` alone, so every v6 envelope now fails
+///   the id check on a v7 node.
+///
+/// Genesis is untouched by these rules, but the wire and validation surfaces are
+/// incompatible, hence the bump.
+pub const TORUS_PROTOCOL_VERSION: u8 = 7;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 

@@ -48,13 +48,17 @@ Identity:      PublishUsername
 ① Size guard (10 MB)
 ② JSON → GossipEnvelope
 ③ Ban check
-④ Dedup (seen_messages LRU 100K)
-⑤ Timestamp (±90s)
-⑥ Rate limit (30/min/peer)
-⑦ Nonce (monotone per sender)
-⑧ Ed25519 signature verify
-⑨ Handler dispatch
+④ Envelope-id canonique (H1) — id == BLAKE3(pré-image signée), sinon drop
+⑤ Sonde dedup EN LECTURE (seen_messages LRU 100K) — n'insère rien
+⑥ Timestamp (±90s)
+⑦ Signature ML-DSA-65 (PQ-ENVELOPE-1)
+⑧ Insertion dedup — APRÈS authentification (H1)
+⑨ Rate limit adaptatif + nonce monotone par expéditeur
+⑩ Handler dispatch
 ```
+> **H1 (audit 2026-07-25)** : l'insertion dedup était en ④, la signature en ⑧.
+> Un pair non authentifié pouvait donc empoisonner le LRU avec des identifiants
+> choisis et censurer la synchronisation de chaîne gratuitement.
 
 ## State stores (WillowNode)
 ```
