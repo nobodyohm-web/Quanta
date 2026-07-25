@@ -1833,6 +1833,52 @@
         panic!("could not forge a block with hash above the threshold");
     }
 
+    /// **H8 (AUDIT-2026-07-25) — reverting a block must be the exact inverse of
+    /// applying it.**
+    ///
+    /// `revert_block_stake_effects` iterated the block's transactions FORWARD, like
+    /// the apply path. The per-tx operations do not commute (`saturating_sub` plus
+    /// the collapse-to-zero that removes the key), so with a `Stake` and an
+    /// `Unstake` from the same account in one block, revert-forward did not undo
+    /// apply-forward: it left fabricated bonded stake behind — i.e. consensus
+    /// weight — after any reorg over that block. Both reorg paths call it.
+    #[test]
+    fn h8_revert_block_stake_effects_is_the_exact_inverse() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let stake = l
+            .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Stake,
+                &crypto_a, "2026-07-25T00:00:00+00:00".into(), false)
+            .expect("stake tx");
+        let unstake = l
+            .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Unstake,
+                &crypto_a, "2026-07-25T00:00:01+00:00".into(), false)
+            .expect("unstake tx");
+        let block = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2026-07-25T00:00:02+00:00",
+            &alice,
+            vec![stake, unstake],
+        );
+
+        let bonded_before = l.validator_stakes();
+        l.apply_block_stake_effects(&block);
+        l.revert_block_stake_effects(&block);
+        assert_eq!(
+            l.validator_stakes(),
+            bonded_before,
+            "apply then revert must be the identity — otherwise a reorg mints consensus weight"
+        );
+        assert_eq!(l.staked_of(&alice), 0, "no bonded stake was fabricated");
+    }
+
     /// **C3 (AUDIT-2026-07-25) — an `Unstake` beyond the bonded stake fabricates
     /// coins.**
     ///

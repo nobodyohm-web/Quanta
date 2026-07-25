@@ -148,7 +148,13 @@ impl Ledger {
     /// resolution here is single-block (≤1 deep) and `UNBONDING_PERIOD_BLOCKS ≫ 1`,
     /// so no reorg can ever span an unbonding maturation.
     pub(super) fn revert_block_stake_effects(&mut self, block: &Block) {
-        for tx in &block.transactions {
+        // H8 (AUDIT-2026-07-25): iterate in REVERSE. The per-tx operations are not
+        // commutative — `saturating_sub` plus the collapse-to-zero that removes the
+        // key — so undoing forward does not invert applying forward when one block
+        // holds both a Stake and an Unstake for the same account. Both reorg paths
+        // (the 1-block tie-break and `pop_above`) call this, so the forward walk
+        // left fabricated bonded stake, i.e. consensus weight, after a reorg.
+        for tx in block.transactions.iter().rev() {
             match tx.tx_type {
                 TxType::Stake => {
                     let bonded = self.staked.entry(tx.from.clone()).or_insert(0);
