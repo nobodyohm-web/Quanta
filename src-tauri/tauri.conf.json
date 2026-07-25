@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; connect-src 'self' https://github.com https://api.github.com"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; connect-src 'self' https://github.com https://api.github.com"
     }
   },
   "bundle": {
@@ -43,7 +43,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyNDExMzA2QkU5MjBDRTcKUldUbkRKSytCaE5CNGtVUGNTS2hRUFZydWw0OTZzOTFjNTFEdGZOaytjMkJDS1JtcXk1bkhIeUIK",
       "endpoints": [
-        "https://github.com/nobodyohm-web/Torus/releases/latest/download/latest.json"
+        "https://github.com/nobodyohm-web/Quanta/releases/latest/download/latest.json"
       ]
     }
   }

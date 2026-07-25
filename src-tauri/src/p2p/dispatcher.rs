@@ -1403,7 +1403,9 @@ async fn fork_heal_offer_and_resolve(
 
 /// Maximum blocks we'll send in a single ChainSegment response (DoS
 /// protection).
-const MAX_CHAIN_SEGMENT: u64 = 50;
+// AUDIT-2026-07-25: was an independent literal that could drift from
+// MAX_CHAIN_SEGMENT_RECEIVED — one DoS cap, one source of truth.
+const MAX_CHAIN_SEGMENT: u64 = MAX_CHAIN_SEGMENT_RECEIVED as u64;
 
 /// Handle a RequestChain message — send back blocks starting at `from_height`.
 async fn handle_request_chain(

@@ -38,10 +38,30 @@ Les changements de règle d'admission (C2, C3, H2, H1/H3) sont groupés derrièr
 `TORUS_PROTOCOL_VERSION` 6→7 : un nœud v6 et un nœud v7 n'acceptent pas le même
 ensemble de blocs et d'enveloppes.
 
+**Vague 2 (2026-07-25, hors périmètre du fan-out).** Traités ensuite : le déclencheur
+`issue_comment` de `claude-review.yml` restreint aux `OWNER`/`MEMBER`/`COLLABORATOR`
+et rétrogradé en `contents: read` (c'était une *pwn request* ouverte sur un dépôt
+public) ; `permissions: contents: read` explicite sur la CI ; `libsql` sans features
+par défaut (**8 → 4** avis RUSTSEC, cf. rectificatif §2) ; `npm audit fix` (la haute
+`postcss` corrigée, restent 3 basses qu'on refuse de payer par un retour à
+SvelteKit 0.0.30) ; endpoint de mise à jour et métadonnées repointés de `Torus` vers
+`Quanta` ; origines Google Fonts retirées de la CSP ; **phrase BIP39 désormais
+zeroizée** (feature `zeroize` de la caisse, `ZeroizeOnDrop` sur `Mnemonic`) ;
+`cipher::decrypt` ne panique plus sur un nonce malformé et respecte son contrat
+d'erreur opaque ; `getmultisigaddress` rejette un seuil hors bornes au lieu de le
+tronquer ; `MAX_CHAIN_SEGMENT` dérivé d'une source unique ; règle projet du thème
+alignée sur le mode sombre réellement livré.
+
+**Tentative écartée, sciemment.** Retirer `script-src 'unsafe-inline'` de la CSP a
+été essayé puis **annulé** : le HTML produit par `adapter-static` contient des
+scripts d'amorçage inline, donc la directive stricte empêche l'application de
+démarrer. Une CSP stricte demanderait des nonces ou des hashes côté SvelteKit —
+c'est une contrainte de la chaîne de build, pas un oubli, et elle reste ouverte.
+
 **Reste ouvert et le demeure explicitement** : les onze constats moyens jamais passés
-au filtre adversarial, les onze de l'annexe — dont la phrase BIP39 jamais zeroizée —
-les trois points hors fan-out du §7, et l'intégralité des angles morts du §8. Rien de
-tout cela n'a été touché.
+au filtre adversarial, le reste de l'annexe, et l'intégralité des angles morts du §8
+— au premier rang desquels `username.rs` et `sm/node.rs`, que personne n'a lus, et
+l'absence de tout invariant de vivacité. Aucun audit externe n'a eu lieu.
 
 ---
 
@@ -79,12 +99,22 @@ injecte du HTML non échappé. Le consensus a reçu neuf ADR et cinq vagues d'au
 Les huit vulnérabilités Rust sont toutes transitives, aucune dans le code Quanta. Leur composition
 mérite pourtant un regard : **quatre sont dans `rustls-webpki 0.102.8`** — panic atteignable au
 parsing de CRL, contraintes de noms acceptées à tort sur des wildcards et des URI, CRL mal
-rattachées à leur point de distribution. C'est le chemin TLS du transport QUIC, celui-là même
-durci en PQ-TRANSPORT-1. Deux touchent `quick-xml` (allocation non bornée, temps quadratique),
-deux `hickory` (boucle non bornée sur validation NSEC3, encodage O(n²)). `CLAUDE.md` annonçait
-« 8 vulns transitives évaluées » en v3.11 : le compte est identique mais les identifiants RUSTSEC
-sont datés de mars à juin 2026 — **ce ne sont pas les mêmes huit**, et l'évaluation documentée
-porte donc sur un jeu périmé.
+rattachées à leur point de distribution. Deux touchent `quick-xml` (allocation non bornée, temps
+quadratique), deux `hickory` (boucle non bornée sur validation NSEC3, encodage O(n²)). `CLAUDE.md`
+annonçait « 8 vulns transitives évaluées » en v3.11 : le compte est identique mais les identifiants
+RUSTSEC sont datés de mars à juin 2026 — **ce ne sont pas les mêmes huit**, et l'évaluation
+documentée portait donc sur un jeu périmé.
+
+> **Rectificatif (2026-07-25, après lecture de l'arbre de dépendances).** La première rédaction de
+> ce paragraphe affirmait que les quatre avis `rustls-webpki` touchaient « le chemin TLS du
+> transport QUIC, celui-là même durci en PQ-TRANSPORT-1 ». **C'était faux**, et c'est l'erreur la
+> plus significative de ce rapport. `cargo tree` montre qu'iroh tire `rustls-webpki 0.103.13`,
+> la version corrigée ; la 0.102.8 vulnérable venait de `libsql` via `hyper-rustls`, donc de sa
+> pile HTTP distante — jamais exercée, la base étant ouverte en `Builder::new_local`. Le transport
+> post-quantique n'a jamais été concerné. Passer `libsql` en
+> `default-features = false, features = ["core"]` retire cette pile morte : le compte tombe de
+> **8 à 4**. Les quatre restantes viennent toutes d'iroh — `quick-xml` par la lecture de
+> configuration réseau macOS, `hickory` par le résolveur DNS — dette amont, non actionnable ici.
 
 Côté npm, la haute est `postcss` (lecture de fichier arbitraire via `sourceMappingURL`), corrigeable
 sans casse par `npm audit fix`. Les trois basses viennent de `cookie` tiré par `@sveltejs/kit` et

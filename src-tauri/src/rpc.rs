@@ -502,7 +502,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .ok_or((-32602, "missing 'pubkeys' array".to_string()))?;
-            let threshold = param_u64(params, "threshold")? as u32;
+            // AUDIT-2026-07-25: `as u32` truncates silently — a threshold of
+            // 2^32+1 became 1, returning a VALID address for a policy the caller
+            // never asked for (a 1-of-N where they wanted more). Reject instead.
+            let threshold_raw = param_u64(params, "threshold")?;
+            let threshold = u32::try_from(threshold_raw)
+                .map_err(|_| (-32602, "threshold out of range".to_string()))?;
             let canon = crate::security::canonicalize_msig_keys(&pubkeys)
                 .ok_or((-32602, "invalid pubkeys (each must be a valid ML-DSA-65 public key)".to_string()))?;
             if threshold == 0 || threshold as usize > canon.len() {

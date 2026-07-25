@@ -7,12 +7,22 @@ on:
 
 jobs:
   review:
+    # AUDIT-2026-07-25 — `issue_comment` runs in the BASE repo context, with the
+    # repo's secrets, and this is a public repository. Without an author check,
+    # anyone commenting "@claude" on any issue triggered a job holding write
+    # permission — the classic pwn-request shape. Restrict the comment trigger to
+    # people who already have write access to the repo.
     if: |
       github.event_name == 'pull_request' ||
-      contains(github.event.comment.body, '@claude')
+      (contains(github.event.comment.body, '@claude') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                github.event.comment.author_association))
     runs-on: ubuntu-latest
+    # A review reads code and writes comments. It never needs to write to the
+    # repository itself, so `contents` drops to read: even a compromised run
+    # cannot push to a branch.
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
     steps:

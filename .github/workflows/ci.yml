@@ -5,6 +5,11 @@ on:
   pull_request:
     branches: [main]
 
+# AUDIT-2026-07-25 — least privilege, stated explicitly rather than inherited
+# from the repository default: CI only builds and tests, it never writes.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

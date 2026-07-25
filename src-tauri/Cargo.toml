@@ -85,7 +85,11 @@ argon2 = "0.5"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # ─── Database (libSQL — SQLite + F32_BLOB vectors) ───
-libsql = "0.9"
+# AUDIT-2026-07-25 — the database is opened with `Builder::new_local`, so the
+# remote/replication stack (hyper-rustls -> rustls 0.22 -> rustls-webpki 0.102)
+# is compiled but never exercised. Dropping default features removes four
+# RUSTSEC advisories from the tree that only ever applied to dead code.
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 
 # ─── Random ───
 rand = "0.8"
@@ -96,7 +100,11 @@ base64 = "0.22"
 # BIP39 mnemonic (RECOVER-1): the 32-byte ML-DSA fund seed ⇄ a 24-word recovery
 # phrase — the industry-standard wallet backup, far more robust to transcribe than
 # 64 hex chars. `default-features = false` + `std` keeps only the English wordlist.
-bip39 = { version = "2", default-features = false, features = ["std"] }
+# AUDIT-2026-07-25 — the 24-word phrase IS the fund-controlling secret
+# (RECOVER-1). Without the `zeroize` feature the `Mnemonic` kept the words
+# in memory after use, so the one secret that can move every coin outlived
+# its scope. The feature derives Zeroize + ZeroizeOnDrop on Mnemonic.
+bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }
 
 # ─── Identifiers ───
 uuid = { version = "1", features = ["v4"] }
