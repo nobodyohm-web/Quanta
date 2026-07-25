@@ -231,6 +231,12 @@ async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
     let (finalized, floor) = {
         let ledger = state.node.ledger.read().await;
         let mut fin = state.node.finality.write().await;
+        // C1 (AUDIT-2026-07-25): commit the vote to the slashing-protection memo
+        // BEFORE anything else can run. Recorded even if the broadcast below fails
+        // — that is the correct behaviour: having signed this vote, we must never
+        // sign a different one for the same target epoch, whether or not anyone
+        // received it.
+        fin.remember_cast(&vote);
         let out = fin.ingest_vote(vote.clone(), &ledger);
         (out.finalized, fin.finalized_floor())
     };

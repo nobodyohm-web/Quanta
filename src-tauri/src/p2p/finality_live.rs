@@ -85,6 +85,18 @@ pub struct FinalityTracker {
     /// DoS bound on `pool` size ([`MAX_PENDING_LINKS`] in production). A field so a
     /// test can use a tiny cap without signing thousands of votes.
     max_pending_links: usize,
+    /// C1 (AUDIT-2026-07-25) — **slashing-protection memo**: for each target epoch,
+    /// the exact vote this node already signed.
+    ///
+    /// Without it, `build_vote_to_cast` re-derived `(source, target)` from live
+    /// state on every 60 s tick with only a `target.height <= source.height` guard,
+    /// so an equal-height tie-break reorg at a boundary (a normal outcome of PoS
+    /// leader fallback) or a late certificate advancing `justified` made an honest
+    /// validator emit two DIFFERENT votes for one target epoch — a `DoubleVote`
+    /// that every peer can prove and that burns 100 % of its bonded + unbonding
+    /// stake. This is the standard Ethereum-client anti-slashing DB; without it the
+    /// client is its own attacker.
+    cast_memo: BTreeMap<u64, Vote>,
     /// M2 — chain height already folded into `tree`, with the tip hash it ended on.
     /// The pair is the cursor for [`Self::observe_chain`]: the height says where to
     /// resume, the hash proves the prefix was not rewritten under us by a reorg.
@@ -139,6 +151,7 @@ impl FinalityTracker {
             pool: BTreeMap::new(),
             epoch_len: epoch_len.max(1),
             max_pending_links: max_pending_links.max(1),
+            cast_memo: BTreeMap::new(),
             observed_height: 0,
             observed_tip: String::new(),
         }
@@ -222,6 +235,32 @@ impl FinalityTracker {
     /// M2 — the chain height already folded into the block tree. Test-facing.
     pub fn observed_height(&self) -> u64 {
         self.observed_height
+    }
+
+    /// C1 — record the vote this node just cast, so no later tick can sign a
+    /// different one for the same target epoch. Call it right after the vote is
+    /// broadcast (and self-ingested), on the same tracker lock.
+    pub fn remember_cast(&mut self, vote: &Vote) {
+        self.cast_memo.insert(vote.target.epoch, vote.clone());
+    }
+
+    /// C1 — the vote already cast for `epoch`, if any.
+    pub fn cast_for_epoch(&self, epoch: u64) -> Option<&Vote> {
+        self.cast_memo.get(&epoch)
+    }
+
+    /// C1 — restore the memo from a snapshot. A protection DB a restart forgets
+    /// protects nothing: a node rebooting at an epoch boundary would re-derive and
+    /// possibly equivocate against the vote it cast before the restart.
+    pub fn restore_cast_memo(&mut self, votes: Vec<Vote>) {
+        for v in votes {
+            self.cast_memo.insert(v.target.epoch, v);
+        }
+    }
+
+    /// C1 — the memo's votes, for persistence.
+    pub fn cast_memo_votes(&self) -> Vec<Vote> {
+        self.cast_memo.values().cloned().collect()
     }
 
     /// **Ingest one finality vote (the LIVE-1 receive path).** Re-verifies the
@@ -408,6 +447,30 @@ pub fn build_vote_to_cast(
         });
     if target.height <= source.height {
         return None;
+    }
+
+    // C1 (AUDIT-2026-07-25) — slashing protection. Everything above is derived
+    // from LIVE state, so between two 60 s ticks the target's hash can change at a
+    // fixed height (equal-height lexicographic tie-break at a boundary) or the
+    // source can advance (a late certificate completing a link). Either produces a
+    // second, DIFFERENT vote for the SAME target epoch, which `detect_fault`
+    // classifies as a DoubleVote — a valid, gossipable proof that burns this
+    // node's entire bonded + unbonding stake.
+    //
+    // So: for a target epoch already voted, re-emit that exact vote or nothing.
+    // Re-emitting the identical vote is safe (`detect_fault` short-circuits on an
+    // identical link) and keeps liveness when a broadcast was lost.
+    if let Some(prior) = tracker.cast_for_epoch(target.epoch) {
+        return if prior.source == source && prior.target == target {
+            Some(prior.clone())
+        } else {
+            log::warn!(
+                "◈ [Finality] C1: refus de voter une seconde fois pour l'époque {} \
+                 (l'état a changé sous nous — un second vote serait une auto-équivocation)",
+                target.epoch
+            );
+            None
+        };
     }
 
     // Construct the unsigned vote, then sign its OWN canonical bytes
@@ -1073,6 +1136,76 @@ mod tests {
         assert_eq!(receiver.unbonding_of(&addr), 0, "receiver destroyed the same entry");
         assert_eq!(receiver.total_burned(), 5 * MICRO);
         assert!(conserves(&receiver), "receiver conserves identically");
+    }
+
+    /// C1 (AUDIT-2026-07-25) — a bonded validator sitting exactly on an epoch
+    /// boundary, at a small epoch length so we need not seal 32 blocks.
+    fn validator_at_epoch_boundary() -> (Ledger, CryptoEngine, FinalityTracker) {
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        // staked_ledger leaves us at height 2 (tip index 1); seal one more so the
+        // tip index is 2 — a boundary for epoch_len = 2.
+        ledger.mine_tx(&addr, MICRO, 0.0);
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:05:00+00:00".into())
+            .expect("seal to reach the boundary");
+        let tracker = FinalityTracker::with_epoch_len(ledger.genesis_hash(), 2);
+        (ledger, a, tracker)
+    }
+
+    #[test]
+    fn c1_cast_never_signs_two_different_votes_for_one_epoch() {
+        // C1: `build_vote_to_cast` runs on EVERY 60s mining tick (not just seal
+        // ticks) and re-derives (source, target) from live state, guarded only by
+        // `target.height <= source.height`. Nothing recorded "I already voted for
+        // epoch N". So an equal-height tie-break reorg at a boundary — an expected
+        // outcome of PoS leader fallback — or a late certificate advancing
+        // `justified` made an HONEST validator sign a second, different vote for
+        // the same target epoch. `detect_fault` calls that a DoubleVote, every peer
+        // gossips a cryptographically valid proof, and the penalty is a full burn
+        // of bonded + unbonding stake. No adversary required; an adversary can
+        // induce it cheaply.
+        let (ledger, crypto, mut tracker) = validator_at_epoch_boundary();
+
+        let first = build_vote_to_cast(&ledger, &tracker, &crypto)
+            .expect("a bonded validator at an epoch boundary votes");
+        tracker.remember_cast(&first);
+
+        // Re-emitting the IDENTICAL vote is safe (detect_fault short-circuits on an
+        // identical link) and must still be allowed — losing it would cost liveness.
+        let again = build_vote_to_cast(&ledger, &tracker, &crypto)
+            .expect("the same vote may be re-emitted");
+        assert_eq!(again.target, first.target, "same target");
+        assert_eq!(again.source, first.source, "same source");
+
+        // Now the dangerous case: the memo holds a DIFFERENT vote for this epoch,
+        // which is exactly what a boundary reorg produces (same height, new hash).
+        let mut rewritten = first.clone();
+        rewritten.target.hash = "ff".repeat(32);
+        let mut tracker2 = FinalityTracker::with_epoch_len(ledger.genesis_hash(), 2);
+        tracker2.remember_cast(&rewritten);
+        assert!(
+            build_vote_to_cast(&ledger, &tracker2, &crypto).is_none(),
+            "a second, DIFFERENT vote for target epoch {} would be self-slashing",
+            first.target.epoch
+        );
+    }
+
+    #[test]
+    fn c1_memo_does_not_freeze_later_epochs() {
+        // The guard must not cost liveness: a strictly later epoch is still votable.
+        let (ledger, crypto, mut tracker) = validator_at_epoch_boundary();
+        let first = build_vote_to_cast(&ledger, &tracker, &crypto).expect("first vote");
+        tracker.remember_cast(&first);
+        assert!(
+            tracker.cast_for_epoch(first.target.epoch).is_some(),
+            "the memo records the epoch just cast"
+        );
+        assert!(
+            tracker.cast_for_epoch(first.target.epoch + 1).is_none(),
+            "a later epoch is untouched and remains votable"
+        );
     }
 
     #[test]
