@@ -1016,7 +1016,7 @@
         let pk = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
         let to = "d".repeat(64);
 
         let evil = sign_tx_with_nonce(&crypto, &pk, &to, 5 * MICRO, u64::MAX);
@@ -1082,7 +1082,7 @@
         let pk = gen_addr(&mut crypto);
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
         let to = "d".repeat(64);
         let tx = ledger.transfer_tx(&pk, &to, 10 * MICRO, &crypto).unwrap();
         assert!(Ledger::verify_tx(&tx).unwrap(), "a freshly-signed tx verifies (nonce in the pre-image)");
@@ -1831,6 +1831,91 @@
             }
         }
         panic!("could not forge a block with hash above the threshold");
+    }
+
+    /// **C2 (AUDIT-2026-07-25) — a synthetic sender must not be able to mint.**
+    ///
+    /// Three guards protect money creation and a `Transfer` from `"NETWORK"` passed
+    /// all three: `verify_tx` returns `Ok(true)` unconditionally for synthetic
+    /// senders, `uncovered_tx_indices` skips the coverage debit for them, and
+    /// `validate_block_emission_against` only sums `TxType::Mining` — then returns
+    /// `Ok(())` early when that total is zero. EMIT-1 filters on `Mining` too, so
+    /// it never sees the tx either. The block needs no signature at all.
+    ///
+    /// Note every adversarial synthetic test in this file forges the tx as
+    /// `Mining`; none tried `Transfer`, which is exactly why this survived.
+    #[test]
+    fn c2_synthetic_transfer_block_is_rejected() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+        let minted_before = l.stats().total_mined;
+
+        // 100M QUANTA out of thin air, unsigned, from the synthetic sender.
+        let evil = l.build_unsigned_tx("NETWORK", &alice, 100_000_000 * MICRO, TxType::Transfer);
+        let block = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2026-07-25T00:00:01+00:00",
+            &alice,
+            vec![evil],
+        );
+
+        let err = l
+            .integrate_remote_block(block)
+            .expect_err("a synthetic-sender Transfer must be rejected");
+        assert!(err.contains("synthétique"), "rejected as synthetic, got: {err}");
+        assert_eq!(l.balance_of(&alice), 10 * MICRO, "no coins were minted");
+        assert_eq!(l.stats().total_mined, minted_before, "supply is untouched");
+        assert_eq!(l.chain_height(), 2, "the chain did not grow");
+    }
+
+    /// **C2 — an `ESCROW` sender is never legal in a sealed block.**
+    /// `escrow_release_to` has no caller outside tests, so the sound rule is the
+    /// strict one. `sim.rs` already proves an unbacked ESCROW release breaks
+    /// conservation — but only the simulation's invariant checker caught it, never
+    /// a consensus rule.
+    #[test]
+    fn c2_synthetic_escrow_sender_is_rejected() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let evil = l.build_unsigned_tx("ESCROW", &alice, 42 * MICRO, TxType::Transfer);
+        let block = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2026-07-25T00:00:02+00:00",
+            &alice,
+            vec![evil],
+        );
+        assert!(
+            l.integrate_remote_block(block).is_err(),
+            "ESCROW may never be a sender in a sealed block"
+        );
+    }
+
+    /// **C2 — the legitimate coinbase must still pass.** A rule that rejects the
+    /// one synthetic tx the protocol needs would halt the chain, so this guards
+    /// the guard.
+    #[test]
+    fn c2_legitimate_coinbase_still_seals_and_integrates() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 10 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        assert_eq!(l.chain_height(), 2, "the coinbase path is unaffected");
+        assert_eq!(l.balance_of(&alice), 10 * MICRO);
     }
 
     /// **COVER-1 §6.1 — an uncovered transfer makes the block INVALID.** Alice

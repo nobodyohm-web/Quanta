@@ -78,11 +78,25 @@ impl Ledger {
         // `verify_block_slashes` rejects a received block with — so a self-sealed block
         // is slash-valid by construction and peers never reject the honest leader's block.
         let bad_slashes = self.invalid_slash_indices(&candidate);
-        let txs = if uncovered.is_empty() && unbound.is_empty() && bad_slashes.is_empty() {
+        // C2 (AUDIT-2026-07-25, COVER-2 symmetry): exclude any tx from a synthetic
+        // sender that is not the one legitimate coinbase — the same rule
+        // `validate_block_against_prev` now rejects with, so a self-sealed block
+        // stays valid by construction and an honest leader is never rejected by
+        // its peers.
+        let bad_synthetic = Self::illegal_synthetic_indices(&candidate, miner);
+        let txs = if uncovered.is_empty()
+            && unbound.is_empty()
+            && bad_slashes.is_empty()
+            && bad_synthetic.is_empty()
+        {
             candidate
         } else {
-            let drop_idx: HashSet<usize> =
-                uncovered.into_iter().chain(unbound).chain(bad_slashes).collect();
+            let drop_idx: HashSet<usize> = uncovered
+                .into_iter()
+                .chain(unbound)
+                .chain(bad_slashes)
+                .chain(bad_synthetic)
+                .collect();
             let mut kept = Vec::with_capacity(candidate.len());
             for (i, tx) in candidate.into_iter().enumerate() {
                 if drop_idx.contains(&i) {

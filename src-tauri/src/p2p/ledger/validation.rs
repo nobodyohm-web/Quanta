@@ -603,6 +603,20 @@ impl Ledger {
                 );
             }
         }
+        // C2 (AUDIT-2026-07-25): a synthetic sender skips both signature AND
+        // coverage, so it must be confined to the single legitimate coinbase —
+        // otherwise a `Transfer` from "NETWORK" mints without limit, invisible to
+        // the emission bound (which only sums `Mining`). Checked BEFORE
+        // `verify_tx`, which is precisely the guard that waves synthetics through.
+        let illegal_synth = Self::illegal_synthetic_indices(&block.transactions, &block.miner);
+        if let Some(&i) = illegal_synth.first() {
+            let tx = &block.transactions[i];
+            return Err(format!(
+                "bloc rejeté : tx {} — expéditeur synthétique {} hors de la coinbase (C2)",
+                i,
+                short(&tx.from, 12)
+            ));
+        }
         for tx in &block.transactions {
             if !Self::verify_tx(tx)? {
                 return Err(format!(
@@ -677,6 +691,44 @@ impl Ledger {
     /// ([`Self::seal_block_at`]) EXCLUDES exactly these txs to build a
     /// valid-by-construction block (COVER-2). One rule ⇒ a self-sealed block always
     /// passes validation.
+    /// **C2 (AUDIT-2026-07-25) — confine synthetic senders to the one place they
+    /// are legitimate.**
+    ///
+    /// A synthetic sender (`NETWORK`, `ESCROW`) is exempt from signature
+    /// verification ([`Self::verify_tx`]) *and* from coverage
+    /// ([`Self::uncovered_tx_indices`]) — it is supposed to originate inside the
+    /// node. But the emission guards only ever looked at `TxType::Mining`:
+    /// `validate_block_emission_against` sums Mining amounts and returns early when
+    /// that total is zero, and the EMIT-1 coinbase rule filters on Mining as well.
+    /// So a `Transfer` (or `Stake`, or `Burn`) whose `from` is `"NETWORK"` was
+    /// unsigned, uncovered **and** invisible to the 100M hard cap: free money that
+    /// every honest node accepted, and that `stats().total_mined` never counted, so
+    /// the supply views kept reporting the honest figure.
+    ///
+    /// The rule: `NETWORK` may appear as a sender only as the single `Mining`
+    /// coinbase credited to the block's own sealer — the tx EMIT-1 and the emission
+    /// bound already police. `ESCROW` may never be a sender in a sealed block
+    /// (`escrow_release_to` has no caller outside tests).
+    ///
+    /// Returned as indices, not a bool, so the same function drives *both* sides:
+    /// the validator rejects (C2-receive) and the sealer excludes (C2-produce),
+    /// which is the COVER-1/COVER-2 symmetry that keeps produce and receive from
+    /// ever disagreeing.
+    pub(super) fn illegal_synthetic_indices(txs: &[Transaction], miner: &str) -> Vec<usize> {
+        let mut bad = Vec::new();
+        for (i, tx) in txs.iter().enumerate() {
+            if !Self::is_synthetic_sender(&tx.from) {
+                continue;
+            }
+            let legal_coinbase =
+                tx.tx_type == TxType::Mining && tx.from == "NETWORK" && tx.to == miner;
+            if !legal_coinbase {
+                bad.push(i);
+            }
+        }
+        bad
+    }
+
     pub(super) fn uncovered_tx_indices(
         onchain_before: &HashMap<String, i128>,
         txs: &[Transaction],

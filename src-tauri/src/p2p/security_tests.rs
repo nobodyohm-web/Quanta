@@ -31,7 +31,7 @@ mod security_tests {
         let _id = crypto.generate_keypair();
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, amount_uqta, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
         (ledger, crypto)
     }
 
@@ -57,7 +57,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "b".repeat(64);
 
@@ -80,7 +80,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 50 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "c".repeat(64);
 
@@ -140,7 +140,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "d".repeat(64);
 
@@ -176,7 +176,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         // Nonce should start at 0
         assert_eq!(ledger.get_nonce(pk), 0);
@@ -243,7 +243,7 @@ mod security_tests {
         let mut ledger = Ledger::new();
         // Give a huge but finite balance: 1M QUANTA = 10^6 * 10^6 = 10^12 µQTA
         ledger.mine_tx(pk, 1_000_000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "f".repeat(64);
 
@@ -261,7 +261,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 10 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "a".repeat(64);
 
@@ -369,7 +369,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let result = ledger.transfer_tx(pk, pk, 10 * MICRO, &crypto);
         assert!(result.is_err(),
@@ -387,7 +387,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "b".repeat(64);
 
@@ -407,7 +407,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 1000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let supply_before = ledger.total_supply();
 
@@ -587,7 +587,7 @@ mod security_tests {
         let pk = "a".repeat(64);
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
 
         // Expected nonce starts at 0
         assert_eq!(ledger.get_nonce(&pk), 0, "Initial nonce should be 0");
@@ -664,7 +664,7 @@ mod property_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 50 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
 
         let to = "z".repeat(64);
 
@@ -730,7 +730,7 @@ mod property_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 1000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
 
         let supply_before = ledger.total_supply();
         let burned_before = ledger.total_burned();
@@ -1066,7 +1066,7 @@ mod property_tests {
         let pk = id.public_key_hex.clone();
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 1_000_000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
         (ledger, crypto, pk)
     }
 
