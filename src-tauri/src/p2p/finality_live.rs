@@ -327,6 +327,21 @@ impl FinalityTracker {
             return outcome; // stale — observed for fork-choice, but not pooled
         }
 
+        // H2 (AUDIT-2026-07-25): bound the attested epoch against the chain. A vote
+        // can never legitimately attest an epoch our chain has not reached — and
+        // `link_well_formed` only checks internal consistency (multiple of E,
+        // ordered), never the epoch itself. Unbounded, the epoch is the attacker's
+        // handle on where their link sorts in the pool. A generous slack keeps a
+        // node that is a few epochs behind from discarding votes it will soon need.
+        const EPOCH_SLACK: u64 = 4;
+        let chain_epoch = epoch_of_height(
+            ledger.chain_height().saturating_sub(1),
+            self.epoch_len,
+        );
+        if vote.target.epoch > chain_epoch.saturating_add(EPOCH_SLACK) {
+            return outcome; // observed for fork-choice, never pooled
+        }
+
         let link: Link = (vote.source.clone(), vote.target.clone());
         let entry = self.pool.entry(link.clone()).or_default();
         // De-dup a validator's repeat vote for the SAME link (idempotent gossip);
@@ -349,12 +364,28 @@ impl FinalityTracker {
             }
         }
 
-        // Hard cap (bound #2): evict the lowest-key (stalest) links until under cap.
+        // Hard cap (bound #2). H2 (AUDIT-2026-07-25): evict by ARRIVAL ORDER, not
+        // by BTreeMap key. `Link` starts with the source `Checkpoint`, ordered on
+        // (epoch, height, hash), and the epoch is attacker-chosen — nothing bounded
+        // it against the chain. So absurd high-epoch links sorted above every
+        // honest one and survived, while the honest current-epoch link (lowest key)
+        // was evicted on every insertion. The ⅔ certificate could then never
+        // assemble: one validator bonding 1 µQTA halted finality network-wide.
         while self.pool.len() > self.max_pending_links {
-            let Some(oldest) = self.pool.keys().next().cloned() else {
-                break;
-            };
-            self.pool.remove(&oldest);
+            // Evict the link whose target epoch is FURTHEST from the chain's own
+            // epoch — the one least likely to ever certify. Arrival order would be
+            // wrong here: the honest link is typically the oldest in the pool.
+            // Ties break on the link itself, keeping eviction deterministic across
+            // nodes (two nodes with the same pool evict the same entry).
+            let victim = self
+                .pool
+                .keys()
+                .max_by_key(|(_, target)| {
+                    (chain_epoch.abs_diff(target.epoch), (*target).clone())
+                })
+                .cloned();
+            let Some(victim) = victim else { break };
+            self.pool.remove(&victim);
         }
         outcome
     }
@@ -867,6 +898,66 @@ mod tests {
             tracker.pending_links() <= CAP,
             "the pool stays bounded under a vote flood (got {})",
             tracker.pending_links(),
+        );
+    }
+
+    #[test]
+    fn h2_absurd_target_epoch_is_refused() {
+        // H2 (AUDIT-2026-07-25): `Vote::link_well_formed` only checks that the
+        // heights are epoch multiples and ordered — NOTHING bounded the epoch
+        // against the chain's actual height. Since the pool is a BTreeMap keyed by
+        // (epoch, height, hash), an attacker-chosen astronomic epoch sorted ABOVE
+        // every honest link and survived eviction, while the honest one — lowest
+        // key, i.e. current epoch — was always the one dropped.
+        let a = identity(1);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let mut tracker = FinalityTracker::new(ledger.genesis_hash());
+        let g = cp(0, ledger.genesis_hash().as_str());
+        let absurd = cp(u64::MAX / (E * 4), "far-future");
+        let v = signed_vote(&a, &g, &absurd);
+        let out = tracker.ingest_vote(v, &ledger);
+        assert!(
+            !out.accepted,
+            "a vote attesting an epoch the chain cannot have reached must be refused"
+        );
+        assert_eq!(tracker.pending_links(), 0, "and it must not occupy the pool");
+    }
+
+    #[test]
+    fn h2_flood_cannot_evict_the_honest_link_and_halt_finality() {
+        // H2: the real damage is not memory, it is LIVENESS. Eviction dropped the
+        // lowest BTreeMap key — the honest, current-epoch link — so each honest
+        // vote was inserted and then immediately evicted by the next flood vote,
+        // and the ⅔ certificate could never assemble. One validator bonding
+        // 1 µQTA could halt finality network-wide, permanently.
+        //
+        // Here: two equal-stake validators. A votes the honest link, a flood
+        // follows, then B votes the SAME link. If the link survived, the two votes
+        // form a certificate and finality advances. If it was evicted, B's vote
+        // starts a fresh entry alone and nothing justifies.
+        let a = identity(1);
+        let b = identity(2);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO), (&b, 5 * MICRO)]);
+        const CAP: usize = 4;
+        let mut tracker = FinalityTracker::with_caps(ledger.genesis_hash(), E, CAP);
+        let g = cp(0, ledger.genesis_hash().as_str());
+        let honest = cp(1, "honest-target");
+
+        assert!(tracker.ingest_vote(signed_vote(&a, &g, &honest), &ledger).accepted);
+
+        // Flood with distinct links, all within the epoch bound so they are valid.
+        for i in 0..(CAP * 4) {
+            let target = cp(2, &format!("flood-{i}"));
+            let v = signed_vote(&a, &g, &target);
+            tracker.ingest_vote(v, &ledger);
+        }
+        assert!(tracker.pending_links() <= CAP, "the cap still holds");
+
+        let out = tracker.ingest_vote(signed_vote(&b, &g, &honest), &ledger);
+        assert!(
+            out.justified,
+            "the honest link must survive the flood so its ⅔ certificate can form — \
+             otherwise one cheap validator halts finality for everyone"
         );
     }
 
