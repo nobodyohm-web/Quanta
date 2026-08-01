@@ -1,6 +1,6 @@
 ---
 type: moc
-updated: 2026-07-12
+updated: 2026-08-01
 ---
 
 # 🧭 Pilotage QUANTA
@@ -16,10 +16,10 @@ Antigravity. Tape `[[` pour lier ; renomme librement, les liens se réparent.
 ## 🗺️ Carte du projet
 - **Cap & spec** — [[CLAUDE]] (north star, stack, invariants)
 - **Méthode** — [[QUANTA_AGENT_CONSTITUTION]] (Phase 0 d'abord ; règle d'arrêt §4 : on **n'invente pas** un arbitrage consensus/sécurité)
-- **Phase 0 (en cours)** — [[QUANTA_T0_DST_HARNESS]] (harness déterministe T0.1→T0.8)
+- **Phase 0 (close, hors T0.3 additif)** — [[QUANTA_T0_DST_HARNESS]] (harness déterministe T0.1→T0.8)
 - **Journal vivant** — [[AUDIT_QUANTA_2_PROGRESS]] (état réel, tests, auto-revues §3)
 - **Backlog clos** — [[QUANTA_PATCH_CORRECTIONS]] (C1→C8 ✅)
-- **Consensus (futur)** — [[DESIGN-CONSENSUS-DAG-BFT]] (umbrella) · [[DESIGN-FINALITY-GADGET]] (Phase 1 — gadget Casper FFG, PQ, par époque ; *implémenté GADGET-1→5B, prouvé en simulation ; gossip des votes câblé (LIVE-1), reste LIVE-2/3*) · [[DESIGN-LIVE-WIRING]] (câblage du gadget en vivant — LIVE-1/2/3 ; *proposé* — gadget **prouvé en simulation**, reste l'**intégration IO**)
+- **Consensus (futur)** — [[DESIGN-CONSENSUS-DAG-BFT]] (umbrella) · [[DESIGN-FINALITY-GADGET]] (Phase 1 — gadget Casper FFG, PQ, par époque ; *implémenté GADGET-1→5B, prouvé en simulation ; **câblage vivant complet LIVE-1→4***) · [[DESIGN-LIVE-WIRING]] (câblage du gadget en vivant — **LIVE-1→4 + 3B livrés**)
 - **Rareté** — [[TOKENOMICS_V2]]
 - **Cap produit** — [[ROADMAP_WEB3]] · [[BRAND_AND_TRUST]]
 - **Sécurité** — [[SECURITY]] · [[SECURITY_POC_V2]]
@@ -41,7 +41,11 @@ Antigravity. Tape `[[` pour lier ; renomme librement, les liens se réparent.
 - **PQ-MIG-1→5** ✅ — identité de compte entièrement ML-DSA (adresse `BLAKE3(ADDR_DOMAIN‖clé)`), autorité de tx pur ML-DSA-65, genèse post-quantique ; `TORUS_PROTOCOL_VERSION` 2→3.
 - **ADR-005→009** ✅ — agrégation PQ des votes ; §12 figé (E=32, quorum ⅔, unbonding 10 080, slash brûlé/plein) ; ADR-006 ratifiée, ADR-007 réalisée, ADR-008 reversé.
 - **LIVE-1 (câblage vivant)** ✅ — gossip des votes de finalité (`FinalityVote` + dispatcher + `FinalityTracker`), les votes peuplent `LatestVotes`/`FinalityState` du ledger vivant — **379 tests**.
-- **Reste** — LIVE-2 (proposition finalité-consciente) + LIVE-3 (slashing vivant STAKE→BURN) ; T0.3 (coquille prod) additif. Slashing détecté en simulation (GADGET-4) ; reste son câblage sur le ledger réel.
+- **LIVE-2/3/3B/4 (câblage vivant complet)** ✅ — plancher de finalité persisté qu'aucun fork ne franchit ; slashing vivant STAKE→BURN atteignant l'enjeu en déverrouillage (« unstake-and-run » fermé) ; réconciliation de fork profonde (deux partitions ≥2 blocs convergent).
+- **Écosystème de nœud** ✅ — daemon `quanta-node` headless, JSON-RPC 17 méthodes (authentifié), explorateur web, adresses `qta1…` Bech32m, multisig M-of-N ML-DSA (MSIG-1) ; protocole 5→6.
+- **Audit interne v3.13 + hard-fork v7** ✅ (25/07/2026) — 4 critiques, 8 hauts, 4 moyens fermés → [[AUDIT-INTERNE-2026-07-25]].
+- **Nettoyage v3.13.1** ✅ (01/08/2026) — code mort et dépendances jamais importées purgés ; 477 tests + 1 intégration, clippy propre, svelte-check 0/0.
+- **Reste** — audit externe (dossier prêt, non commandé) ; testnet multi-nœuds durable ; notarisation macOS + release à jour ; ADR-004 (VRF+VDF) ; UX multi-partie du multisig ; T0.3 (coquille prod) additif.
 
 ## 🔀 Décisions d'architecture — état
 Le simulateur va **forcer** ces choix. Cadrées en ADR → [[docs/decisions/README|Registre des décisions]].
@@ -54,7 +58,7 @@ linéaire + vote BFT qui finalise), **stake on-chain seul** pour le comité.
 |---|---|---|
 | Validator set & comité | [[ADR-002 — Validator set & comité BFT]] | ✅ **ACCEPTÉE** — stake on-chain seul |
 | Fork-choice | [[ADR-001 — Fork-choice]] | ✅ résolu — gadget + fork-choice GHOST pondéré stake (GADGET-5A/5B) |
-| Slashing | [[ADR-003 — Slashing (accountable safety)]] | ✅ tranchée — slashing d'équivocation implémenté (GADGET-4) ; politique fixée par ADR-009 (brûlé/plein/fenêtre=unbonding) ; reste le câblage vivant (LIVE-3) |
+| Slashing | [[ADR-003 — Slashing (accountable safety)]] | ✅ tranchée — slashing d'équivocation implémenté (GADGET-4) ; politique fixée par ADR-009 (brûlé/plein/fenêtre=unbonding) ; **câblé en vivant (LIVE-3/3B)** |
 | Aléa d'élection | [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]] | OUVERTE — beacon OK P1 ; ECVRF/VDF→P2 (sauf si tu veux + tôt) |
 | Signatures (agrégation votes) | [[ADR-005 — Agrégation des votes & certificats de finalité]] | ✅ **ACCEPTÉE** — PQ pur (ML-DSA) par époque ; comité/quorum/époque fixés par ADR-009 (E=32, quorum ⅔ gravé, pas de comité échantillonné) |
 | Gouvernance & évolutivité | [[ADR-006 — Gouvernance & évolutivité]] | ✅ RATIFIÉE — par ADR-009 |
@@ -74,7 +78,9 @@ linéaire + vote BFT qui finalise), **stake on-chain seul** pour le comité.
 - **Mémoire** — Claude tient une mémoire persistante du projet (faits non dérivables du code) ; ce hub en est la version humaine, navigable.
 
 ## ▶️ Prochaine action
-Câbler le gadget en vivant — **LIVE-2** (proposition finalité-consciente : le
-proposeur bâtit sur `ghost_head` ancré finalité au lieu de `chain.last()`), puis
-**LIVE-3** (slashing vivant STAKE→BURN sur le ledger réel). Voir
-[[DESIGN-LIVE-WIRING]]. LIVE-1 (gossip des votes) est fait.
+Le code n'est plus le goulot. Dans l'ordre : **(1)** commander l'**audit externe**
+(dossier prêt dans [[docs/audit/README|docs/audit]] — threat model, périmètre, RFQ) ;
+**(2)** faire tourner un **testnet multi-nœuds durable** sur la genèse actuelle — l'échelle
+réelle n'a jamais dépassé deux machines ; **(3)** notarisation macOS + pipeline de release
+signé, la dernière release publiée datant de mai 2026. Ensuite seulement : ADR-004 (vrai VRF
++ VDF) et l'UX multi-partie du multisig.

@@ -1,7 +1,8 @@
 # Politique de sécurité — Quanta Protocol
 
-> Statut : **alpha, non audité par un tiers.** P2P vérifié entre deux machines
-> physiques. N'engagez pas de valeur réelle que vous ne pouvez pas perdre.
+> Statut : **alpha, non audité par un tiers.** Le réseau n'a jamais tourné au-delà
+> de deux machines physiques. N'engagez pas de valeur réelle que vous ne pouvez
+> pas perdre.
 
 ## Signaler une vulnérabilité
 
@@ -16,75 +17,107 @@ qu'un correctif soit disponible. Réponse visée sous 7 jours.
 
 ## Versions supportées
 
-| Version | Supportée |
-|---------|-----------|
-| 3.3.x   | ✅        |
-| < 3.3   | ❌        |
+| Version | Protocole | Supportée |
+|---------|-----------|-----------|
+| 3.13.x  | TORUS v7  | ✅        |
+| < 3.13  | v1 → v6   | ❌ — le protocole a rompu sept fois ; les versions antérieures ne parlent plus au réseau |
 
 ## Posture cryptographique
 
 | Usage | Primitive |
 |-------|-----------|
-| Signatures (transactions) | **Hybride Ed25519 + ML-DSA-65** (NIST FIPS 204) |
-| Signatures (enveloppes gossip) | Ed25519 (transport éphémère, déjà sous QUIC/TLS) |
+| Signatures (transactions — l'argent) | **ML-DSA-65 pur** (NIST FIPS 204, crate `fips204`) |
+| Signatures (votes de finalité) | **ML-DSA-65** |
+| Signatures (enveloppes gossip) | **ML-DSA-65** |
+| Échange de clés du transport | **X25519MLKEM768** (hybride PQ, rustls + aws-lc-rs) |
+| Identité de nœud (NodeId Iroh) | Ed25519 — **classique**, voir « Limites connues » |
 | Chiffrement au repos (vault) | AES-256-GCM |
 | Dérivation de clé (mot de passe) | Argon2id (64 MiB, 3 itérations, parallélisme 4) |
 | Hachage / content-addressing | BLAKE3 |
 | Transport | Iroh (QUIC, TLS 1.3) |
 
-**Frontière post-quantique.** La couche **valeur** (transactions du ledger) est
-signée en hybride Ed25519+ML-DSA-65 : forger une signature exige de casser *les
-deux* schémas. La clé ML-DSA est dérivée déterministiquement de la graine
-Ed25519 (XOF BLAKE3) — aucune matière secrète supplémentaire persistée. Les
-enveloppes gossip restent en Ed25519 : ce sont des messages éphémères (fenêtre
-de fraîcheur ±90 s) déjà protégés par QUIC/TLS ; un adversaire quantique futur
-ne peut pas rejouer une enveloppe vieille de 90 secondes.
+**Frontière post-quantique.** Il n'y a **plus de schéma hybride ni de repli
+classique** : l'autorité d'une transaction, d'un vote de finalité ou d'une
+enveloppe gossip est une signature ML-DSA-65, et rien d'autre. Une adresse est
+`BLAKE3(ADDR_DOMAIN ‖ clé publique ML-DSA)` ; la clé ML-DSA est dérivée
+déterministiquement de la graine (XOF BLAKE3), donc aucune matière secrète
+supplémentaire n'est persistée. L'échange de clés QUIC/TLS négocie l'hybride
+X25519MLKEM768, ce qui protège la confidentialité du transport contre une
+attaque *harvest-now-decrypt-later*.
 
-**Flag-day futur.** `REQUIRE_PQ` (cf. `security/hybrid_crypto.rs`) est à `false` :
-le réseau accepte encore les signatures Ed25519-seules (rétro-compatibilité). Le
-passage à une protection PQ *totale* (rejet de toute signature sans couche
-ML-DSA) sera un changement de version de protocole, à arbitrer à maturité.
+**Ce qui reste classique.** L'identité de nœud d'Iroh (NodeId = Ed25519) : c'est
+une dette *upstream*, Iroh attend un consensus d'industrie sur la signature
+post-quantique des EndpointIds. Elle n'authentifie ni l'argent, ni la finalité,
+ni les messages — seulement le point de terminaison réseau.
 
 ## Modèle de menace — ce qui est défendu
 
-- **Forge de transactions / d'actions sociales** : chaque tx et action est
-  signée et vérifiée (`verify_tx`, `verify_hybrid`). Les adresses synthétiques
-  (`NETWORK`, `ESCROW`) sont les seules exemptes, et ne sont jamais acceptées
-  depuis le gossip.
-- **Rejeu (replay)** : nonce monotone par expéditeur sur les enveloppes,
-  déduplication LRU (100k), `seen_tx_hashes`, fenêtre temporelle ±90 s.
-- **Double-dépense** : `balance_of` inclut les sorties *pending* ; conservation
-  vérifiée par tests property-based (Σ soldes + brûlé == miné, sur des milliers
-  de séquences aléatoires).
-- **DoS gossip** : taille max 10 MB/enveloppe, rate-limit adaptatif, 50 blocs
-  max par segment de sync, bannissement après 3 signalements.
-- **Eclipse** : heuristique de collision de préfixe de clé publique (>80 %).
-- **Sybil (économique)** : stake minimum + réputation pour l'élection du leader
-  PoS ; le poids n'est pas gratuit.
+- **Forge de transactions** : chaque tx est signée ML-DSA-65 par la clé liée à
+  l'adresse de l'expéditeur, et re-vérifiée par chaque nœud. Les adresses
+  synthétiques `NETWORK` / `ESCROW` sont exemptes de signature, mais un bloc
+  n'accepte **au plus qu'une** tx de minage, obligatoirement la coinbase
+  `NETWORK → block.miner` : un `Transfer` depuis `NETWORK` est rejeté (sinon il
+  aurait minté sans limite, invisible au plafond).
+- **Rejeu** : nonce monotone par expéditeur, identifiant d'enveloppe canonique
+  (`id == BLAKE3` de la pré-image signée), déduplication LRU 100 K insérée
+  **après** la vérification de signature, fenêtre de fraîcheur ±90 s,
+  `seen_tx_hashes` au ledger.
+- **Double-dépense** : règle de couverture symétrique — un bloc reçu dont une
+  dépense n'est pas couverte par le solde on-chain est rejeté, et un bloc scellé
+  localement exclut ces tx, donc il est valide par construction. Conservation
+  `Σ(dépensable + staké + en déverrouillage) + brûlé == miné` vérifiée à chaque
+  pas de simulation.
+- **Réécriture de l'histoire** : plancher de finalité monotone, vérifié par hash
+  et persisté ; aucun fork ne peut remplacer un bloc situé sous le plancher.
+- **Équivocation d'un validateur** : détectée à l'ingestion (double-vote et
+  surround), preuve ML-DSA non-répudiable diffusée, enjeu de l'offenseur détruit
+  STAKE→BURN — y compris l'enjeu en cours de déverrouillage, pour qu'un
+  « unstake-and-run » ne mette pas les fonds à l'abri. Un proposeur malveillant
+  ne peut pas punir un innocent : la preuve embarquée est re-vérifiée par chaque
+  nœud.
+- **DoS gossip** : 10 Mo max par enveloppe, rate-limit adaptatif borné [15, 120]
+  msg/min, 50 blocs max par segment de synchronisation, bannissement après
+  3 signalements, cartes par pair bornées en mémoire.
+- **Eclipse** : heuristique de collision de préfixe de clé publique (> 80 %).
+- **Sybil (économique)** : le poids d'élection est **l'enjeu inscrit sur la
+  chaîne**, une fonction pure du ledger — la réputation locale a été retirée du
+  chemin de sécurité, précisément parce qu'elle divergeait entre nœuds.
+- **RPC monnaie** : les méthodes qui déplacent des fonds exigent un jeton cookie
+  et passent une garde `Origin` / `Content-Type` ; sans elle, un `fetch()` depuis
+  n'importe quelle page web atteignait `sendtoaddress` en requête CORS simple.
 
-## Limites connues — ce qui n'est PAS encore garanti
+## Limites connues — ce qui n'est PAS garanti
 
-Par honnêteté (et c'est la ligne du projet) :
+Par honnêteté, et c'est la ligne du projet :
 
-- **Pas d'audit tiers.** Le code n'a pas été revu par un cabinet externe.
-- **Finalité.** Le consensus PoS+VRF n'offre pas encore de finalité BFT rapide
-  prouvée ; un saut vers un consensus DAG-BFT est à l'étude (voir
-  `docs/DESIGN-CONSENSUS-DAG-BFT.md`).
-- **Aléa du leader.** L'entropie d'élection est durcie (entropie d'epoch passée
-  + accumulateur, voir `pos_consensus.rs`) mais n'intègre pas encore de VDF
-  complet contre la rétention de bloc par le proposeur.
-- **PQ partielle (par conception).** Voir « Frontière post-quantique » ci-dessus.
-- **Pas de confidentialité.** Les transactions et les soldes sont publics (pas
-  de couche ZK pour l'instant).
+- **Pas d'audit tiers.** Un audit interne adversarial (25/07/2026,
+  `docs/audit/AUDIT-INTERNE-2026-07-25.md`) a ouvert 4 critiques, 8 hauts et
+  4 moyens, tous corrigés derrière le fork v7. Ce n'est pas un audit externe. Le
+  dossier de consultation est prêt dans `docs/audit/`.
+- **Échelle non éprouvée.** Deux machines physiques (mai 2026) et un test
+  d'intégration deux nœuds. Les partitions, réordres, crashs et nœuds byzantins
+  sont couverts en **simulation déterministe seedée**, pas sur un vrai réseau.
+- **Aléa d'élection.** L'élection du proposeur est déterministe et publiquement
+  vérifiable — ce n'est **pas** un VRF : le leader d'un slot est prévisible. Un
+  beacon enterré bloque le grinding immédiat ; un vrai VRF et un VDF sont au
+  roadmap (ADR-004, ouverte).
+- **Identité de nœud classique** (voir ci-dessus).
+- **Pas de confidentialité on-chain.** Transactions et soldes sont publics ;
+  aucune couche ZK.
+- **Binaires non notarisés / non signés.** La dernière release publiée date de
+  mai 2026 et ne correspond plus au code.
 
 ## Durcissement de la chaîne d'approvisionnement
 
-- `deny.toml` — `cargo deny check` (licences, advisories RUSTSEC, sources,
-  doublons). À exécuter en CI.
-- `cargo audit` — vulnérabilités connues des dépendances.
-- **Zéro `unsafe`** dans la couche cryptographique ; `fips204` est lui-même
-  pur Rust sans `unsafe`.
-- Secrets `zeroize`-és en mémoire ; jamais de clé privée dans les logs/erreurs.
+- `deny.toml` — `cargo deny check` (licences, advisories RUSTSEC, sources, doublons).
+- `cargo audit` — vulnérabilités connues des dépendances ; le dernier scan a
+  évalué 8 vulnérabilités **transitives**, aucune dans le code Quanta.
+- Un seul bloc `unsafe` dans tout le backend (interop AppKit pour l'état
+  d'occlusion de la fenêtre, `guardian.rs`) ; **zéro** dans la couche
+  cryptographique, et `fips204` est lui-même pur Rust sans `unsafe`.
+- L'application n'embarque aucun client HTTP sortant.
+- Secrets `zeroize`-és en mémoire ; jamais de clé privée dans les logs ou les
+  erreurs.
 
 ## Règles d'or (rappel développeur)
 
@@ -92,4 +125,5 @@ Par honnêteté (et c'est la ligne du projet) :
 2. `tokio::sync` uniquement à travers un `.await` (jamais `std::sync`).
 3. Tous les montants en `u64` µQTA (jamais de `f64` pour les soldes).
 4. Erreurs de déchiffrement opaques (« Invalid », jamais le type réel).
-5. L'application ne fait **aucune** requête HTTP sortante.
+5. L'autorité d'un compte est **ML-DSA** ; Ed25519 n'est plus qu'un identifiant
+   de point de terminaison réseau.

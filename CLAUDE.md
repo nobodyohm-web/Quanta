@@ -3,7 +3,7 @@
 > **Marque** : **Quanta** (réseau + app + pièce). Les identifiants techniques/wire hérités
 > — TLD `.torus`, `TORUS_PROTOCOL_VERSION`, events Tauri `torus://…` — sont **conservés tels
 > quels** pour la compatibilité réseau ; ne pas les renommer sans changement de protocole.
-> **Version** : v3.13 (crypto-only, hard-fork v7 « remédiation d'audit ») | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
+> **Version** : v3.13.1 (crypto-only, hard-fork v7 « remédiation d'audit ») | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
 > **Licence** : Apache-2.0
 > **Status** : ✅ P2P vérifié entre 2 machines physiques (06/05/2026) · ⚠️ alpha, non audité par un tiers
 > **Repo** : [github.com/nobodyohm-web/Quanta](https://github.com/nobodyohm-web/Quanta)
