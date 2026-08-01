@@ -118,8 +118,16 @@ mod peer_info_tests {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
-    pub node_id: String,
-    /// Shareable Iroh EndpointId — the other user pastes this to connect.
+    /// The node's identity on the network: its Iroh EndpointId, derived from
+    /// the persisted `node_key` (RDV-0) and therefore stable across restarts.
+    /// Shareable — the other user pastes this to connect. Empty until the QUIC
+    /// endpoint has bound.
+    ///
+    /// This is the *only* identity field. A second one, `node_id`, used to sit
+    /// above it holding `BLAKE3(Uuid::new_v4())`: fresh per process, stable
+    /// across nothing, and matching no value any peer could observe. It was
+    /// read by exactly one caller — the JSON-RPC `getinfo`, which presented it
+    /// as the node's identity.
     pub peer_id: String,
     pub is_online: bool,
     pub peer_count: u32,

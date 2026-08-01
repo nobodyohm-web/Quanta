@@ -23,14 +23,14 @@ figures — dates, scope, and line counts come from this package. See
 > your help scoping and estimating the engagement.
 >
 > - **Repository:** https://github.com/nobodyohm-web/Quanta (Apache-2.0)
-> - **Review baseline:** `main` at v3.15.0 (`TORUS_PROTOCOL_VERSION = 9`); we will
+> - **Review baseline:** `main` at v3.15.1 (`TORUS_PROTOCOL_VERSION = 9`); we will
 >   freeze a dedicated `audit-baseline` tag at engagement start.
 > - **Package:** `docs/audit/README.md`, `THREAT-MODEL.md`, `SCOPE.md`.
 > - **Suggested scope:** P0 = consensus core `sm/` (8_507 LOC), ledger `p2p/ledger/`
 >   (7_545 LOC), cryptography `security/` (2_081 LOC); P1 = network pipeline (8_105 LOC).
 >   Line counts include inline `#[cfg(test)]` tests. Engagement shapes (crypto / consensus /
 >   network) are described in `SCOPE.md`.
-> - **Verification:** `cargo test` (508 library + 1 integration test, 0 failures at baseline,
+> - **Verification:** `cargo test` (513 library + 1 integration test, 0 failures at baseline,
 >   including a multi-seed deterministic simulation harness and a 128-run determinism check);
 >   `cargo clippy --all-targets -D warnings` is enforced.
 >
@@ -58,7 +58,7 @@ lead with, all supportable from this package and the repository:
   model as an upstream dependency.
 - **Audit-ready.** A complete readiness package (`docs/audit/`): threat model, prioritized
   scope with measured line counts, and this RFQ. A frozen baseline commit is identified.
-- **Testable claims.** 508 library + 1 integration test at baseline, a deterministic
+- **Testable claims.** 513 library + 1 integration test at baseline, a deterministic
   simulation harness, a 128-run determinism check, and an enforced clippy gate.
 - **Public-disclosure commitment.** The full report will be published in the repository.
 - **Honest maturity statement.** Alpha; no prior third-party audit; known accepted risks

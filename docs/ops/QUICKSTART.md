@@ -117,7 +117,7 @@ même adresse) et qu'une politique invalide (seuil > nombre de clés) est refus�
 ## 5. La boucle complète des tests
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml          # 508 tests + 1 intégration
+cargo test --manifest-path src-tauri/Cargo.toml          # 513 tests + 1 intégration
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 npm run check                                            # svelte-check (0/0)
 npm run build

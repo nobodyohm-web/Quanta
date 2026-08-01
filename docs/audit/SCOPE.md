@@ -1,7 +1,7 @@
 # Quanta — Audit Scope
 
 Prioritized scope for an external review of the Quanta protocol. Line counts were
-measured on `main` at v3.15.0 (`TORUS_PROTOCOL_VERSION = 9`)
+measured on `main` at v3.15.1 (`TORUS_PROTOCOL_VERSION = 9`)
 and **include inline `#[cfg(test)]` tests**, which live in the same files. See
 [`THREAT-MODEL.md`](THREAT-MODEL.md) for the assets, properties, and adversary model
 that motivate this ordering; the out-of-scope UI is noted at the end.

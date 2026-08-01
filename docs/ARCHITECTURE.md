@@ -8,7 +8,7 @@ who needs to know what is claimed and where each claim is enforced, and an **eng
 who wants to know whether the design holds up. Both get the same answer here, because
 if a design cannot be explained plainly it usually cannot be defended either.
 
-Every number below is read from the code at `TORUS_PROTOCOL_VERSION = 9` (v3.15.0).
+Every number below is read from the code at `TORUS_PROTOCOL_VERSION = 9` (v3.15.1).
 Nothing is rounded up to sound better. Where something is unfinished it says so.
 
 **Contents**
@@ -265,7 +265,7 @@ failed is not known to work.
 
 ## 6. Testing what a unit test cannot reach
 
-508 library tests plus 1 integration test, `clippy --all-targets -D warnings` clean.
+513 library tests plus 1 integration test, `clippy --all-targets -D warnings` clean.
 But the count is not the argument — the argument is what the tests can reach.
 
 **The deterministic simulation harness** (`sm/sim.rs`) runs a whole network inside one process

@@ -11,7 +11,7 @@ without reverse-engineering the repository.
 | License | Apache-2.0 |
 | Repository | <https://github.com/nobodyohm-web/Quanta> |
 | Language | Rust (protocol/backend, Tauri 2.0) + Svelte 5 (desktop UI, out of scope) |
-| Review baseline | `main` at v3.15.0, `TORUS_PROTOCOL_VERSION = 9` — a dedicated `audit-baseline` tag will be frozen at engagement start |
+| Review baseline | `main` at v3.15.1, `TORUS_PROTOCOL_VERSION = 9` — a dedicated `audit-baseline` tag will be frozen at engagement start |
 | Status | ⚠️ Alpha. **No third-party audit has been performed yet.** That is precisely what this package is for. |
 
 ## Contents
@@ -65,7 +65,7 @@ limitation, documented in the threat model).
 ## Building and verifying the claims
 
 ```bash
-# Full test suite — 508 library tests + 1 integration test, 0 failures at baseline.
+# Full test suite — 513 library tests + 1 integration test, 0 failures at baseline.
 # Includes a deterministic simulation harness (multi-seed DST) and a 128-run
 # determinism check (C1) of the consensus core.
 cargo test --manifest-path src-tauri/Cargo.toml

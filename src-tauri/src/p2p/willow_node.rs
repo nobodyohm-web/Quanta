@@ -235,7 +235,16 @@ pub struct WillowNode {
     /// Phase 4 — Router Iroh : maintient l'acceptation des connexions sur GOSSIP_ALPN.
     /// Drop = arrêt du protocole, donc on le garde vivant ici.
     _router: Arc<RwLock<Option<Router>>>,
-    node_id: String,
+    /// The node's one network identity: the Iroh EndpointId, filled by
+    /// `init_endpoint` once the QUIC endpoint binds, derived from the
+    /// persisted `node_key` (RDV-0). `None` until then.
+    ///
+    /// There used to be a second field here, `node_id`, set to
+    /// `BLAKE3(Uuid::new_v4())` in the constructor and surfaced by the
+    /// JSON-RPC `getinfo` as the node's identity. It was minted per process,
+    /// so it changed on every restart and corresponded to nothing observable
+    /// on the network — a stable-looking identifier that identified nothing.
+    /// It is gone: one identity, one source, and it is this one.
     node_addr: Arc<RwLock<Option<String>>>,
     puzzle_difficulty: u8,
     endpoint_active: Arc<RwLock<bool>>,
@@ -275,8 +284,6 @@ pub const ECLIPSE_THRESHOLD: f64 = 0.8;
 
 impl WillowNode {
     pub fn new() -> Self {
-        let raw_id = blake3::hash(uuid::Uuid::new_v4().as_bytes());
-        let node_id = hex::encode(raw_id.as_bytes());
         let (gossip_tx, gossip_rx) = priority_channel();
         let ledger = Ledger::new();
         // LIVE-1: anchor the finality tracker at the chain's genesis checkpoint.
@@ -301,7 +308,6 @@ impl WillowNode {
             gossip_topic_sender: Arc::new(RwLock::new(None)),
             gossip_topic_rx: Arc::new(RwLock::new(None)),
             _router: Arc::new(RwLock::new(None)),
-            node_id: node_id[..64].to_string(),
             node_addr: Arc::new(RwLock::new(None)),
             puzzle_difficulty: 3,
             endpoint_active: Arc::new(RwLock::new(false)),
@@ -645,7 +651,6 @@ impl WillowNode {
         let connected_known = kp.values().filter(|p| p.connected).count() as u32;
         drop(kp);
         NodeStatus {
-            node_id: self.node_id.clone(),
             peer_id,
             is_online,
             peer_count,
@@ -664,6 +669,116 @@ impl WillowNode {
 }
 
 impl Default for WillowNode { fn default() -> Self { Self::new() } }
+
+#[cfg(test)]
+mod identity_tests {
+    //! RDV-0: the node's identity is the persisted `node_key`, and every
+    //! surface that names an identity must report *that* one.
+    //!
+    //! Until v3.15.1 `NodeStatus` carried a second field, `node_id`, holding
+    //! `BLAKE3(Uuid::new_v4())` — minted in the constructor, so a fresh value
+    //! on every boot. JSON-RPC `getinfo` published it as the node's identity.
+    //! It looked exactly like a 64-hex EndpointId, which is what let it pass
+    //! unnoticed: a restart-persistence check written against it reported that
+    //! RDV-0 was broken while `node_key` had in fact survived untouched.
+    use super::load_or_create_node_key;
+    use std::path::PathBuf;
+
+    /// Unique per test *and* per process, so a stale directory from a killed
+    /// run can never make a later run pass by accident.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("quanta-rdv0-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn rdv0_the_identity_survives_a_restart() {
+        let dir = scratch("restart");
+
+        let first = load_or_create_node_key(&dir).expect("first boot mints a key");
+        // A second call is exactly what a restart does: same data dir, new process.
+        let second = load_or_create_node_key(&dir).expect("second boot loads it");
+
+        assert_eq!(
+            first.public(),
+            second.public(),
+            "the EndpointId must not change across a restart — every ticket \
+             ever handed out, every known_peers entry and every DHT record is \
+             keyed by it"
+        );
+
+        let key_file = dir.join("node_key");
+        assert_eq!(
+            std::fs::metadata(&key_file).expect("node_key exists").len(),
+            32,
+            "the identity is the 32 raw secret bytes"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a secret key is owner-readable only");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rdv0_a_separate_data_dir_is_a_separate_node() {
+        let a = scratch("dir-a");
+        let b = scratch("dir-b");
+
+        let ka = load_or_create_node_key(&a).expect("a");
+        let kb = load_or_create_node_key(&b).expect("b");
+
+        assert_ne!(
+            ka.public(),
+            kb.public(),
+            "two data dirs are two nodes; sharing an identity would make them \
+             indistinguishable on the network"
+        );
+
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn rdv0_a_corrupt_key_regenerates_instead_of_refusing_to_boot() {
+        let dir = scratch("corrupt");
+        std::fs::write(dir.join("node_key"), b"truncated").expect("plant a short key");
+
+        let key = load_or_create_node_key(&dir).expect("a broken identity must not take the node offline");
+
+        assert_eq!(
+            std::fs::metadata(dir.join("node_key")).unwrap().len(),
+            32,
+            "the corrupt file is replaced by a usable one"
+        );
+        // And the replacement is itself persistent — otherwise the node would
+        // mint a new identity on every boot from here on.
+        let again = load_or_create_node_key(&dir).expect("reload");
+        assert_eq!(key.public(), again.public());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn node_status_reports_no_identity_before_the_endpoint_binds() {
+        let node = super::WillowNode::new();
+        let status = node.get_status().await;
+
+        assert!(
+            status.peer_id.is_empty(),
+            "with no bound endpoint there is no identity to report; a \
+             plausible-looking value here is worse than an empty one, because \
+             callers cannot tell it apart from a real EndpointId"
+        );
+        assert!(!status.is_online, "and such a node is not online");
+    }
+}
 
 #[cfg(test)]
 mod mem_bounds_tests {
