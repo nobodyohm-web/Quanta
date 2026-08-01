@@ -119,6 +119,10 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
                 serde_json::json!({
                     "amount": uqta_mined as f64 / p2p::ledger::MICRO as f64,
                     "kwh": kwh,
+                    // Matière unique pour le terminal : le montant EXACT en µQTA
+                    // et le hash BLAKE3 réel de la tx de récompense.
+                    "amount_micro": uqta_mined,
+                    "tx_hash": mining_tx.hash.clone(),
                 }),
             );
         }
@@ -227,6 +231,12 @@ async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
     let (finalized, floor) = {
         let ledger = state.node.ledger.read().await;
         let mut fin = state.node.finality.write().await;
+        // C1 (AUDIT-2026-07-25): commit the vote to the slashing-protection memo
+        // BEFORE anything else can run. Recorded even if the broadcast below fails
+        // — that is the correct behaviour: having signed this vote, we must never
+        // sign a different one for the same target epoch, whether or not anyone
+        // received it.
+        fin.remember_cast(&vote);
         let out = fin.ingest_vote(vote.clone(), &ledger);
         (out.finalized, fin.finalized_floor())
     };
@@ -247,22 +257,50 @@ async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
         state.node.gossip.write().await.mark_seen(&env.id);
         let _ = state.node.gossip_tx.send(env);
         log::info!("◈ [Finality] cast vote for epoch {}", vote.target.epoch);
+        // Télémétrie moteur : NOTRE vote de finalité réel (époque + checkpoint
+        // cible réels, signé ML-DSA) — best-effort, hors chemin de sécurité.
+        if let Some(handle) = state.app_handle.read().await.as_ref() {
+            use tauri::Emitter;
+            let _ = handle.emit(
+                "quanta://engine",
+                serde_json::json!({
+                    "kind": "vote",
+                    "epoch": vote.target.epoch,
+                    "height": vote.target.height,
+                    "hash": p2p::ledger::short(&vote.target.hash, 16),
+                }),
+            );
+        }
     }
 }
 
 async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
+    let seal_t = std::time::Instant::now();
     let sealed = state.node.ledger.write().await.seal_if_pending(addr, 0.0);
+    let seal_us = seal_t.elapsed().as_micros() as u64;
     if let Some(b) = sealed {
         log::info!("◈ [Ledger] Block #{} sealed ({} tx)", b.index, b.transactions.len());
         // Live UX: block-seal pulse for the 3D scenes + toast.
         if let Some(handle) = state.app_handle.read().await.as_ref() {
             use tauri::Emitter;
+            // Symétrie avec le chemin distant : la scène Réseau affiche AUSSI
+            // qui a scellé nos propres blocs (notre @pseudo s'il existe).
+            let miner_name = state.node.usernames.read().await.username_of(addr);
             let _ = handle.emit(
                 "quanta://block-sealed",
                 serde_json::json!({
                     "index": b.index,
                     "txs": b.transactions.len(),
                     "mine": true,
+                    "miner": crate::p2p::ledger::short(addr, 16),
+                    "miner_name": miner_name,
+                    // Le VRAI hash du bloc que NOUS venons de sceller + son
+                    // parent — l'enchaînement prev ← hash devient visible.
+                    "hash": b.hash.clone(),
+                    "prev": b.prev_hash.clone(),
+                    // Durée réelle du scellement (couverture COVER-2 + Merkle
+                    // BLAKE3 + hash de bloc), mesurée autour de seal_if_pending.
+                    "seal_us": seal_us,
                 }),
             );
         }
@@ -331,6 +369,11 @@ async fn pos_seal_if_leader(state: &AppState, addr: &str, pk: &str) {
     let has_eligible = validators.iter().any(|v| v.stake >= p2p::pos_consensus::MIN_VALIDATOR_STAKE);
     if !has_eligible {
         log::debug!("◈ [PoS] No eligible validators — permissionless seal (bootstrap mode)");
+        // Télémétrie : l'élection réelle de ce slot (mode bootstrap — personne
+        // n'a encore staké, scellement permissionless).
+        emit_engine(state, serde_json::json!({
+            "kind": "elect", "slot": slot, "verdict": "bootstrap",
+        })).await;
         seal_and_broadcast(state, addr, pk).await;
         return;
     }
@@ -356,6 +399,13 @@ async fn pos_seal_if_leader(state: &AppState, addr: &str, pk: &str) {
         addr, &beacon, slot, elapsed, &validators,
     );
 
+    // Télémétrie : le VERDICT réel de l'élection pondérée par l'enjeu pour ce
+    // slot — élu / fallback / observateur — avec la taille du set de validateurs.
+    let verdict = if is_valid { if is_primary { "leader" } else { "fallback" } } else { "observer" };
+    emit_engine(state, serde_json::json!({
+        "kind": "elect", "slot": slot, "verdict": verdict, "validators": validators.len(),
+    })).await;
+
     if is_valid {
         if is_primary {
             log::info!("◈ [PoS] We are the ELECTED LEADER for slot {} — sealing block", slot);
@@ -371,6 +421,15 @@ async fn pos_seal_if_leader(state: &AppState, addr: &str, pk: &str) {
     }
 }
 
+/// Best-effort engine telemetry (`quanta://engine`) — local UI only, never on
+/// the security or wire path. Nobody listening is fine.
+async fn emit_engine(state: &AppState, payload: serde_json::Value) {
+    if let Some(handle) = state.app_handle.read().await.as_ref() {
+        use tauri::Emitter;
+        let _ = handle.emit("quanta://engine", payload);
+    }
+}
+
 /// Sign a gossip message and wrap it in an envelope.
 async fn sign_and_wrap(
     state: &AppState,
@@ -380,7 +439,22 @@ async fn sign_and_wrap(
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = state.node.gossip.read().await.next_outgoing_nonce();
     let signable = p2p::gossip::GossipRouter::signable_envelope_bytes(pk, nonce, &timestamp, &msg);
+    let kind = match &msg {
+        p2p::gossip::GossipMessage::BroadcastTx { .. } => "BroadcastTx",
+        p2p::gossip::GossipMessage::NewBlock { .. } => "NewBlock",
+        p2p::gossip::GossipMessage::FinalityVote { .. } => "FinalityVote",
+        _ => "Gossip",
+    };
+    let sign_t = std::time::Instant::now();
     let sig = state.crypto.lock().await.sign_pq(&signable).unwrap_or_default();
+    // Durée réelle de la signature ML-DSA-65 (FIPS 204) de cette enveloppe —
+    // la preuve mesurée que la crypto post-quantique tourne à chaque envoi.
+    emit_engine(state, serde_json::json!({
+        "kind": "sign",
+        "msg": kind,
+        "us": sign_t.elapsed().as_micros() as u64,
+        "bytes": signable.len(),
+    })).await;
     p2p::gossip::GossipRouter::build_signed_envelope(
         pk.to_string(), msg, nonce, timestamp, &sig,
     ).ok()

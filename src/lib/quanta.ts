@@ -9,6 +9,20 @@
 /** One QUANTA = 1_000_000 µQTA (mirror of the backend MICRO constant). */
 export const MICRO = 1_000_000;
 
+/** Full currency name — used in sentences ("you forged 3 QUANTA"). */
+export const CURRENCY = "QUANTA";
+/** Compact ticker — used next to figures in tables/cells. ONE ticker across
+ * the whole app (µQTA is the protocol sub-unit; QNT belongs to another coin). */
+export const TICKER = "QTA";
+
+/** Brand teal for canvas/WebGL code that can't read CSS vars.
+ * Single source: must mirror `--cyan` in app.css. */
+export const TEAL = "#0BA5A0";
+
+/** Standard feedback durations — one convention app-wide. */
+export const FEEDBACK_COPY_MS = 1_800;
+export const FEEDBACK_OK_MS = 3_000;
+
 /** A parsed payment request: recipient (@user or 64-hex) + optional amount. */
 export interface PaymentRequest {
   /** `@username` (with the @) or a 64-hex address, as typed. */
@@ -104,6 +118,13 @@ export function fmtQ(n: number, locale = "fr-FR"): string {
 /** Shorten a 64-hex address for lists: `a3f7b2…9c4d`. */
 export function shortAddr(s: string): string {
   return s.length > 14 ? s.slice(0, 6) + "…" + s.slice(-4) : s;
+}
+
+/** Uptime in minutes → one canonical `3h05` shape (hours + zero-padded minutes). */
+export function formatUptime(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = Math.floor(min % 60);
+  return `${h}h${m.toString().padStart(2, "0")}`;
 }
 
 /**

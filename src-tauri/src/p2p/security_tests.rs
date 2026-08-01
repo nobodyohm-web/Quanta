@@ -31,7 +31,7 @@ mod security_tests {
         let _id = crypto.generate_keypair();
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, amount_uqta, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
         (ledger, crypto)
     }
 
@@ -57,7 +57,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "b".repeat(64);
 
@@ -80,7 +80,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 50 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "c".repeat(64);
 
@@ -140,7 +140,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "d".repeat(64);
 
@@ -176,7 +176,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         // Nonce should start at 0
         assert_eq!(ledger.get_nonce(pk), 0);
@@ -243,7 +243,7 @@ mod security_tests {
         let mut ledger = Ledger::new();
         // Give a huge but finite balance: 1M QUANTA = 10^6 * 10^6 = 10^12 µQTA
         ledger.mine_tx(pk, 1_000_000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "f".repeat(64);
 
@@ -261,7 +261,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 10 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "a".repeat(64);
 
@@ -369,7 +369,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let result = ledger.transfer_tx(pk, pk, 10 * MICRO, &crypto);
         assert!(result.is_err(),
@@ -387,7 +387,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let to = "b".repeat(64);
 
@@ -407,7 +407,7 @@ mod security_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(pk, 1000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(pk, 0.0);
 
         let supply_before = ledger.total_supply();
 
@@ -532,10 +532,13 @@ mod security_tests {
         for r in ["r1", "r2", "r3"] { tracker.record_report("p1", r); }
         for r in ["r1", "r2", "r3"] { tracker.record_report("p2", r); }
 
+        // H6: bans are keyed by the peer digest, so the snapshot returns digests.
+        // `is_banned` takes the real key and normalises internally — that is the
+        // API callers use, so assert through it as well as on the raw snapshot.
         let banned = tracker.banned_peers();
         assert_eq!(banned.len(), 2);
-        assert!(banned.contains("p1"));
-        assert!(banned.contains("p2"));
+        assert!(tracker.is_banned("p1"));
+        assert!(tracker.is_banned("p2"));
     }
 
     /// SEC-COUNTRY-1 : la normalisation d'un code pays fournit un token
@@ -584,7 +587,7 @@ mod security_tests {
         let pk = "a".repeat(64);
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 100 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
 
         // Expected nonce starts at 0
         assert_eq!(ledger.get_nonce(&pk), 0, "Initial nonce should be 0");
@@ -661,7 +664,7 @@ mod property_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 50 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
 
         let to = "z".repeat(64);
 
@@ -727,7 +730,7 @@ mod property_tests {
 
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 1000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
 
         let supply_before = ledger.total_supply();
         let burned_before = ledger.total_burned();
@@ -752,7 +755,7 @@ mod property_tests {
 
     #[test]
     fn p4_emission_distribution_conserves_total() {
-        // Genesis-tick emission (µQTA); shapley::distribute_emission uses f64.
+        // Genesis-tick emission (µQTA); the Shapley share math is f64.
         let emission_per_tick_f = crate::p2p::reputation::emission_for_tick(0) as f64;
 
         for n in 1..=10 {
@@ -767,8 +770,8 @@ mod property_tests {
                 });
             }
 
-            let dist = shapley::distribute_emission(&contribs, emission_per_tick_f);
-            let total: f64 = dist.values().sum();
+            let shares = shapley::compute_all_shares(&contribs);
+            let total: f64 = shares.values().map(|s| s * emission_per_tick_f).sum();
             assert!((total - emission_per_tick_f).abs() < 1e-3,
                 "Total distributed ({}) must equal emission_per_tick ({}) for {} nodes",
                 total, emission_per_tick_f, n);
@@ -1063,7 +1066,7 @@ mod property_tests {
         let pk = id.public_key_hex.clone();
         let mut ledger = Ledger::new();
         ledger.mine_tx(&pk, 1_000_000 * MICRO, 0.0);
-        ledger.seal_block("GENESIS", 0.0);
+        ledger.seal_block(&pk, 0.0);
         (ledger, crypto, pk)
     }
 

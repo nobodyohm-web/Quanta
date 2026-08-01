@@ -1,6 +1,6 @@
 {
   "name": "quanta",
-  "version": "3.4.0",
+  "version": "3.13.1",
   "description": "Sovereign peer-to-peer value network — no server, no cloud, no intermediary. Native coin: QUANTA.",
   "type": "module",
   "scripts": {
@@ -10,7 +10,6 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "ai:map": "./.agent/tools/generate-map.sh",
     "ai:check": "npm run check && cd src-tauri && cargo clippy -- -D warnings",
     "ai:audit": "cd src-tauri && cargo audit",
     "ai:format": "npx prettier --write . && cd src-tauri && cargo fmt"
@@ -19,17 +18,16 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nobodyohm-web/Torus.git"
+    "url": "git+https://github.com/nobodyohm-web/Quanta.git"
   },
-  "homepage": "https://github.com/nobodyohm-web/Torus",
+  "homepage": "https://github.com/nobodyohm-web/Quanta",
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "@types/three": "^0.185.1",
-    "qrcode-generator": "^2.0.4",
-    "three": "^0.185.1"
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

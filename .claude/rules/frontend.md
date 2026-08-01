@@ -16,10 +16,15 @@ paths: ["src/**/*.svelte", "src/**/*.ts", "src/**/*.css"]
    non négociable)** : fond **blanc** `#ffffff`, surfaces gris très clairs
    `#fbfbfd`→`#e3e3e6`, texte quasi-noir `#1d1d1f`→`#a1a1a6`, accent **teal joyau
    `#0BA5A0`** (deep `#087F8C`, bright `#14C8B8`). Style **épuré, Apple / Google**.
-   ⛔ JAMAIS de thème sombre pour l'app, JAMAIS d'esthétique « IA / futuriste »
-   (pas de fond noir). ⛔ PAS d'accent bleu générique (`#0071e3`) ni d'or
-   (dérivatif « BTC »). Le propriétaire a demandé le thème clair à plusieurs
-   reprises. Les tokens sont dans `src/app.css` (`@theme`).
+   ⛔ JAMAIS d'esthétique « IA / futuriste ». ⛔ PAS d'accent bleu générique
+   (`#0071e3`) ni d'or (dérivatif « BTC »). Les tokens sont dans `src/app.css`.
+   **Thème sombre** (depuis v3.12.0) : le clair reste le **défaut** et l'identité
+   du produit ; le sombre est une **préférence utilisateur explicite**, servie par
+   le bloc `:root[data-theme="dark"]` (slate froid, texte hiérarchisé, teal bright).
+   Toute couleur écrite en dur qui ne répond pas au thème est un bug — c'est ainsi
+   que le basculement était resté sans effet jusqu'à v3.12.0.
+   *(Corrigé le 2026-07-25 : cette règle interdisait encore le mode sombre que
+   l'application livre depuis v3.12.0 — une contradiction relevée par l'audit.)*
 9. **Typographie** : Inter uniquement, hiérarchie par poids (400-700) ; chiffres
    **tabulaires** (`tabular-nums lining-nums`, zéro barré) sur tous les montants.
 10. **Espacement** : Grille 8px (4, 8, 12, 16, 24, 32, 48)

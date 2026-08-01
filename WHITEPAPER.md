@@ -1,241 +1,309 @@
-# Quanta — Sovereign Peer-to-Peer Money
+# Quanta: A Post-Quantum Peer-to-Peer Currency with Irreversible Finality
 
-> **Whitepaper — Quanta v3.3**
-> Money you forge, own, and that no one can take from you.
-> No server. No bank. No mint authority. No censor.
+> Status: alpha, not yet audited by a third party. QUANTA has no market and no
+> price; none is claimed or predicted anywhere in this document. Every constant
+> below is carved in the code and verified by every node at every block.
 
-> **Implementation status.** Quanta is alpha research software. This document
-> describes the protocol as designed and largely implemented; for the precise
-> "real vs. experimental vs. not-yet" breakdown, see the status table in the
-> [README](README.md). Nothing here is a promise of present-day production
-> security or monetary value. QUANTA is not listed on any exchange and has no
-> market price; the project invents none.
-
----
-
-## 1. Why Quanta
-
-Money today is controlled by authorities you did not choose:
-
-| Problem | Effect |
-|---|---|
-| Central issuers print at will | Your savings are diluted silently |
-| Accounts live on someone else's server | They can be frozen, reversed, or closed |
-| Intermediaries sit in every transfer | A cut is taken, a record is kept |
-| Custody is delegated to a platform | "Your" coins are an IOU you don't hold |
-
-**Quanta inverts the contract.** It is a scarce, hard-capped currency you mine by
-keeping a node online, hold with your own keys, and send peer-to-peer. There is no
-company, no server to subpoena, no admin key, and no authority that can inflate it,
-freeze you, or sign in your place.
+**Abstract.** A purely peer-to-peer currency must survive the two failures its
+predecessors accept. Elliptic-curve signatures fail against a quantum
+adversary: everything signed today can be forged the day such a machine
+exists. Probabilistic settlement fails against patience: a Bitcoin block is
+never final, only exponentially unlikely to be reversed. Quanta answers both.
+Account authority, finality votes and network envelopes are ML-DSA-65
+signatures, the post-quantum standard FIPS 204; the transport negotiates a
+hybrid post-quantum key exchange; and history becomes irreversible by
+certificate rather than by probability: a checkpoint carrying signatures from
+two thirds of the enrolled stake is final, and finalizing a conflicting
+history provably destroys at least one third of that stake. Supply is a
+closed form: one hundred million coins, zero premine, an emission decaying
+geometrically toward the cap.
 
 ---
 
-## 2. The QUANTA coin — invariants
+## 1. Introduction
 
-| Parameter | Value |
-|---|---|
-| Hard cap | **100,000,000 QUANTA**, enforced at consensus — never exceedable |
-| Emission | **decaying**: each minute mints `(cap − minted) / 50,000,000` µQTA |
-| Genesis rate | ≈ **120 QUANTA / hour**, declining smoothly toward the cap |
-| Premine / mint authority | **none** — nobody can create QUANTA outside the rule |
-| Unit | 1 QUANTA = 1,000,000 µQTA (`u64`, deterministic integer math, no float drift) |
-| Burn | **1% destroyed on every transfer** (burn-and-mint) |
+Electronic money rests on promises. A fiat currency rests on the restraint of
+its central bank; a platform balance rests on a server that can be seized or
+frozen. Peer-to-peer currencies removed the promiser, but they kept two
+quieter assumptions: that discrete-logarithm signatures would never be broken,
+and that a history buried under enough work would be safe enough.
 
-**Scarcity is the core.** Emission is *rate*-front-loaded but bounded: each tick releases a
-fixed fraction of the **remaining** supply, so the issuance rate falls as the cap
-approaches and the total emitted asymptotically nears — but never reaches — 100,000,000.
-The bound is checked twice at consensus: a per-block emission ceiling and the global hard
-cap, so a malicious sealer can neither overshoot the cap nor mint a year's emission in one
-block.
+Both assumptions carry expiry dates. Elliptic-curve signatures are broken by
+a sufficiently large quantum computer, and the threat does not wait for the
+machine: traffic and public keys recorded today can be exploited
+retroactively the day it arrives — the attack known as "harvest now, decrypt
+later". As for work-buried history, it remains a probability, not a fact:
+reversal stays possible, merely expensive, and the expense is negotiable.
 
-Note two honest nuances. (1) "Front-loaded" describes the *rate* (highest at genesis, only
-ever declining) — **not** the absolute amounts, which take centuries to approach the cap:
+What is needed is a currency whose signatures resist the quantum computer
+from the genesis block, and whose settled history is protected by proof.
+Rewriting it must not be unlikely: it must cost a provable, automatic
+destruction of the attacker's money. Quanta is built around these two
+requirements. Everything else, the transport, the ledger, the emission, the
+application, exists to serve them.
 
-| Time | Cumulative supply (approx.) |
-|---|---|
-| Genesis rate | ≈ 120 QUANTA/h ≈ 1.05 M/year, declining |
-| Year 1 | ≈ 1.05 M (~1% of cap) |
-| Year 10 | ≈ 10 M (~10%) |
-| ~66 years | 50 M (half the cap) |
-| ~219 years | 90 M (90%) |
-| → ∞ | approaches but never reaches 100 M |
+## 2. Coins, Keys and Signatures
 
-(2) The 1% burn makes the **net** supply deflationary **only above a transfer-volume
-threshold** — when burn exceeds emission. At low volume, emission dominates and supply
-still grows toward the cap. We do not claim unconditional deflation.
-
-**On value.** Mining costs real electricity, but a production cost is not a price. QUANTA
-has no exchange and no market value today; any exchange value will exist only if people
-freely choose to trade it. The app never displays a fabricated fiat figure.
-
----
-
-## 3. How you earn QUANTA — mining by contribution
-
-Keeping a Quanta node online *is* mining. Once a minute, the network mints that tick's
-emission and distributes it by **measured contribution**, using a fixed weighting. This is
-*inspired by* the Shapley value's efficiency (shares sum to 1) and symmetry (identical
-nodes get equal shares) axioms, but it is a linear O(n) contribution score — **not** an
-exact Shapley computation (which is NP-hard). The weights:
+A coin, in Quanta, is an entry in a ledger replicated by every node,
+spendable only by an ML-DSA-65 signature verifying under the public key
+committed in the sender's address. All amounts are integers in µQTA, where
+1 QTA equals 10^6 µQTA; no floating-point number exists on any money path,
+which eliminates rounding drift between nodes by construction.
 
 ```
-energy 30% · work 30% · validation 25% · uptime 15%   (sum = 1.0)
+address           a = BLAKE3(dom_addr ‖ pk)                 pk : ML-DSA-65 (FIPS 204)
+multisig (m-of-n) a = BLAKE3(dom_msig ‖ sort(pk_1…pk_n) ‖ m)
 ```
 
-Energy is measured locally (Intel/AMD RAPL, Apple `powermetrics`, or a calibrated sysinfo
-fallback) — never self-reported as an unverifiable number. The *work* term currently
-mirrors the energy ratio (there is no compute market in the crypto-only build), so in
-practice rewards track measured energy, validation, and uptime. Solo, you receive the full
-tick; with peers, your share is proportional to your measured contribution, multiplied by
-an anti-Sybil factor. There is no special miner class and no hardware arms race: a laptop
-left online contributes.
+The address commits to the key through a domain-separated hash: the key
+cannot change without the address changing, and nobody can substitute a key
+under an existing address. For human use the address is written in Bech32m
+under the `qta1…` prefix, with a checksum: a typing mistake is caught before
+a single µQTA leaves. A multisig address commits to an entire policy, the
+sorted key set and the threshold, so the policy cannot be rebound once funds
+have arrived. A multisig spend is valid if and only if it carries at least m
+valid signatures from distinct signers of the committed set. This is fully
+post-quantum quorum custody, built without waiting for a threshold signature
+scheme to be standardized for lattice cryptography.
 
----
+The account key is born from a 32-byte seed that the user backs up as a
+24-word recovery phrase, the BIP39 standard every wallet holder knows. On the
+machine, the seed lives in an encrypted vault: the encryption key is derived
+from the password with Argon2id, a memory-hard function that prices hardware
+brute force out of reach, and the content is sealed with AES-256-GCM,
+authenticated encryption. On macOS a fingerprint may unlock the vault: a
+random envelope key lives in the system keychain behind biometry, the
+password is never stored and remains the fallback. Every secret is wiped from
+memory the moment it has served.
 
-## 4. The ledger
+Ed25519 survives only where money is not: the QUIC node identity of the
+transport library, an upstream constraint detailed in section 9. Every
+signature that moves value, votes finality or authenticates a network
+envelope is ML-DSA-65.
 
-- **Blocks** are sealed by the slot leader roughly every 2 minutes; each carries a BLAKE3
-  Merkle root of its transaction IDs.
-- **Transfers** are authorized by a mandatory **ML-DSA-65 (FIPS 204)** signature from the
-  key that derives the sender's address; Ed25519 remains the gossip transport layer
-  (envelope signing) plus a vestigial transaction co-signature. The recipient receives 99%,
-  1% is burned, and the sender is debited the full amount — all in `u64` µQTA, so balances
-  never drift.
-- **Balance cache** is O(1) (incremental `HashMap`), updated on apply and reverted on reorg.
-- **Anti-replay**: a strictly monotonic nonce per account plus a `seen_tx_hashes` set.
-- **Fork resolution is deterministic**: validate the challenger before mutating, pop the
-  losing tip, re-queue transactions exclusive to the losing branch, apply the winner — no
-  validated block is ever silently lost.
-- **Chain sync** is paginated (`RequestChain → ChainSegment`, ≤50 blocks/segment) and
-  resumes from any height.
+## 3. Supply
 
----
-
-## 5. Wire protocol & security
-
-The only unit on the wire is a signed `GossipEnvelope`. Raw bytes are never trusted.
-
-- **Signing** covers `(sender, nonce, timestamp, payload)` canonically — never the payload alone.
-- **Nonce** is strictly monotonic per sender (starts at 1), giving per-peer anti-replay.
-- **Timestamp** must be fresh (±90 s window); the same timestamp is signed and sent.
-- **Message ID** is `BLAKE3(payload)` — deterministic, enabling dedup.
-
-Every inbound message runs a fixed pipeline before any handler sees it:
+Emission is a closed formula of the chain state, not a policy a committee
+could amend.
 
 ```
-size guard (≤10 MB) → JSON decode → ban check → dedup (LRU 100K)
-  → timestamp freshness (±90s) → adaptive rate limit
-  → nonce anti-replay (≥1, strictly monotonic) → Ed25519 signature verify → handler
+E_tick  = (S_max − M) / D            S_max = 10^8 QTA,   D = 5·10^7
+M_n     = S_max · (1 − (1 − 1/D)^n)  after n ticks (one tick per minute)
+n_half  = D · ln 2 ≈ 3.47·10^7 ticks ≈ 66 years to half the remaining supply
+burn(x) = ⌊x / 100⌋                  on every transfer of x µQTA
 ```
 
-Defenses: adaptive per-peer rate limiting (`sqrt`-scaled), banning (3 reports → 1 h),
-DoS caps (10 MB/envelope, 50 blocks/segment), and an eclipse heuristic that warns when
-too many peers share a public-key prefix.
+The first line says everything: each minute, the network mints the fraction
+1/D of what remains to be minted. Emission is therefore high in the early
+days, decays geometrically, and never reaches the cap: the second line is its
+closed form, the third gives the human scale, about sixty-six years to mint
+half of whatever remains, from any point in time. The fourth line is the only
+sink: one percent of every transfer is burned, which makes the circulating
+supply slowly deflationary as the currency is used.
 
----
-
-## 6. Consensus — Proof-of-Stake, verifiable stake-weighted election
-
-Block production is leader-based and deterministic per slot (= chain height):
+There is no premine: the genesis state contains no balance, not even for the
+project's author. There is no issuance authority: a block whose emission
+exceeds E_tick is invalid to every node, each of which recomputes the bound
+itself. The ledger finally maintains one conservation invariant, checked at
+every block:
 
 ```
-beacon = BLAKE3(domain ‖ buried_block_hash ‖ slot)   (buried = several slots behind tip)
-seed   = BLAKE3(domain ‖ beacon ‖ slot ‖ round)
-leader = seed % total_weighted_stake                  (weight = stake only — on-chain stake, ADR-002)
+Σ_accounts (spendable + staked + unbonding) + burned = minted ≤ S_max
 ```
 
-Minimum validator stake is 1 QUANTA. If the elected leader fails to seal within a 30 s
-timeout, production falls back to the next-in-line (bounded rounds); when nobody has
-staked, bootstrap is permissionless. The entropy comes from a **buried** block (several
-slots behind the tip), not the fresh tip — so the validator who just sealed cannot grind
-their own re-election.
+Staking moves coins between compartments of one account; slashing moves them
+to burned; nothing creates or loses a µQTA. A chain violating this equation
+is not a valid Quanta chain, and no node will follow it.
 
-**Honest naming.** This is a *deterministic, publicly verifiable* election — **not** a
-cryptographic VRF: there is no secret-key component, so a future slot's leader is publicly
-predictable (a DoS-targeting surface). A true secret-key VRF (for unpredictability) and a
-VDF (for full grinding resistance) are roadmap, not shipped.
+## 4. Consensus
 
----
+At every slot, that is at every block height, a proposer is elected among
+validators, weighted by stake enrolled on the chain itself, never by a local
+view or a declared reputation. This is an essential security point: a
+validator's weight is a pure function of the chain, hence identical on every
+node, whether it has lived since the first block, been restored from a
+backup, or freshly synchronized.
 
-## 7. Cryptography
+```
+beacon = BLAKE3(dom_b ‖ hash(B_{h−L}) ‖ slot)      B_{h−L}: block L slots behind the tip
+seed   = BLAKE3(dom_s ‖ beacon ‖ slot ‖ round)
+P(validator i proposes) = s_i / S                   s_i: bonded stake,  S = Σ s_j
+```
 
-| Layer | Mechanism |
-|---|---|
-| Identity / signatures | **ML-DSA-65** (NIST FIPS 204) transaction authority; Ed25519 gossip transport |
-| Key derivation | Argon2id (64 MiB, 3 iterations, parallelism 4) |
-| Encryption at rest | AES-256-GCM (unique 12-byte nonce per operation) |
-| Hashing / content-addressing | BLAKE3 |
-| Memory safety | `zeroize` + `ZeroizeOnDrop` on every secret |
+The beacon derives from a block buried L slots behind the tip: a proposer
+cannot reshape his own block to influence the election that follows it, since
+that election's seed was frozen far behind him. The election is deterministic
+and publicly verifiable by every node from the chain alone; it is not a VRF,
+so the proposer is publicly predictable one slot ahead, a limitation owned in
+section 9. If the elected proposer stays silent for thirty seconds, the
+election falls back to the next in line, up to three rounds; and while nobody
+has staked, sealing is permissionless, so the network can be born without
+anyone's permission.
 
-**Post-quantum — active (pure ML-DSA authority).** Account identity is an ML-DSA address —
-`BLAKE3(ADDR_DOMAIN ‖ ML-DSA public key)` — and every **transaction**'s authority is a
-mandatory **ML-DSA-65** signature (NIST FIPS 204) from the key that derives the sender's
-address, via the standalone `fips204` crate (pure Rust, constant-time, no `unsafe`). The
-ML-DSA key is **derived from the Ed25519 seed** (BLAKE3 XOF), so no extra secret is
-persisted and no vault migration is needed. There is **no Ed25519 fallback** for
-transaction authority — verification is pure ML-DSA, not a hybrid AND of two schemes.
-Gossip envelopes remain Ed25519 (ephemeral transport, ±90 s freshness window, already
-inside QUIC/TLS), and a vestigial Ed25519 co-signature still rides on transactions for
-transport-layer continuity.
+Eligibility is enforced on reception, not merely on production: a node
+rejects any block whose proposer was not a bonded validator in the parent
+state, so a malicious node cannot crown itself. Stake enters and leaves
+through ordinary signed transactions, visible to all; withdrawal completes
+U = 10,080 blocks after it is requested, about two weeks at the nominal
+rhythm, and this slowness is a security piece the next section explains.
 
----
+## 5. Finality
 
-## 8. Identity & self-custody
+Every E = 32 blocks, the epoch boundary is a checkpoint. Validators sign
+finality votes, source-to-target pairs, with the same ML-DSA-65 keys that
+hold their money: voting stakes the same matter as owning. Votes accumulate
+into certificates:
 
-Your identity is a keypair — nothing more, nothing rented. You are reachable by a short
-**`@pseudo` handle** (and a one-time connection code), not by a domain you must keep paying
-for. The private key never leaves the device: it lives in an encrypted vault (Argon2id +
-AES-256-GCM) and is the only thing that can move your funds. A **recovery key** shown once
-at setup is the sole way to restore the account on another device.
+```
+cert(C) valid  ⟺  3 · Σ_{v ∈ V(C)} s_v  ≥  2 · S
+```
 
-No KYC, no tracking, no account to close. You hold the keys; nobody can sign for you, and
-nobody can freeze, reverse, or confiscate what you hold.
+A certified checkpoint is called justified; two consecutive justified links
+finalize the elder. Below this finalized floor the chain is stone: every node
+refuses any fork that would replace a finalized block, whatever its length,
+whoever its author. Above the floor, forks are settled by the simplest rule
+that converges: the longest chain wins, ties break lexicographically, and two
+partitions that meet again adopt the same branch without exchanging a word
+beyond their blocks.
 
----
+**Theorem (accountable safety).** If two conflicting checkpoints are ever
+finalized, then validators together holding at least S/3 signed
+contradictory votes, each is identified by its own signatures, and each
+loses its entire stake, bonded and unbonding alike.
 
-## 9. Threat model & honest limitations
+*Proof sketch.* Two conflicting finalizations require two two-thirds quorums;
+two two-thirds quorums of one total intersect in at least one third; and, as
+in Casper FFG, every validator in the intersection necessarily produced
+either a double vote, two votes for targets of the same height, or a
+surrounding vote, one vote enclosing another. In both cases the pair of
+ML-DSA signatures is itself the proof, non-repudiable. It is embedded in a
+slashing transaction that every node re-verifies independently before
+applying, and that burns the offender's stake. The slashing window equals the
+unbonding period,
 
-- **Not third-party audited.** The cryptography and networking have had no independent audit.
-- **Alpha-scale network.** Convergence was verified between two physical machines, not at scale.
-  Large-scale NAT traversal, partition resilience, and eclipse resistance are works in progress.
-- **Anti-Sybil is a proof-of-concept.** Quanta resists Sybil attacks via reputation-weighting,
-  staking weight, and rate limiting — but there is no hardened proof-of-work/stake admission
-  puzzle yet, and the gossip layer itself is not Sybil-gated. The eclipse heuristic only flags
-  *lazy* attackers (peers sharing a pubkey prefix); real eclipse resistance needs IP/AS
-  diversity and persistent anchor peers, which are roadmap.
-- **Finality gadget is simulation-verified, not yet fully live.** A Casper-FFG-style
-  finality gadget (validator votes, ⅔-stake justify/finalize, and an equivocation slashing
-  rule) is implemented and proven in deterministic simulation. Finality-vote gossip is now
-  wired live; finality-aware block proposal and live slashing execution are still being
-  wired. Leader election also remains publicly predictable (no secret-key VRF yet). Until
-  the gadget is fully live, treat deeper confirmations as *strong*, not *final*.
-- **No real monetary value.** QUANTA is experimental and unpriced. Do not store value you
-  cannot lose.
+```
+W_slash = U = 10,080 blocks
+```
 
-We document these because a protocol that hides its limitations cannot be trusted with the
-things it does well.
+so leaving the validator set does not outrun the punishment: a validator
+remains punishable until his withdrawal completes. That is why withdrawal is
+slow.
 
----
+Bitcoin makes rewriting history exponentially expensive; Quanta makes it cost
+one third of the money, by proof.
 
-## 10. Roadmap
+## 6. The Network
 
-External security audit · hardened multi-node chaos & partition tests · signed +
-notarized release pipeline · sub-second BFT finality
-([DAG-BFT design](docs/DESIGN-CONSENSUS-DAG-BFT.md) — a *consensus* DAG, unrelated to the
-social-content DAG removed in the crypto-only refactor) · VDF-hardened leader randomness ·
-network-wide *require-PQ* flag day · hardened anti-Sybil admission · on-chain governance of
-economic parameters. UI is internationalized (EN · FR · ES · RU · ZH · JA).
+Nodes connect over QUIC and exchange nine message types by gossip: presence,
+chain segment request and delivery, new blocks, transactions, username
+registration, liveness and reporting. The transport key exchange is the
+hybrid X25519MLKEM768, the combination of a classical curve and the
+post-quantum standard ML-KEM-768: a quantum adversary recording today's
+traffic will decrypt none of it tomorrow, and if either mechanism fell, the
+other would hold alone.
 
----
+Every envelope is ML-DSA-65 signed and crosses nine gates before touching any
+state:
+
+```
+① size ≤ 10 MB          ② decode                ③ sender not banned
+④ dedup (LRU 10^5)      ⑤ |Δt| ≤ 90 s           ⑥ rate ≤ √(peers/4)·30/min
+⑦ nonce monotone        ⑧ verify ML-DSA         ⑨ dispatch
+```
+
+The size bound and deduplication close floods; timestamp freshness and the
+strictly increasing nonce close replay; the rate limit adapts to the size of
+the network; and nothing is processed without a valid signature. Chain
+synchronization moves at most fifty blocks per request, four windows in
+flight, with optional compression. The node's full state is photographed to
+disk every thirty seconds: a power cut costs at worst half a minute of local
+state, never the chain.
+
+The node also exists without an interface: a headless daemon exposes the same
+chain through a seventeen-method JSON-RPC API, enough to query a block, a
+balance, finality, the proven supply, to submit a signed transaction or scan
+deposits, which is what an explorer, a service or an exchange expects. The
+desktop application and the daemon share one core, booted by one code path.
+
+## 7. Validation
+
+A block admits no uncovered spend. Processing its transactions sequentially
+against the on-chain balances before the block, intra-block credits counted,
+mempool never consulted, every debit must be covered at its turn. One single
+function enforces this rule everywhere: it validates blocks received from the
+network, it filters the blocks the node produces, so that a self-sealed block
+passes by construction the validation others will apply to it, and it
+re-checks every block of a candidate fork on a trial copy before any
+reorganization. A node can neither accept an overdraft, nor seal one, nor
+corrupt its own chain through a careless reorganization; and no
+reorganization, ever, descends below the finality floor.
+
+## 8. Incentive
+
+Each tick mints E_tick and shares it according to measured contribution, the
+energy committed, the work done, the validation rendered and the uptime, by
+Shapley values, the division rule that grants each participant his average
+marginal contribution:
+
+```
+share_i = φ_i / Σ_j φ_j
+```
+
+A solo node earns the full tick. Rewards are ordinary coins under ordinary
+addresses; mining is the only issuance, and the one-percent transfer burn the
+only sink. Validators are not paid to vote: they stake to be elected
+proposers, and lose the stake if they equivocate. The application makes this
+cycle visible: it mines in the background, shows every reward the instant the
+chain writes it, and lets you send and receive through a simple @username,
+resolved on-chain to its owner's address.
+
+## 9. Limitations
+
+Stated plainly, because trust is built on what a system admits. The proposer
+election is predictable one slot ahead; a cryptographic VRF, which would keep
+the winner unknown until revealed, and an anti-grinding VDF are future work.
+The transport node identity, the QUIC endpoint, is still Ed25519: an upstream
+library constraint, outside this code, switching the day upstream ships
+post-quantum endpoint identities. Declared energy readings weight a share of
+emission; they sit outside the consensus security path, a validator's weight
+being on-chain stake and nothing else, but they remain an economic gaming
+surface under study. The live network is small; the properties in this
+document are enforced by every node and exercised in multi-seed deterministic
+simulation, not yet proven at scale. No third-party audit has taken place
+yet; the complete readiness package, threat model, measured scope and a
+commitment to publish the full report, lives in `docs/audit/`. Finally,
+QUANTA has no market and no price, and this document values nothing.
+
+## 10. Calculations
+
+The proposer lottery gives each slot to an attacker holding stake fraction q
+with probability q. Sealing an entire epoch alone requires winning
+thirty-two consecutive slots:
+
+```
+q = 0.10      P = 10^−32
+q = 0.30      P ≈ 2·10^−17
+q = 0.45      P ≈ 8·10^−12
+```
+
+But the lottery is not the wall. Finalizing a conflicting history is not a
+matter of luck at any q: it requires certified signatures from two thirds of
+the stake, hence, by the theorem of section 5, the provable destruction of at
+least one third. Below the floor, reversal is not improbable: it is priced,
+and the price is automatic.
 
 ## 11. Conclusion
 
-Quanta is sovereign money: scarce by rule, mined by contribution, held by you alone, and
-moved peer-to-peer with no authority in the middle. The hard cap and the decaying emission
-are enforced in code and verified at consensus; the keys are yours; the network has no
-owner. The engine is real and tested; the network is young and open. Everything is free
-software (Apache-2.0) — the code is open, the rules live in the protocol, and future
-governance will be on-chain.
+We have proposed a currency without a promiser: no issuer, no server, no
+account to freeze, and not one signature a quantum computer retires. Coins
+are ML-DSA-65 signature chains under hash-committed addresses; supply is a
+closed formula converging to a hard cap; proposers are elected by on-chain
+stake; and history hardens into certificates whose violation destroys a third
+of the money that signed them. The rules are few, and every node checks all
+of them.
 
-<p align="center"><strong>◈ Quanta — Scarcity You Forge ◈</strong></p>
+---
+
+*Protocol `TORUS_PROTOCOL_VERSION = 6` · Apache-2.0 · The reference
+implementation, its test suite and its deterministic consensus simulation
+live in this repository.*

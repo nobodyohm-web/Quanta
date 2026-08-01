@@ -1,28 +1,30 @@
 <script lang="ts">
-  // État vide « vivant » — un champ quantique discret dérive en fond, le message
-  // flotte au-dessus. Transforme un vide en moment calme et soigné.
-  import QuantumField from "./QuantumField.svelte";
+  // Bank-grade empty state — calm and static: a quiet monochrome mark, no motion,
+  // no decor. Message content is passed in by the caller (already i18n'd).
   import type { Snippet } from "svelte";
   let { children, minHeight = 190 } = $props<{ children?: Snippet; minHeight?: number }>();
 </script>
 
 <div class="empty" style="min-height:{minHeight}px;">
-  <QuantumField density={1.3} maxOpacity={0.75} />
+  <svg class="empty-mark" width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+    <circle cx="8" cy="8" r="6" />
+    <path d="M8 5.6v3.4" stroke-linecap="round" />
+    <circle cx="8" cy="11.1" r="0.6" fill="currentColor" stroke="none" />
+  </svg>
   <div class="empty-inner">{@render children?.()}</div>
 </div>
 
 <style>
   .empty {
-    position: relative; overflow: hidden;
-    display: flex; align-items: center; justify-content: center;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px;
     text-align: center;
     border-radius: var(--radius-lg);
-    background:
-      radial-gradient(120% 90% at 50% 35%, var(--color-bg-1), transparent 70%);
+    background: var(--color-bg-1);
   }
+  .empty-mark { color: var(--color-text-3); }
   .empty-inner {
-    position: relative; z-index: 1;
-    max-width: 420px; padding: 20px 24px;
+    max-width: 420px; padding: 0 24px;
     font-size: 13px; line-height: 1.65; color: var(--color-text-2);
   }
 </style>

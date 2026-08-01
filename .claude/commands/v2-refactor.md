@@ -1,9 +1,6 @@
 Effectue le refactoring V2 du système économique QUANTA :
 
-1. Lis les specs complètes :
-   - .agent/design/quanta_v2_vision.md
-   - .agent/design/quanta_v2_innovations.md
-   - .agent/design/tech_references.md (section Shapley + BME)
+1. Lis les specs complètes dans CLAUDE.md (référence vivante du projet)
 
 2. Vérifie l'état actuel :
    - Quel modèle d'émission est implémenté ? (halving vs fixe)

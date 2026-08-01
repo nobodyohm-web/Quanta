@@ -14,16 +14,6 @@ pub struct StoredKeypair {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transaction {
-    pub id: String,
-    pub tx_type: String,
-    pub amount_sats: i64,
-    pub description: Option<String>,
-    pub timestamp: String,
-    pub payment_hash: Option<String>,
-}
-
 /// libSQL database wrapper
 pub struct Database {
     conn: libsql::Connection,
@@ -45,7 +35,6 @@ impl Database {
     async fn migrate(&self) -> Result<(), String> {
         let stmts = [
             "CREATE TABLE IF NOT EXISTS keypairs (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, encrypted_secret_key BLOB NOT NULL, nonce BLOB NOT NULL, display_name TEXT NOT NULL DEFAULT 'Sovereign', created_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS transactions (id TEXT PRIMARY KEY, tx_type TEXT NOT NULL, amount_sats INTEGER NOT NULL, description TEXT, timestamp TEXT NOT NULL, payment_hash TEXT)",
             // Phase 1.1: Persistent state snapshots for Ledger, Reputation engines
             "CREATE TABLE IF NOT EXISTS state_snapshots (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL)",
         ];
@@ -89,34 +78,6 @@ impl Database {
             })),
             None => Ok(None),
         }
-    }
-
-    // ─── Transactions ───
-    pub async fn record_tx(&self, tx_type: &str, amount: i64, desc: Option<&str>, hash: Option<&str>) -> Result<Transaction, String> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT INTO transactions (id, tx_type, amount_sats, description, timestamp, payment_hash) VALUES (?1,?2,?3,?4,?5,?6)",
-            libsql::params![id.clone(), tx_type, amount, desc.unwrap_or(""), now.clone(), hash.unwrap_or("")],
-        ).await.map_err(|e| e.to_string())?;
-        Ok(Transaction { id, tx_type: tx_type.into(), amount_sats: amount, description: desc.map(String::from), timestamp: now, payment_hash: hash.map(String::from) })
-    }
-
-    pub async fn get_transactions(&self) -> Result<Vec<Transaction>, String> {
-        let mut rows = self.conn.query("SELECT * FROM transactions ORDER BY timestamp DESC", ())
-            .await.map_err(|e| e.to_string())?;
-        let mut txs = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
-            txs.push(Transaction {
-                id: row.get::<String>(0).unwrap_or_default(),
-                tx_type: row.get::<String>(1).unwrap_or_default(),
-                amount_sats: row.get::<i64>(2).unwrap_or(0),
-                description: row.get::<String>(3).ok(),
-                timestamp: row.get::<String>(4).unwrap_or_default(),
-                payment_hash: row.get::<String>(5).ok(),
-            });
-        }
-        Ok(txs)
     }
 
     // ─── State Persistence (Phase 1.1) ───

@@ -3,7 +3,7 @@
 Tu es un ingénieur QA spécialisé dans les tests Rust et les simulations de réseaux distribués.
 
 ## Contexte
-Lis CLAUDE.md et `.agent/memory.md`.
+Lis CLAUDE.md (référence vivante du projet).
 
 ## Types de tests QUANTA
 

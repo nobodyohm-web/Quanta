@@ -25,6 +25,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,7 +58,13 @@ fn public_denied(method: &str) -> bool {
 
 /// Serve the JSON-RPC endpoint until `shutdown` fires. Never panics; a bind failure
 /// is logged and returns (the node keeps running without RPC).
-pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: CancellationToken, public: bool) {
+pub async fn serve(
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    shutdown: CancellationToken,
+    public: bool,
+    auth: Arc<RpcAuth>,
+) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -69,6 +76,7 @@ pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: Cancellatio
         "◈ [RPC] JSON-RPC + explorer sur http://{addr} ({})",
         if public { "public read-only" } else { "full/local" }
     );
+    let permits = Arc::new(tokio::sync::Semaphore::new(RPC_MAX_INFLIGHT));
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -77,14 +85,32 @@ pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: Cancellatio
             }
             accepted = listener.accept() => match accepted {
                 Ok((stream, _peer)) => {
+                    // M1: drop rather than park. Without the ceiling, a slowloris
+                    // pins one task + one fd per connection until the process hits
+                    // its rlimit.
+                    let Ok(permit) = permits.clone().try_acquire_owned() else {
+                        log::debug!("◈ [RPC] connexion refusée — plafond en vol atteint");
+                        continue;
+                    };
                     let st = state.clone();
+                    let au = auth.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, st, public).await {
-                            log::debug!("◈ [RPC] connexion: {e}");
+                        let _permit = permit;
+                        let deadline = Duration::from_secs(RPC_READ_TIMEOUT_SECS);
+                        match tokio::time::timeout(deadline, handle_conn(stream, st, public, au)).await {
+                            Ok(Err(e)) => log::debug!("◈ [RPC] connexion: {e}"),
+                            Err(_) => log::debug!("◈ [RPC] connexion expirée"),
+                            Ok(Ok(())) => {}
                         }
                     });
                 }
-                Err(e) => log::warn!("◈ [RPC] accept: {e}"),
+                Err(e) => {
+                    log::warn!("◈ [RPC] accept: {e}");
+                    // M1: EMFILE returns immediately — without this pause the loop
+                    // spins at 100% CPU, floods the log and starves mining/gossip
+                    // on the same runtime.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
         }
     }
@@ -93,8 +119,135 @@ pub async fn serve(state: Arc<AppState>, addr: SocketAddr, shutdown: Cancellatio
 struct HttpReq {
     method: String,
     path: String,
+    /// C4 (AUDIT-2026-07-25) — request headers, lowercased names. They used to be
+    /// parsed and thrown away, which is why no auth, `Origin`, `Host` or
+    /// `Content-Type` check was possible at all.
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
+
+impl HttpReq {
+    /// Case-insensitive header lookup (`name` must already be lowercase).
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The JSON-RPC `method` field, or `""` on a malformed body.
+    fn rpc_method(&self) -> String {
+        serde_json::from_slice::<Value>(&self.body)
+            .ok()
+            .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_default()
+    }
+}
+
+/// C4 — the money RPC's authority: a random token written to `<data_dir>/.cookie`
+/// at startup, in the spirit of Bitcoin Core's cookie file. Anything that can read
+/// that file is already inside the trust boundary; everything else — including a
+/// web page the operator happens to open in a browser on the same machine — is not.
+///
+/// Before this, `handle_conn` accepted any `POST /` and dispatched it: no token, no
+/// cookie, no `Origin`, no `Host`, not even a `Content-Type`. Binding to
+/// `127.0.0.1` stops the open internet but not the browser, which is already
+/// local — and with no `Content-Type` requirement a cross-origin `fetch()` is a
+/// CORS *simple* request, sent with no preflight. The attacker cannot read the
+/// reply, but `sendtoaddress` does not need a readable reply to move money.
+pub struct RpcAuth {
+    token: String,
+}
+
+impl RpcAuth {
+    /// Load the cookie from `data_dir`, or mint a fresh one. The file is created
+    /// `0600` on Unix so another local user cannot read the token.
+    pub fn load_or_create(data_dir: &std::path::Path) -> std::io::Result<Self> {
+        let path = data_dir.join(".cookie");
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            let t = existing.trim().to_string();
+            if t.len() >= 32 {
+                return Ok(Self { token: t });
+            }
+        }
+        let mut raw = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
+        let token = hex::encode(raw);
+        std::fs::create_dir_all(data_dir)?;
+        std::fs::write(&path, &token)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(Self { token })
+    }
+
+    /// The cookie path, logged at startup so an integrator knows where to read it.
+    pub fn cookie_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join(".cookie")
+    }
+
+    #[cfg(test)]
+    fn with_token(token: &str) -> Self {
+        Self { token: token.to_string() }
+    }
+}
+
+/// C4 — why a request must be refused, or `None` when it may proceed.
+///
+/// Only money/wallet methods are gated: the read-only surface stays open so the
+/// embedded explorer and an exchange's deposit monitoring keep working exactly as
+/// before. The gate is a per-method **allowlist of what is NOT gated**
+/// (`public_denied` is the same list `--public` refuses), so a method added later
+/// is protected by default rather than forgotten.
+fn auth_rejection(req: &HttpReq, auth: &RpcAuth, public: bool) -> Option<String> {
+    let method = req.rpc_method();
+    if !public_denied(&method) {
+        return None; // read-only surface, unchanged
+    }
+    if public {
+        return None; // `--public` already refuses these downstream, with its own error
+    }
+    // A browser attaches `Origin` automatically on cross-origin requests; a
+    // same-origin or absent one is fine, a foreign one never is.
+    if let Some(origin) = req.header("origin") {
+        if !origin.trim().is_empty() {
+            return Some("origine croisée refusée".into());
+        }
+    }
+    // Requiring the exact content type removes the CORS *simple request* path,
+    // which is what made this reachable from any web page at all.
+    match req.header("content-type") {
+        Some(ct) if ct.trim().starts_with("application/json") => {}
+        _ => return Some("Content-Type: application/json requis".into()),
+    }
+    let presented = req.header("authorization").unwrap_or("").trim();
+    let expected = format!("Bearer {}", auth.token);
+    // Constant-time compare — cheap to do, expensive to regret.
+    let ok = presented.len() == expected.len()
+        && presented
+            .as_bytes()
+            .iter()
+            .zip(expected.as_bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+    if ok {
+        None
+    } else {
+        Some("authentification requise (voir le fichier .cookie du nœud)".into())
+    }
+}
+
+/// M1 (AUDIT-2026-07-25) — no request may hold a task and a file descriptor
+/// indefinitely. `read_request` awaited with no deadline, so a client that
+/// connected and said nothing parked both forever.
+const RPC_READ_TIMEOUT_SECS: u64 = 10;
+
+/// M1 — in-flight connection ceiling. Excess connections are dropped rather than
+/// parked, so a slowloris cannot exhaust the process's descriptors and take the
+/// mining and gossip tasks down with it.
+const RPC_MAX_INFLIGHT: usize = 128;
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
@@ -131,11 +284,15 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
     let path = req_parts.next().unwrap_or("/").to_string();
 
     let mut content_length = 0usize;
+    let mut headers: Vec<(String, String)> = Vec::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().unwrap_or(0);
+            let name = k.trim().to_ascii_lowercase();
+            let value = v.trim().to_string();
+            if name == "content-length" {
+                content_length = value.parse().unwrap_or(0);
             }
+            headers.push((name, value));
         }
     }
     if content_length > MAX_BODY {
@@ -152,7 +309,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Ok(Some(HttpReq { method, path, body }))
+    Ok(Some(HttpReq { method, path, headers, body }))
 }
 
 async fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) -> std::io::Result<()> {
@@ -175,7 +332,12 @@ async fn write_html(stream: &mut TcpStream, status: &str, body: &str) -> std::io
     stream.flush().await
 }
 
-async fn handle_conn(mut stream: TcpStream, state: Arc<AppState>, public: bool) -> std::io::Result<()> {
+async fn handle_conn(
+    mut stream: TcpStream,
+    state: Arc<AppState>,
+    public: bool,
+    auth: Arc<RpcAuth>,
+) -> std::io::Result<()> {
     let req = match read_request(&mut stream).await? {
         Some(r) => r,
         None => return Ok(()),
@@ -193,6 +355,18 @@ async fn handle_conn(mut stream: TcpStream, state: Arc<AppState>, public: bool) 
     if !req.method.eq_ignore_ascii_case("POST") {
         let body = json!({"error": "GET / for the explorer, POST / for JSON-RPC"}).to_string();
         return write_response(&mut stream, "405 Method Not Allowed", body.as_bytes()).await;
+    }
+
+    // C4 — money/wallet methods require the cookie token, a same-origin request and
+    // a real JSON content type. Checked before the body is dispatched, so a refused
+    // request never reaches a handler that holds keys.
+    if let Some(reason) = auth_rejection(&req, &auth, public) {
+        let body = json!({
+            "jsonrpc": "2.0", "id": Value::Null,
+            "error": {"code": -32001, "message": reason}
+        })
+        .to_string();
+        return write_response(&mut stream, "401 Unauthorized", body.as_bytes()).await;
     }
 
     let parsed: Result<Value, _> = serde_json::from_slice(&req.body);
@@ -262,6 +436,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             let status = state.node.get_status().await;
             let ledger = state.node.ledger.read().await;
             let stats = ledger.stats();
+            // Provable-supply transparency (a listing requirement): total minted so
+            // far vs the hard cap, from the shared supply math (see `crate::views`).
+            let supply = crate::views::supply_view(&ledger, &stats);
             Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": crate::p2p::gossip::TORUS_PROTOCOL_VERSION,
@@ -269,10 +446,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 "micro_per_quanta": crate::p2p::ledger::MICRO,
                 "height": ledger.chain_height(),
                 "finalized_height": ledger.finalized_floor_index(),
-                // Provable-supply transparency (a listing requirement): total minted
-                // so far vs the hard cap, both verifiable on-chain, no hidden mint.
-                "minted_uqta": stats.total_mined,
-                "max_supply_uqta": crate::p2p::reputation::MAX_SUPPLY_MICRO,
+                "minted_uqta": supply.minted_uqta,
+                "max_supply_uqta": supply.max_supply_uqta,
                 "blocks": stats.total_blocks,
                 "total_txs": stats.total_txs,
                 "holders": stats.holders,
@@ -291,43 +466,28 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
         // credits a deposit once its block index ≤ finalized_floor (irreversible),
         // no confirmation-count guessing.
         "getfinalityinfo" => {
-            use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
+            // Shared finality math (see `crate::views`). This surface's frozen JSON
+            // *is* the view's shape (all µQTA integers), so it serializes directly —
+            // byte-identical to the former hand-rolled map.
             let ledger = state.node.ledger.read().await;
-            let height = ledger.chain_height();
-            let stakes = ledger.validator_stakes();
-            let total_staked: u64 = stakes.values().sum();
-            let min = crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
-            let validators = stakes.values().filter(|&&s| s >= min).count();
-            let blocks_into_epoch = height % EPOCH_LENGTH_BLOCKS;
-            Ok(json!({
-                "height": height,
-                "finalized_floor": ledger.finalized_floor_index(),
-                "epoch": height / EPOCH_LENGTH_BLOCKS,
-                "epoch_length": EPOCH_LENGTH_BLOCKS,
-                "blocks_into_epoch": blocks_into_epoch,
-                "next_checkpoint": height - blocks_into_epoch + EPOCH_LENGTH_BLOCKS,
-                "validators": validators,
-                "total_staked_uqta": total_staked,
-                "min_validator_stake_uqta": min,
-                "quorum_num": 2,
-                "quorum_den": 3,
-            }))
+            serde_json::to_value(crate::views::finality_view(&ledger))
+                .map_err(|_| (-32603, "serialize error".into()))
         }
 
         // The on-chain bonded validator set — who secures the network (PoS), sourced
         // purely from the chain (Stake/Unstake/Slash txs), stake-descending.
         "getvalidators" => {
-            let stakes = state.node.ledger.read().await.validator_stakes();
-            let min = crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
-            let mut vs: Vec<(String, u64)> = stakes.into_iter().filter(|(_, s)| *s >= min).collect();
-            vs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let list: Vec<Value> = vs
+            // Shared canonical bonded set (see `crate::views`): ≥MIN, stake-desc then
+            // addr-asc. This surface adds the bech32 presentation form per entry.
+            let vv = crate::views::validators_view(&*state.node.ledger.read().await);
+            let list: Vec<Value> = vv
+                .validators
                 .into_iter()
-                .map(|(addr_hex, stake)| {
-                    let bech = address::parse(&addr_hex)
+                .map(|e| {
+                    let bech = address::parse(&e.address_hex)
                         .map(|b| address::encode(&b))
-                        .unwrap_or_else(|_| addr_hex.clone());
-                    json!({ "address": bech, "address_hex": addr_hex, "stake_uqta": stake })
+                        .unwrap_or_else(|_| e.address_hex.clone());
+                    json!({ "address": bech, "address_hex": e.address_hex, "stake_uqta": e.stake_uqta })
                 })
                 .collect();
             Ok(json!({ "count": list.len(), "validators": list }))
@@ -342,7 +502,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .ok_or((-32602, "missing 'pubkeys' array".to_string()))?;
-            let threshold = param_u64(params, "threshold")? as u32;
+            // AUDIT-2026-07-25: `as u32` truncates silently — a threshold of
+            // 2^32+1 became 1, returning a VALID address for a policy the caller
+            // never asked for (a 1-of-N where they wanted more). Reject instead.
+            let threshold_raw = param_u64(params, "threshold")?;
+            let threshold = u32::try_from(threshold_raw)
+                .map_err(|_| (-32602, "threshold out of range".to_string()))?;
             let canon = crate::security::canonicalize_msig_keys(&pubkeys)
                 .ok_or((-32602, "invalid pubkeys (each must be a valid ML-DSA-65 public key)".to_string()))?;
             if threshold == 0 || threshold as usize > canon.len() {
@@ -360,21 +525,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
 
         // Pending (mempool) transactions not yet sealed into a block.
         "getmempool" => {
-            let ledger = state.node.ledger.read().await;
-            let txs: Vec<Value> = ledger
-                .pending_txs()
-                .iter()
-                .map(|t| {
-                    json!({
-                        "hash": t.hash,
-                        "from": t.from,
-                        "to": t.to,
-                        "amount_uqta": t.amount,
-                        "type": format!("{:?}", t.tx_type),
-                    })
-                })
-                .collect();
-            Ok(json!({ "count": txs.len(), "transactions": txs }))
+            // Shared mempool projection (see `crate::views`): each entry's `type`
+            // field is the tx-type Debug form, as before.
+            let mv = crate::views::mempool_view(&*state.node.ledger.read().await);
+            Ok(json!({ "count": mv.transactions.len(), "transactions": mv.transactions }))
         }
 
         "getblock" => {
@@ -390,11 +544,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             let addr = param_str(params, "address")?;
             let bytes = address::parse(&addr).map_err(|_| (-32602, "invalid address".into()))?;
             let hexs = hex::encode(bytes);
-            let ledger = state.node.ledger.read().await;
+            // Shared per-account money split (see `crate::views`), plus the echoed address.
+            let b = crate::views::balance_view(&*state.node.ledger.read().await, &hexs);
             Ok(json!({
                 "address": address::encode(&bytes),
-                "spendable_uqta": ledger.balance_of(&hexs),
-                "staked_uqta": ledger.staked_of(&hexs),
+                "spendable_uqta": b.spendable_uqta,
+                "staked_uqta": b.staked_uqta,
             }))
         }
 
@@ -568,12 +723,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                     c.pq_address_hex().unwrap_or_default(),
                 )
             };
-            let ledger = state.node.ledger.read().await;
+            // Shared per-account money split (see `crate::views`), plus wallet flags.
+            let b = crate::views::balance_view(&*state.node.ledger.read().await, &hexs);
             Ok(json!({
                 "has_wallet": has_wallet,
                 "address": address,
-                "spendable_uqta": ledger.balance_of(&hexs),
-                "staked_uqta": ledger.staked_of(&hexs),
+                "spendable_uqta": b.spendable_uqta,
+                "staked_uqta": b.staked_uqta,
             }))
         }
 
@@ -634,6 +790,89 @@ mod tests {
 
     async fn test_state() -> Arc<AppState> {
         Arc::new(AppState::new())
+    }
+
+    fn req_with(headers: &[(&str, &str)], body: &str) -> HttpReq {
+        HttpReq {
+            method: "POST".into(),
+            path: "/".into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+                .collect(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    /// C4 (AUDIT-2026-07-25) — the exact attack from the report: a web page the
+    /// operator visits issues a CORS *simple* request (no preflight, default
+    /// `text/plain` content type) at the local node running with a loaded wallet.
+    /// Before the fix this reached `sendtoaddress` and moved the money; the
+    /// attacker never needs to read the reply.
+    #[test]
+    fn c4_browser_simple_request_cannot_reach_sendtoaddress() {
+        let auth = RpcAuth::with_token("s3cret");
+        let drive_by = req_with(
+            &[("Content-Type", "text/plain;charset=UTF-8"), ("Origin", "https://evil.example")],
+            r#"{"jsonrpc":"2.0","id":1,"method":"sendtoaddress","params":{}}"#,
+        );
+        assert!(
+            auth_rejection(&drive_by, &auth, false).is_some(),
+            "a cross-origin simple request must never reach a wallet method"
+        );
+    }
+
+    /// C4 — a legitimate integrator holding the cookie is let through.
+    #[test]
+    fn c4_money_method_accepted_with_the_cookie_token() {
+        let auth = RpcAuth::with_token("s3cret");
+        let ok = req_with(
+            &[("Content-Type", "application/json"), ("Authorization", "Bearer s3cret")],
+            r#"{"method":"sendtoaddress"}"#,
+        );
+        assert!(auth_rejection(&ok, &auth, false).is_none());
+
+        let wrong = req_with(
+            &[("Content-Type", "application/json"), ("Authorization", "Bearer nope")],
+            r#"{"method":"sendtoaddress"}"#,
+        );
+        assert!(auth_rejection(&wrong, &auth, false).is_some(), "a wrong token is refused");
+
+        let none = req_with(
+            &[("Content-Type", "application/json")],
+            r#"{"method":"sendtoaddress"}"#,
+        );
+        assert!(auth_rejection(&none, &auth, false).is_some(), "no token is refused");
+    }
+
+    /// C4 — the read-only surface is deliberately NOT gated: the embedded explorer
+    /// and an exchange's deposit monitoring must keep working untouched. Gating
+    /// them would have been the easy over-correction.
+    #[test]
+    fn c4_read_only_surface_stays_open() {
+        let auth = RpcAuth::with_token("s3cret");
+        for m in ["getinfo", "getblock", "getbalance", "listtransactions", "validateaddress"] {
+            let req = req_with(&[], &format!(r#"{{"method":"{m}"}}"#));
+            assert!(
+                auth_rejection(&req, &auth, false).is_none(),
+                "{m} must stay reachable without a token"
+            );
+        }
+    }
+
+    /// H7 (AUDIT-2026-07-25) — every chain-controlled string interpolated into
+    /// `innerHTML` must be escaped. A transaction's `to` is attacker-chosen (the
+    /// protocol imposes no shape on it) and `short()` returns any string of ≤18
+    /// characters **verbatim**, so `${short(x)}` was a stored HTML injection: a
+    /// transfer to `<base href=//a.co>` re-pointed every relative fetch of anyone
+    /// browsing that block, including the explorer's own RPC calls. The escaped
+    /// form is `${esc(short(x))}`, which does not contain the pattern below.
+    #[test]
+    fn h7_explorer_never_interpolates_short_unescaped() {
+        assert!(
+            !EXPLORER_HTML.contains("${short("),
+            "unescaped short() interpolation in explorer.html — wrap it in esc()"
+        );
     }
 
     #[tokio::test]

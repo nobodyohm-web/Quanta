@@ -4,7 +4,6 @@
   "description": "Full capability set for the Quanta Protocol main window",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "opener:default"
+    "core:default"
   ]
 }

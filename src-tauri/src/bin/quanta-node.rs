@@ -31,6 +31,9 @@ async fn main() {
     // PQ transport (X25519MLKEM768) — same provider install as the desktop app.
     node_runtime::install_crypto_provider();
 
+    // Same App Nap opt-out as the app: a daemon exists to run unattended.
+    node_runtime::prevent_app_nap();
+
     let state = Arc::new(AppState::new());
 
     // `QUANTA_WALLET_PASSWORD` opens a PERSISTENT wallet (unlock existing / create
@@ -57,9 +60,24 @@ async fn main() {
         address
     );
 
+    // C4 (AUDIT-2026-07-25) — mint or load the RPC cookie before serving. Money and
+    // wallet methods are refused without it, so a browser page on this machine can
+    // no longer reach `sendtoaddress` on a node running with a loaded wallet.
+    let auth = match rpc::RpcAuth::load_or_create(&cfg.data_dir) {
+        Ok(a) => std::sync::Arc::new(a),
+        Err(e) => {
+            log::error!("◈ [quanta-node] impossible d'écrire le cookie RPC : {e}");
+            return;
+        }
+    };
+    log::info!(
+        "◈ [quanta-node] cookie RPC : {}",
+        rpc::RpcAuth::cookie_path(&cfg.data_dir).display()
+    );
+
     let shutdown = state.node.shutdown.clone();
     tokio::select! {
-        _ = rpc::serve(state.clone(), cfg.rpc_addr, shutdown.clone(), cfg.public) => {}
+        _ = rpc::serve(state.clone(), cfg.rpc_addr, shutdown.clone(), cfg.public, auth) => {}
         _ = tokio::signal::ctrl_c() => {
             log::info!("◈ [quanta-node] SIGINT reçu — arrêt gracieux");
         }

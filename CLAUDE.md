@@ -3,7 +3,7 @@
 > **Marque** : **Quanta** (réseau + app + pièce). Les identifiants techniques/wire hérités
 > — TLD `.torus`, `TORUS_PROTOCOL_VERSION`, events Tauri `torus://…` — sont **conservés tels
 > quels** pour la compatibilité réseau ; ne pas les renommer sans changement de protocole.
-> **Version** : v3.4 (crypto-only) | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
+> **Version** : v3.13.1 (crypto-only, hard-fork v7 « remédiation d'audit ») | **Stack** : Rust (Tauri 2.0) + Svelte 5 | **Coin** : QUANTA
 > **Licence** : Apache-2.0
 > **Status** : ✅ P2P vérifié entre 2 machines physiques (06/05/2026) · ⚠️ alpha, non audité par un tiers
 > **Repo** : [github.com/nobodyohm-web/Quanta](https://github.com/nobodyohm-web/Quanta)
@@ -51,7 +51,10 @@ rare et vérifiable.
 
 ```
 src-tauri/src/
-├── lib.rs                 ← Commandes Tauri (≈41 : 34 lib.rs + 7 commands_v3.rs)
+├── lib.rs                 ← run()/AppState/invoke_handler seulement (255 l)
+├── commands/              ← Commandes Tauri par domaine : identity/wallet/network/chain/diagnostics + error.rs (codes `err.*` traduits côté front) ; commands_v3.rs = @pseudo
+├── guardian.rs            ← gardien de gel (extrait de setup)
+├── views.rs               ← view-models PURS partagés app Tauri + JSON-RPC (Finality/Supply/Balance/Validators/Mempool — µQTA entiers, byte-compat RPC testée)
 ├── sm/                    ← ⭐ Cœur sans-IO déterministe (Phase 0, C1) — le consensus pur
 │   ├── mod.rs / node.rs   ← Node::handle Event→Effect (horloge + RNG injectés)
 │   ├── finality.rs        ← GADGET-1 époque/checkpoint (EPOCH_LENGTH_BLOCKS=32, ADR-009)
@@ -65,11 +68,11 @@ src-tauri/src/
 │   ├── mod.rs             ← PeerInfo, exports
 │   ├── pos_consensus.rs   ← ⭐ PoS leader election (élection déterministe, beacon enterré)
 │   ├── reputation.rs      ← Mining engine + emission_for_tick (hors chemin de sécurité)
-│   ├── ledger.rs          ← Blockchain (seal, validate, fork reorg, O(1) balance cache, genèse PQ)
+│   ├── ledger/            ← Blockchain en module-dossier : mod (état/types/cache O(1), genèse PQ) + validation (COVER) / stake / slash / reorg / tests — surface `p2p::ledger::` intacte
 │   ├── ledger_types.rs    ← Block, Transaction, TxType
 │   ├── shapley.rs         ← Distribution Shapley (énergie/travail/validation/uptime)
 │   ├── consensus.rs       ← CRDT PN-Counters (convergent merge)
-│   ├── gossip.rs          ← ⭐ Protocol gossip (10 variants : + FinalityVote LIVE-1)
+│   ├── gossip.rs          ← ⭐ Protocol gossip (11 variants : + FinalityVote/FinalityFault)
 │   ├── gossip_tasks.rs    ← Background tasks (Hello broadcast 120s, trigger_hello_now)
 │   ├── dispatcher.rs      ← ⭐ Message handler (verify → process → dispatch, étape ⑨ FinalityVote)
 │   ├── mining_loop.rs     ← Mine tick 60s + PoS leader seal + cast des votes de finalité (LIVE-1)
@@ -84,7 +87,7 @@ src-tauri/src/
 │   ├── mod.rs             ← CryptoEngine (Ed25519 transport + adresse ML-DSA, ADDR_DOMAIN)
 │   ├── pq_vault.rs        ← Identity vault (Argon2id + AES-256-GCM)
 │   ├── cipher.rs / crypto_agility.rs ← primitives symétriques + agilité crypto
-│   └── hybrid_crypto.rs   ← ⭐ ML-DSA-65 (FIPS 204) — autorité de compte PURE (PQ-MIG-3B) ; Ed25519 = transport
+│   └── hybrid_crypto.rs   ← ⭐ ML-DSA-65 (FIPS 204) — dérivation déterministe de la clé PQ depuis la graine + UNIQUE vérificateur PQ du projet (autorité de compte PURE, PQ-MIG-3B) ; Ed25519 = transport seul
 └── storage/               ← libSQL persistence
 ```
 
@@ -97,7 +100,7 @@ src-tauri/src/
 ┌──────────────────────────────────┐
 │    Application Layer             │ ← Wallet, Identité @pseudo, Staking
 ├──────────────────────────────────┤
-│    Protocol Layer                │ ← GossipMessage (9 variants)
+│    Protocol Layer                │ ← GossipMessage (11 variants)
 ├──────────────────────────────────┤
 │    Security Layer                │ ← GossipEnvelope (Ed25519 + nonce + timestamp)
 ├──────────────────────────────────┤
@@ -117,6 +120,8 @@ src-tauri/src/
 | `NewBlock` | Broadcast | Bloc scellé par le leader PoS | CRITICAL |
 | `BroadcastTx` | Broadcast | Transaction signée (mining, transfer, burn) | HIGH |
 | `PublishUsername` | Broadcast | Enregistrement d'identité @pseudo | MEDIUM |
+| `FinalityVote` | Broadcast | Vote de finalité ML-DSA (LIVE-1, source→target) | CRITICAL |
+| `FinalityFault` | Broadcast | Preuve d'équivocation (LIVE-3, → tx `Slash`) | HIGH |
 | `Ping` | Request | Liveness check | LOW |
 | `Pong` | Response | Réponse liveness | LOW |
 | `ReportPeer` | Broadcast | Signalement pair malveillant | LOW |
@@ -127,12 +132,13 @@ Raw bytes
   │ ① Size check (max 10 MB)
   │ ② JSON deserialize → GossipEnvelope
   │ ③ Ban check (per-peer)
-  │ ④ Dedup check (seen_messages LRU 100K)
-  │ ⑤ Timestamp freshness (±90s)
-  │ ⑥ Rate limit (30 msg/min per peer)
-  │ ⑦ Nonce anti-replay (per-sender monotonic)
-  │ ⑧ Ed25519 signature verification (STRUCT-1 canonical)
-  │ ⑨ Payload dispatch → handler
+  │ ④ Envelope-id canonique — id == BLAKE3(pré-image signée), sinon drop (H1)
+  │ ⑤ Sonde dedup EN LECTURE (seen_messages LRU 100K) — n'insère rien
+  │ ⑥ Timestamp freshness (±90s)
+  │ ⑦ Signature ML-DSA-65 (PQ-ENVELOPE-1, STRUCT-1 canonical)
+  │ ⑧ Insertion dedup — APRÈS authentification (H1)
+  │ ⑨ Rate limit adaptatif + nonce anti-replay (per-sender monotonic)
+  │ ⑩ Payload dispatch → handler
   ▼
 Processed
 ```
@@ -271,7 +277,7 @@ Dead peer cleanup toutes les 30s (TTL = 5 min)
 ### Network V2 hardening (NET-3 → NET-16)
 - **NET-3** : priority queue sortante 4-lanes (Critical/High/Medium/Low)
 - **NET-4** : Hello 120s + Ping 15s léger pour la liveness
-- **NET-5** : `TORUS_PROTOCOL_VERSION = 6` (2→3 PQ-MIG-5 : genèse PQ ; 3→4 LIVE-3B : slashes-unbonding ; 4→5 hard-fork v4 : genèse propre + PROPOSER-1 + enveloppes PQ ; 5→6 **MSIG-1** : multisig ML-DSA natif — additif, tx mono-clé byte-identiques, genèse inchangée) ; peers incompatibles loggués
+- **NET-5** : `TORUS_PROTOCOL_VERSION = 7` (2→3 PQ-MIG-5 : genèse PQ ; 3→4 LIVE-3B : slashes-unbonding ; 4→5 hard-fork v4 : genèse propre + PROPOSER-1 + enveloppes PQ ; 5→6 **MSIG-1** : multisig ML-DSA natif — additif, tx mono-clé byte-identiques, genèse inchangée ; 6→7 **remédiation d'audit** : C2 expéditeur synthétique confiné, C3 unstake borné par l'enjeu bondé, H2 époque de vote bornée, H1/H3 identifiant d'enveloppe canonique + dedup post-signature) ; peers incompatibles loggués
 - **NET-6** : chain sync parallèle (fanout = 4 fenêtres × 50 blocs)
 - **NET-7** : ~~DAG sync incrémental~~ — retiré avec les modules web (le DAG de contenu social n'existe plus ; sans rapport avec le futur consensus DAG-BFT)
 - **NET-8** : ChainSegment gzip optionnel (50 MB inflate cap)
@@ -374,7 +380,7 @@ npx tauri build
 ## Tests
 
 ```
-413 tests lib + 1 intégration, 0 failures
+477 tests lib + 1 intégration, 0 failures
 ├── sm/ (cœur sans-IO déterministe) — gadget de finalité + harnais DST :
 │     finality / finality_vote / finality_rule / finality_slashing / fork_choice
 │     (GADGET-1→5B), node (Event→Effect), sim (DST multi-seed, C1 128-runs,
@@ -469,3 +475,8 @@ npx tauri build
 | 2026-07-18 | **🔐 PQ-TRANSPORT-1 — le canal de transport devient post-quantique : bascule du fournisseur rustls `ring` → **`aws-lc-rs`** (iroh `default-features=false` + `tls-aws-lc-rs`, features par défaut `metrics`/`fast-apple-datapath`/`portmapper` conservées) + rustls `prefer-post-quantum` → l'échange de clés QUIC/TLS 1.3 négocie l'hybride **`X25519MLKEM768`** (ML-KEM-768 ⊕ X25519 ; ~+1 Ko/poignée de main, une fois par connexion). Défense **« harvest-now-decrypt-later »** sur la confidentialité du transport. `aws-lc-rs` installé fournisseur **par défaut du process** au démarrage (`lib.rs::run`, lève l'ambiguïté runtime si `ring` coexiste). **Non destructif — ni bump de protocole, ni reset de genèse** (négociation TLS, dégradation gracieuse). Le hybride est vérifié par l'échange gossip réel 2-nœuds (`p2p_two_nodes_exchange_gossip`). ⚠️ **Reste classique** : l'**identité de nœud** (NodeId = Ed25519) — Iroh attend un consensus d'industrie sur la signature PQ des EndpointIds (dette **upstream**, bascule le jour de la livraison). Bilan PQ : argent + finalité + **confidentialité transport** = PQ ; il ne reste que l'auth de nœud, hors de notre code — 416 tests + 1 intégration, clippy propre** |
 | 2026-07-18 | **🎬 Hard-fork v4 « genèse propre + consensus complet » (bump `TORUS_PROTOCOL_VERSION` 4→5) — 4 chantiers groupés en une seule rupture. **W1 GENESIS-V4** : genèse de relance neuve (timestamp 2026-07-18 → nouveau hash gelé content-bound, zéro premine) ; garde-fou de snapshot (`state_persistence` jette tout snapshot d'une genèse antérieure → repart sur v4). **W3 PROPOSER-1** (ferme le CRITIQUE différé) : le proposeur PoS, jusque-là vérifié seulement au *seal* (`mining_loop`), l'est désormais **à la réception** — le validateur partagé `validate_block_against_prev` (linéaire + tie-break fork + clone d'essai reorg + sync) **rejette** tout bloc non-genèse dont le proposeur n'est pas un validateur bondé as-of-parent (enjeu ≥ MIN). **Politique A** (choix d'Alexandre) : déterministe **sans horloge** — règle = union non-temporisée {leader ∪ fallbacks ∪ éligibles} = « tout validateur bondé », **sur-ensemble** de ce que le seal produit (symétrie produce/receive, zéro fork par dérive C1) ; bootstrap permissionless tant que personne n'a staké. Set d'enjeu sourcé as-of-parent sur chaque chemin (`validator_stakes()` O(1) au linéaire/clone ; `staked_before` pur au rare tie-break, verrouillé == cache). **W4** : le montant Shapley minté passe en entier u128 virgule fixe (`scale_amount`) — dernière violation f64 de la règle #6 close, conservation intacte. **W2 PQ-ENVELOPE-1** : les enveloppes gossip sont signées **ML-DSA-65** (sender = clé publique ML-DSA, vérif `verify_pq`, fallback Ed25519/legacy supprimé) sur **tous** les chemins (gossip_tasks/mining_loop/dispatcher/commands_v3/lib + cœur `sm/` via split `cfg(test)`→`sign_pq_det` pour la reproductibilité C1) ; identité transport Iroh (`endpoint_id`) **intacte**. **Après v4, le seul primitif classique restant est le NodeId Iroh (dette upstream).** 419 tests + 1 intégration (dont 2-nœuds réel + C1 128-runs), clippy `--all-targets` propre** |
 | 2026-07-19 | **🌐 Écosystème de nœud + 💠 MSIG-1 (multisig PQ natif) — Quanta passe d'app de bureau à protocole avec nœud de référence. **Adresses `qta1…`** (Bech32m à checksum, de bout en bout) ; **daemon `quanta-node`** headless (extraction `node_runtime::bootstrap` partagée app+daemon) + **JSON-RPC** (serveur tokio maison, 17 méthodes : getinfo/getblock/getbalance/validateaddress/getfinalityinfo/getvalidators/getmempool/listtransactions[scan de dépôts]/sendrawtransaction/sendtoaddress/getmultisigaddress…, µQTA entiers) ; **wallet persistant** (vault via `QUANTA_WALLET_PASSWORD`, mine/détient/envoie) ; **explorateur web** autonome (GET /) + mode **`--public`** lecture-seule ; supply prouvée dans getinfo. **MSIG-1 (bump 5→6)** : multisig ML-DSA **on-chain** M-of-N — l'adresse commet à la politique `BLAKE3(MSIG_DOMAIN‖clés triées‖seuil)`, tag `pq_public_key=="msig1"`, autorité JSON dans `pq_signature` (zéro nouveau champ wire → mono-clé byte-identique), `verify_multisig` = binding rebind-proof + hash + ≥seuil signataires **distincts** valides ; première **custody quorum post-quantique** (contourne l'absence de threshold-ML-DSA). 437 tests + 1 intégration, clippy propre, chaque brique prouvée en vivant. ⚠️ multi-party wallet UX + test d'intégration multisig + audit externe = suites** |
+| 2026-07-20 | **🏦 Refonte « de-slop » v3.10.0 — audit 6 angles (36 findings), l'app cesse d'être « codée par IA » : **V1 cohérence** (ticker unique QTA — QNT banni —, tutoiement FR partout, casse par CSS, emoji bannis, échelle typo `--text-*` + grille 8px, teal source unique, feedbacks standard) ; **V2 architecture d'info** (une source de vérité par écran — économie sur Minage seul, Réseau = santé réseau, Réglages = préférences, Profil = identité+sécurité ; **flux d'envoi UNIQUE** : Proches → panneau Wallet pré-rempli via `intents.svelte.ts`, revue burn+signature obligatoire ; états —/zéro/erreur honnêtes) ; **V3 fondations** (`api.ts` typé + `stores.svelte.ts` pollés par refcount — 1 intervalle par donnée ; Wallet 1112→333 l scindé en 4 panneaux + `AuthGate` ; Rust `commands/{identity,wallet,network,chain,diagnostics,error}` + `guardian.rs`, lib.rs 1560→255 l ; **10 commandes mortes purgées** dont le `find(\|_\| false)` ; `views.rs` partagé Tauri+RPC byte-compat testée ; **erreurs = codes `err.*` ×22 traduits ×6 langues** ; 150 clés i18n mortes purgées ; `ledger/` module-dossier 6 fichiers, surface intacte) ; whitepapers sans chiffres figés (zéro-fake) — **449 tests + 1 intégration**, clippy propre, svelte-check 0/0 |
+| 2026-07-20 | **💠 v3.11.0 « posture iconique » + nœud vivant en arrière-plan — (1) **App Nap fix** : `node_runtime::prevent_app_nap()` (NSActivityBackground via objc2-foundation, app + daemon) — macOS étranglait les timers fenêtre occluse (tick 60 s, heartbeats) ⇒ le nœud mine désormais en fond ; sommeil machine intact ; stores front rattrapés à la re-visibilité. (2) **Audit design 20 findings** (théâtre, copie défensive, tics IA) exécuté en 4 vagues : terminal **ForgeEngine v4** (cascade BLAKE3 décorative supprimée — l'ancre = vrai hash du dernier bloc + « scellé il y a X », pipeline de consensus VIVANT allumé par les événements réels, journal scrollable, glyphes 16→7, copie défensive coupée) ; **NetworkScene3D réécrite** (900 particules d'ambiance/auto-orbit/respiration supprimées → la chaîne réelle en cubes, finalité visible pierre teal ≤ plancher / verre givré au-dessus, mouvement UNIQUEMENT sur donnée réelle, rAF stoppé au repos = zéro GPU idle) ; QuantumField supprimé (états vides sobres) ; Minage en voix propriétaire (explainer 3-cartes → 1 phrase, plancher 0,5 % de la barre d'offre retiré, Peers/Height dédupliqués, « au rythme actuel », Total forgé hiérarchisé) ; accueil premium (mark Aurora + halo doux, jargon crypto → Aide, ✓/✗ → SVG) ; aide dé-gamifiée (« Note globale » A+ supprimée de bout en bout — front, JSON, méthode Rust morte) ; Whitepaper chrome i18n ×6 ; ⌘K avec actions réelles (copier adresse/@pseudo) ; statut de nœud Sidebar honnête ; Aurora.svelte fantôme supprimé ; toasts SVG + ticker QTA. (3) **Dossier d'audit externe** `docs/audit/` (README + THREAT-MODEL + SCOPE + RFQ, scan cargo-audit réel : 8 vulns transitives évaluées, 0 dans le code Quanta) — prêt pour OSTIF/devis. 449 tests + 1 intégration, clippy propre, svelte-check 0/0 |
+| 2026-07-25 | **🛡️ v3.13.0 — audit interne complet + hard-fork v7 « remédiation » (`TORUS_PROTOCOL_VERSION` 6→7).** Audit adversarial 8 axes (44 agents, chaque constat re-vérifié par des sceptiques indépendants, 3 réfutés) → `docs/audit/AUDIT-INTERNE-2026-07-25.md`. **4 critiques fermés** : **C1** auto-équivocation — aucune base anti-slashing n'existait, `build_vote_to_cast` re-dérivait (source, cible) à chaque tick de 60 s, donc un départage à hauteur égale sur une frontière d'époque faisait signer à un validateur **honnête** deux votes pour la même époque, brûlant 100 % de son enjeu ⇒ mémo persisté (6ᵉ clé de snapshot) ; **C2** émission illimitée — un `Transfer` depuis `NETWORK` échappait à la signature, à la couverture **et** au plafond (qui ne somme que `Mining`) ⇒ expéditeur synthétique confiné à l'unique coinbase ; **C3** `Unstake` jamais confronté à l'enjeu bondé (le seul garde vivait dans le constructeur local) ⇒ règle séquentielle miroir de COVER + clamp à l'application ; **C4** RPC monnaie sans aucune authentification — un `fetch()` depuis n'importe quelle page web atteignait `sendtoaddress` (requête CORS *simple*, sans préflight) ⇒ jeton cookie + garde `Origin`/`Content-Type`, surface lecture volontairement laissée ouverte. **8 hauts** : H1/H3 identifiant d'enveloppe canonique + dedup **après** signature (censure de sync gratuite fermée), H2 une seule mise de 1 µQTA arrêtait la finalité du réseau (éviction du pool inversée + époque non bornée), H4 la relecture de couverture ressuscitait des coins brûlés, H5 le tampon LIVE-4 épinglable par de la pacotille éteignait la guérison de partition, H6 cartes de pairs indexées par des clés ML-DSA de 3,9 Ko (~390 Mo atteignables), H7 injection HTML stockée dans l'explorateur, H8 annulation de bloc non-inverse fabriquant de l'enjeu. **4 moyens** : M1 délais/plafonds RPC, M2 arbre de blocs incrémental, M3 l'inventaire crypto affiché mentait (Ed25519 annoncé comme signature — corrigé partout, y compris la note de signature du portefeuille dans les 6 langues), M4 le wrap Touch ID survivait à une restauration. **473 tests + 1 intégration**, clippy propre, svelte-check 0/0 |
+| 2026-07-20 | **🌗 v3.12.0 « la nuit du propriétaire » — cinq directives d'Alexandre exécutées en une : **livre blanc en voix propre** (prose continue détaillée, zéro liste à tirets ×3 fichiers, formules gardées et expliquées — plus une imitation Nakamoto) ; **Proches → Contacts** ×6 ; **Profil enrichi** (adresse qta1 + code de connexion copiables, chip validateur vivant + stake, uptime mesuré, portefeuille en bref — trust_score sciemment omis, zéro-fake) ; **mode sombre RÉEL** (root cause : `data-theme` posé dans le vide, aucune palette n'écoutait — bloc tokens `:root[data-theme=dark]` slate froid/texte hiérarchisé/teal bright encre, anti-flash `app.html`, balayage des couleurs en dur) ; **scène Réseau vivante** (WebGL2 : ton nœud au centre, pairs réels halo∝qualité, hélice de la chaîne finalité pierre/verre, particules événementielles — burst au scellement + étiquette « @pseudo a scellé #N » via `miner_name` ajouté à l'event Rust des deux chemins, filet gossip, onde de vote, ambiance 140 motes throttlée 30fps, pause hors-viewport, pools zéro-alloc). Avant : **ForgeEngine v5 « vrai terminal »** (flux bas sticky + prompt `quanta>` : status/peers/balance/supply/block/epoch/filter — le piège scroll-anchoring de v4 fermé par construction) + **gardien occlusion-aware** (`NSWindow.occlusionState` — fini les reloads fantômes) + **App Nap opt-out** (`prevent_app_nap`, le nœud mine fenêtre cachée) + **dossier d'audit externe** `docs/audit/` (threat model, scope chiffré, RFQ, scan RustSec réel : 8 vulns transitives évaluées). 449 tests + 1 intégration, clippy propre, svelte-check 0/0 |
+| 2026-08-01 | **🧹 Nettoyage v3.13.1 — le programme perd ce qui ne sert plus, sans rien perdre de vivant.** Balayage adversarial 6 axes (chaque candidat mort re-vérifié par un sceptique chargé de le *sauver* : 15 constats réfutés — `consensus.rs`/CRDT, `energy`/`sybil`, `simulation.rs`, les accesseurs testés, `escrow_release_to`, les `@keyframes fadeIn`). **Rust** : 4 dépendances directes jamais importées retirées (`iroh-blobs`, `anyhow`, `base64`, `tauri-plugin-opener` + son `init()` et sa capability) ⇒ **−62 crates** dans l'arbre (842→780), autant de temps de compilation et de surface d'approvisionnement en moins ; **le schéma hybride Ed25519+ML-DSA est mort et parti** (`HybridIdentity`/`HybridSignature`/`verify_hybrid`/`REQUIRE_PQ` — plus aucun appelant depuis PQ-MIG-3B et PQ-ENVELOPE-1, et sa doc affirmait encore « Ed25519 seul fait foi », exactement le mensonge d'inventaire que M3 avait corrigé ailleurs) ; 4 commandes Tauri enregistrées mais jamais invoquées (`get_balance`, `get_node_ticket`, `resolve_address`, `username_of_pk`) ; table SQLite `transactions` + `record_tx`/`get_transactions` (vocabulaire `amount_sats`/`payment_hash`, vestige pré-P2P — l'historique vit dans le ledger) ; `GossipStats.nodes_synced` jamais incrémenté, `CLEANUP_INTERVAL` dupliquée, `shapley::distribute_emission` (helper mort, ses 2 tests re-câblés sur `compute_all_shares`). **Les 3 `#![allow(dead_code)]` périmés sont retirés** (`shapley`, `username`, `hybrid_crypto`) : le compilateur redevient l'autorité sur le code mort, et `clippy -D warnings` le prouve. **Front** : 2 composants jamais importés (`LiveCounter`, `Sparkline`), 16 clés i18n × 6 langues, 16 sélecteurs CSS morts, 2 deps npm (`@noble/hashes`, `@tauri-apps/plugin-opener`), le script `ai:map` cassé — en refusant de toucher `err.*`/`tx.*`, atteintes par clé dynamique. **Dépôt** : racine ramenée de 45 à 8 `.md` (35 specs de tâches livrées archivées dans `docs/specs/`, 2 journaux d'audit dans `docs/audit/` — déplacements internes au vault, wikilinks intacts), `_shots/` (19 Mo de captures), `.agent/` (60 fichiers d'un framework d'agent remplacé par `.claude/`, dont les renvois morts vers `.agent/design/` ont été réparés dans `.claude/`), 2 maquettes HTML. **477 tests + 1 intégration** (−5 tests du schéma hybride mort, +6 sur la primitive ML-DSA vivante : roundtrip, altération message/signature, clé étrangère, entrées malformées), clippy `--all-targets -D warnings` propre, svelte-check 0/0, `vite build` vert |

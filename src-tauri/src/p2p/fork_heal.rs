@@ -73,6 +73,11 @@ use super::ledger::{Block, Ledger};
 /// while costing at most a few MB of memory.
 pub const FORK_BUFFER_MAX_BLOCKS: usize = 1024;
 
+/// H5 (AUDIT-2026-07-25) — how many competing candidates one height may hold.
+/// A real fork offers ONE block per height that can matter to us; a margin of 8
+/// covers honest churn while stopping a single index from owning the buffer.
+pub const FORK_BUFFER_MAX_PER_INDEX: usize = 8;
+
 /// How far below the lowest unrooted orphan an ancestor probe asks, per
 /// round. Matches the `ChainSegment` size cap (50): each probe round is one
 /// full segment window, so the descent reaches any fork point in
@@ -141,21 +146,51 @@ impl ForkReconciler {
         let Err(pos) = entry.binary_search_by(|b| b.hash.cmp(&block.hash)) else {
             return false; // duplicate
         };
-        // Bound: evict the highest-index buffered block to make room; refuse
-        // the newcomer instead if IT would be the highest (deterministic, and
-        // an attacker spamming far-ahead junk can never displace root-adjacent
-        // candidates).
+        // H5 (AUDIT-2026-07-25) — per-index occupancy cap. A competing branch has
+        // ONE block per height that matters to us; anything beyond a small margin
+        // at a single index is an attacker minting hashes, and without this cap a
+        // single index could own the entire buffer.
+        if entry.len() >= FORK_BUFFER_MAX_PER_INDEX {
+            return false;
+        }
+        // H5 — evict by USEFULNESS, not by index.
+        //
+        // The old rule evicted the highest buffered index and refused any newcomer
+        // at or above it, on the reasoning that root-adjacent blocks are scarce.
+        // That holds for honest peers and inverts under attack: blocks far below
+        // our tip are the *cheapest* to forge, they never assemble a winning run,
+        // nothing ever removes them — so a buffer stuffed with 1024 low-index junk
+        // blocks was STABLE, and from then on every genuine competing block was
+        // refused. That switches off LIVE-4, the only live caller of
+        // `reorg_to_fork`, i.e. deep partition healing stops working entirely.
+        //
+        // A real competing branch diverges *near* our tip, so distance to the tip
+        // is the honest signal. Ties break on the highest hash, keeping eviction
+        // deterministic across nodes.
         if self.total >= FORK_BUFFER_MAX_BLOCKS {
-            let highest = *self.buf.keys().next_back().expect("non-empty at cap");
-            if block.index >= highest {
+            let tip = ledger.chain_height().saturating_sub(1);
+            let newcomer_distance = tip.abs_diff(block.index);
+            let victim = self
+                .buf
+                .iter()
+                .flat_map(|(idx, v)| v.iter().map(move |b| (*idx, b.hash.clone())))
+                .max_by_key(|(idx, hash)| (tip.abs_diff(*idx), hash.clone()));
+            let Some((victim_idx, victim_hash)) = victim else {
+                return false;
+            };
+            // The newcomer is itself the least useful block on offer → refuse it
+            // rather than churn the buffer.
+            if tip.abs_diff(victim_idx) < newcomer_distance {
                 return false;
             }
-            if let Some(v) = self.buf.get_mut(&highest) {
-                v.pop();
-                if v.is_empty() {
-                    self.buf.remove(&highest);
+            if let Some(v) = self.buf.get_mut(&victim_idx) {
+                if let Some(p) = v.iter().position(|b| b.hash == victim_hash) {
+                    v.remove(p);
+                    self.total -= 1;
                 }
-                self.total -= 1;
+                if v.is_empty() {
+                    self.buf.remove(&victim_idx);
+                }
             }
         }
         // NB: `entry` may have been invalidated by the eviction borrow — re-fetch.
@@ -583,6 +618,64 @@ mod tests {
         let out2 = r.resolve(&mut a);
         assert_eq!(out2.adopted, 0);
         assert!(conserves(&a));
+    }
+
+    #[test]
+    fn h5_low_index_junk_cannot_pin_the_buffer_against_a_real_branch() {
+        // H5 (AUDIT-2026-07-25): the old bound evicted the HIGHEST buffered index
+        // and refused any newcomer at or above it. Blocks far below our tip are the
+        // cheapest to forge, never assemble a winning run, and nothing ever removed
+        // them — so a buffer stuffed with low-index junk was STABLE and every
+        // genuine competing block was refused from then on. That switches off
+        // LIVE-4, the only live caller of `reorg_to_fork`: deep partition healing
+        // simply stops. Eviction now goes by distance to the tip.
+        let mut a = Ledger::new();
+        extend(&mut a, 200, "base");
+        let mut r = ForkReconciler::new();
+
+        // Saturate with junk far below the tip, spread wide enough to defeat the
+        // per-index cap (150 indices x 8 > FORK_BUFFER_MAX_BLOCKS).
+        for i in 0..(FORK_BUFFER_MAX_BLOCKS * 2) {
+            let idx = 1 + (i as u64 % 150);
+            let junk =
+                Ledger::forge_block_at(idx, &format!("junk-parent-{i}"), "ts", "m", vec![]);
+            r.offer(junk, &a);
+        }
+        assert_eq!(r.len(), FORK_BUFFER_MAX_BLOCKS, "the buffer is saturated with junk");
+
+        // A genuine competing block at our tip height must still find a slot.
+        let tip = a.chain.last().expect("tip").clone();
+        let parent = a.block_at(tip.index - 1).expect("parent").clone();
+        let rival = Ledger::forge_block_at(
+            tip.index,
+            &parent.hash,
+            "2026-07-25T00:00:00+00:00-rival",
+            "miner",
+            vec![],
+        );
+        assert!(
+            r.offer(rival, &a),
+            "a real competing block near our tip must always displace distant junk"
+        );
+        assert!(r.len() <= FORK_BUFFER_MAX_BLOCKS, "hard cap still holds");
+    }
+
+    #[test]
+    fn h5_one_index_cannot_own_the_whole_buffer() {
+        // H5: without a per-index cap, an attacker mints unlimited distinct hashes
+        // at a single convenient height and owns every slot.
+        let mut a = Ledger::new();
+        extend(&mut a, 5, "base");
+        let mut r = ForkReconciler::new();
+        for i in 0..200 {
+            let junk = Ledger::forge_block_at(3, &format!("same-height-{i}"), "ts", "m", vec![]);
+            r.offer(junk, &a);
+        }
+        assert!(
+            r.len() <= FORK_BUFFER_MAX_PER_INDEX,
+            "one height may not exceed the per-index cap, got {}",
+            r.len()
+        );
     }
 
     #[test]

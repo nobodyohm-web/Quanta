@@ -66,6 +66,29 @@ pub const REPORT_BAN_TTL_SECS: u64 = 3600;
 /// limit. When the cap is hit we prune expired bans and the weakest
 /// (fewest-reporter, sub-threshold) entries. §4 policy: exact value is a choice.
 const MAX_TRACKED_REPORTS: usize = 10_000;
+
+/// H6 (AUDIT-2026-07-25) — hard cap on the *reporters* stored per target.
+/// [`REPORT_BAN_THRESHOLD`] is 3; keeping a small margin above it preserves the
+/// evidence a ban rests on while making the set impossible to inflate.
+const MAX_REPORTERS_PER_TARGET: u32 = 8;
+
+/// H6 — the key under which a peer is tracked in the `NonceTracker` maps.
+///
+/// Every per-peer map used to be keyed by the raw sender string. That was sized
+/// for Ed25519 (64 hex chars) — but since PQ-ENVELOPE-1 the sender is an
+/// **ML-DSA-65 public key**, i.e. 1952 bytes rendered as 3904 hex characters.
+/// With `MAX_TRACKED_SENDERS = 100_000` that is roughly 390 MB of keys alone,
+/// reachable by anyone willing to mint keypairs (microseconds each) and send one
+/// signed envelope per key, which never trips the per-sender rate limit.
+///
+/// Hashing to a 32-byte BLAKE3 digest (64 hex chars) cuts that ~61× with no
+/// security trade-off: the maps only ever test key equality, and a full 256-bit
+/// digest leaves no collision margin worth attacking. Normalisation happens
+/// *inside* each public method, so callers keep passing the real public key and
+/// the maps cannot disagree about what a peer is called.
+fn peer_key(public_key_hex: &str) -> String {
+    hex::encode(blake3::hash(public_key_hex.as_bytes()).as_bytes())
+}
 /// SEC-COUNTRY-1: absolute cap on distinct country codes tracked for the energy
 /// oracle. The code is peer-supplied via `Hello`; sanitised to an ISO-shaped
 /// short token and bounded here so a peer can't grow the map with novel codes.
@@ -143,6 +166,7 @@ impl NonceTracker {
     /// Returns `true` if this nonce is valid (strictly greater than the last
     /// seen). Also updates the tracker on acceptance.
     pub fn check_and_advance(&mut self, sender_pk: &str, nonce: u64) -> bool {
+        let sender_pk = &peer_key(sender_pk);
         let entry = self.last_nonces.entry(sender_pk.to_string()).or_insert(0);
         let ok = if nonce > *entry {
             *entry = nonce;
@@ -221,6 +245,7 @@ impl NonceTracker {
     /// has exceeded the adaptive per-peer message budget for the current
     /// window.
     pub fn check_rate_limit(&mut self, sender_pk: &str, peer_count: usize) -> bool {
+        let sender_pk = &peer_key(sender_pk);
         let now = now_epoch_secs();
         let limit = Self::adaptive_limit_for(peer_count);
 
@@ -251,6 +276,8 @@ impl NonceTracker {
     /// to any target's count, regardless of how many (or how varied) its reports
     /// are. A peer reporting itself is ignored (nonsensical, and can't self-ban).
     pub fn record_report(&mut self, peer_id: &str, reporter_pk: &str) -> u32 {
+        let peer_id = &peer_key(peer_id);
+        let reporter_pk = &peer_key(reporter_pk);
         if peer_id == reporter_pk {
             // A peer cannot report itself into (or pad) a ban.
             return self
@@ -263,7 +290,15 @@ impl NonceTracker {
             .report_counts
             .entry(peer_id.to_string())
             .or_default();
-        reporters.insert(reporter_pk.to_string());
+        // H6: a ban needs REPORT_BAN_THRESHOLD distinct reporters, so storing more
+        // than a small margin buys nothing — and `prune_reports_and_bans` only ever
+        // bounded the number of TARGETS, never the reporters of one target. Without
+        // this cap, an attacker minting fresh ML-DSA keypairs (microseconds each,
+        // one message per key so the per-sender rate limit never fires) grows a
+        // single set without bound.
+        if (reporters.len() as u32) < MAX_REPORTERS_PER_TARGET {
+            reporters.insert(reporter_pk.to_string());
+        }
         let new_count = reporters.len() as u32;
         if new_count >= REPORT_BAN_THRESHOLD {
             self.bans
@@ -317,6 +352,7 @@ impl NonceTracker {
     /// Returns `true` if `peer_id` is currently banned. Auto-evicts expired
     /// entries (and resets their report count) so a peer can rejoin after TTL.
     pub fn is_banned(&mut self, peer_id: &str) -> bool {
+        let peer_id = &peer_key(peer_id);
         let Some(&expires_at) = self.bans.get(peer_id) else {
             return false;
         };
@@ -384,6 +420,9 @@ fn verify_envelope_signature(env: &GossipEnvelope) -> Result<(), String> {
 /// 4. **Ed25519 signature verification** ← NEW
 /// 5. Payload dispatch
 pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
+    // Chronomètre télémétrie : durée réelle du pipeline ①-⑧ (JSON, ban, dedup,
+    // fraîcheur, rate, nonce, vérification ML-DSA) — µs mesurés, hors sécurité.
+    let pipeline_t = std::time::Instant::now();
     // ── DoS guard: reject oversized envelopes BEFORE parsing ──
     // 10 MB is well above our largest legitimate message (ChainSegment of 50
     // blocks ≈ a few hundred KB). Anything bigger is either malicious or buggy.
@@ -418,12 +457,34 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
     }
 
+    // H1 (AUDIT-2026-07-25): the id must be the canonical digest of the SIGNED
+    // pre-image. It used to be a free-form String taken straight off the wire and
+    // nothing recomputed it, so an unauthenticated peer could choose arbitrary
+    // dedup keys — e.g. precompute the ids of the RequestChain messages every node
+    // emits and poison them in advance, censoring chain sync for free. Rejected
+    // here, before the LRU is touched.
+    if env.id != GossipRouter::envelope_id(&env.sender, env.nonce, &env.timestamp, &env.payload) {
+        log::warn!(
+            "◈ [Dispatch] ⚠ identifiant d'enveloppe non canonique from {} → drop",
+            short(&env.sender, 12)
+        );
+        return;
+    }
+
     // Anti-replay : si on a déjà vu cet ID, ignorer.
+    //
+    // H1: this is a READ-ONLY probe. The insertion moved below the signature gate,
+    // because inserting here let an unauthenticated peer fill the 100 K LRU with
+    // garbage and evict real message ids. The rate limiter could not slow that
+    // down — it runs after the signature check the attacker never reaches.
     {
-        let mut g = state.node.gossip.write().await;
-        if !g.mark_seen(&env.id) {
+        let g = state.node.gossip.read().await;
+        if g.has_seen(&env.id) {
             return;
         }
+    }
+    {
+        let mut g = state.node.gossip.write().await;
         g.stats.messages_received += 1;
         g.stats.bytes_received += raw.len() as u64;
     }
@@ -477,6 +538,13 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         return;
     }
 
+    // H1 (AUDIT-2026-07-25): NOW the id may enter the dedup LRU — the envelope is
+    // authenticated, so only a real signer can consume a slot. A `false` here means
+    // a concurrent task admitted the same envelope first; treat it as a duplicate.
+    if !state.node.gossip.write().await.mark_seen(&env.id) {
+        return;
+    }
+
     // ── NET-13: ADAPTIVE RATE LIMITING ── (post-verify: only authenticated
     // senders are counted, so the per-sender map cannot be inflated by spoofing)
     // Per-peer budget grows sub-linearly with connected-peer count so a
@@ -513,6 +581,40 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             );
             state.node.gossip.write().await.stats.dropped_nonce += 1;
             return;
+        }
+    }
+
+    // ── Télémétrie moteur (« sous le capot ») : chaque enveloppe AUTHENTIFIÉE
+    // (pipeline ①-⑧ passé : taille, JSON, ban, dedup, fraîcheur, rate, nonce,
+    // signature ML-DSA) est annoncée à l'UI telle quelle — type réel, expéditeur
+    // réel, nonce réel. Ping/Pong tus (bruit de liveness). Best-effort, hors du
+    // chemin de sécurité.
+    {
+        let msg_kind = match &env.payload {
+            GossipMessage::Hello { .. } => Some("Hello"),
+            GossipMessage::NewBlock { .. } => Some("NewBlock"),
+            GossipMessage::BroadcastTx { .. } => Some("BroadcastTx"),
+            GossipMessage::RequestChain { .. } => Some("RequestChain"),
+            GossipMessage::ChainSegment { .. } => Some("ChainSegment"),
+            GossipMessage::PublishUsername { .. } => Some("PublishUsername"),
+            GossipMessage::FinalityVote { .. } => Some("FinalityVote"),
+            GossipMessage::ReportPeer { .. } => Some("ReportPeer"),
+            _ => None,
+        };
+        if let Some(kind) = msg_kind {
+            if let Some(handle) = state.app_handle.read().await.as_ref() {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "quanta://engine",
+                    serde_json::json!({
+                        "kind": "envelope",
+                        "msg": kind,
+                        "sender": short(&env.sender, 16),
+                        "nonce": env.nonce,
+                        "us": pipeline_t.elapsed().as_micros() as u64,
+                    }),
+                );
+            }
         }
     }
 
@@ -1108,6 +1210,11 @@ async fn handle_broadcast_tx(state: &Arc<AppState>, tx_json: &str) {
                         "to": to,
                         "amount": amount as f64 / crate::p2p::ledger::MICRO as f64,
                         "tx_type": format!("{:?}", tx_type),
+                        // Matière unique pour le terminal : µQTA exacts, nonce
+                        // de compte réel, hash BLAKE3 réel de la tx.
+                        "amount_micro": amount,
+                        "nonce": nonce,
+                        "hash": tx_id.clone(),
                     }),
                 );
             }
@@ -1210,12 +1317,21 @@ async fn handle_new_block(state: &Arc<AppState>, sender: &str, block_json: &str)
             // Live UX: remote block landed — pulse the 3D scenes.
             if let Some(handle) = state.app_handle.read().await.as_ref() {
                 use tauri::Emitter;
+                // « Qui a trouvé le bloc » : le @pseudo du scelleur quand son
+                // adresse est enregistrée (lecture courte, hors lock ledger).
+                let miner_name = state.node.usernames.read().await.username_of(&block.miner);
                 let _ = handle.emit(
                     "quanta://block-sealed",
                     serde_json::json!({
                         "index": block.index,
                         "txs": block.transactions.len(),
                         "mine": false,
+                        // Le VRAI hash du bloc + son scelleur — la preuve
+                        // affichable telle quelle dans le moteur de l'UI.
+                        "hash": block.hash.clone(),
+                        "prev": block.prev_hash.clone(),
+                        "miner": short(&block.miner, 16),
+                        "miner_name": miner_name,
                     }),
                 );
             }
@@ -1287,7 +1403,9 @@ async fn fork_heal_offer_and_resolve(
 
 /// Maximum blocks we'll send in a single ChainSegment response (DoS
 /// protection).
-const MAX_CHAIN_SEGMENT: u64 = 50;
+// AUDIT-2026-07-25: was an independent literal that could drift from
+// MAX_CHAIN_SEGMENT_RECEIVED — one DoS cap, one source of truth.
+const MAX_CHAIN_SEGMENT: u64 = MAX_CHAIN_SEGMENT_RECEIVED as u64;
 
 /// Handle a RequestChain message — send back blocks starting at `from_height`.
 async fn handle_request_chain(
@@ -1670,13 +1788,48 @@ mod tests {
 
         let tracker = state.node.nonce_tracker.read().await;
         assert_eq!(
-            tracker.last_nonces.get(&pk),
+            tracker.last_nonces.get(&peer_key(&pk)),
             Some(&1),
             "a valid sender's nonce high-water must be recorded"
         );
         assert!(
-            tracker.rate_counters.contains_key(&pk),
+            tracker.rate_counters.contains_key(&peer_key(&pk)),
             "a valid sender must be tracked for rate limiting"
+        );
+    }
+
+    /// H1 (AUDIT-2026-07-25): the dedup LRU was written at stage ④ while the
+    /// signature was only checked at stage ⑧, and `env.id` was a free-form String
+    /// nothing recomputed. So an unauthenticated peer could precompute the ids of
+    /// the RequestChain messages every node emits, poison them for free, and have
+    /// every genuine sync request silently dropped — censorship, no stake, no rate
+    /// limit (the limiter runs after the signature gate the attacker never reaches).
+    #[tokio::test]
+    async fn h1_forged_envelope_id_cannot_poison_the_dedup_lru() {
+        let state = test_app_state();
+        let mut signer = CryptoEngine::new();
+        signer.generate_pq_identity().expect("ml-dsa primary");
+        let pk = signer.pq_identity_hex().expect("ml-dsa primary");
+        let msg = GossipMessage::Ping { nonce: 7 };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let nonce = 1_u64;
+        let signable = GossipRouter::signable_envelope_bytes(&pk, nonce, &ts, &msg);
+        let sig = signer.sign_pq(&signable).unwrap();
+        let mut env =
+            GossipRouter::build_signed_envelope(pk.clone(), msg, nonce, ts, &sig).unwrap();
+
+        // The id an honest node WILL later use for its own chain request.
+        let victim_payload = GossipMessage::RequestChain { from_height: 0, max_blocks: 50 };
+        let victim_id =
+            GossipRouter::envelope_id("some-honest-peer", 9, "2026-07-25T00:00:00Z", &victim_payload);
+        env.id = victim_id.clone();
+        let raw = serde_json::to_vec(&env).unwrap();
+
+        dispatch_incoming(&state, &raw).await;
+
+        assert!(
+            !state.node.gossip.read().await.has_seen(&victim_id),
+            "a forged id must never reach the dedup LRU"
         );
     }
 
@@ -1699,13 +1852,56 @@ mod tests {
         // A fresh, active sender via the real path pushes over the cap → prune
         // runs, expiring the idle entries and keeping the active one.
         assert!(t.check_and_advance("fresh_active", 1));
+        // H6: the maps are keyed by peer_key(), so look the active sender up the
+        // same way the tracker stores it.
+        let active = peer_key("fresh_active");
         assert!(t.last_seen.len() <= MAX_TRACKED_SENDERS, "maps stay bounded under flood");
         assert!(t.last_nonces.len() <= MAX_TRACKED_SENDERS, "nonce map bounded");
-        assert!(t.last_seen.contains_key("fresh_active"), "the ACTIVE sender is retained");
+        assert!(t.last_seen.contains_key(&active), "the ACTIVE sender is retained");
         assert!(
             t.last_seen.len() < MAX_TRACKED_SENDERS,
             "idle (replay-safe) entries were expired, not the active one"
         );
+    }
+
+    /// H6 (AUDIT-2026-07-25): `prune_reports_and_bans` bounds the number of
+    /// TARGETS, never the reporters of one target — so a single victim's reporter
+    /// set grew without limit. Each entry used to be a 3904-char ML-DSA key, and
+    /// minting keypairs is microseconds work with one message per key, which never
+    /// trips the per-sender rate limit. Assert the set is capped, and that a ban
+    /// still forms (the cap must not break the mechanism it bounds).
+    #[test]
+    fn h6_reporter_set_is_capped_per_target() {
+        let mut t = NonceTracker::new();
+        for i in 0..10_000 {
+            t.record_report("victim", &format!("reporter-{i}"));
+        }
+        let stored = t
+            .report_counts
+            .get(&peer_key("victim"))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        assert!(
+            stored <= MAX_REPORTERS_PER_TARGET as usize,
+            "reporter set must stay capped, got {stored}"
+        );
+        assert!(t.is_banned("victim"), "the ban still forms from distinct reporters");
+    }
+
+    /// H6: keys are stored hashed, so a map entry is 64 hex chars regardless of
+    /// how long the sender's public key is — the property that turns ~390 MB of
+    /// worst-case key storage into ~6 MB.
+    #[test]
+    fn h6_peer_keys_are_stored_hashed_not_raw() {
+        let mldsa_sized = "a".repeat(3904);
+        let mut t = NonceTracker::new();
+        assert!(t.check_and_advance(&mldsa_sized, 1));
+        assert!(
+            !t.last_nonces.contains_key(&mldsa_sized),
+            "the raw 3904-char key must never be a map key"
+        );
+        let k = t.last_nonces.keys().next().expect("one entry");
+        assert_eq!(k.len(), 64, "stored key is a BLAKE3 digest in hex");
     }
 
     /// TX-AUTH-NONCE-1 §5: the ABSOLUTE size bound must hold even when NOTHING is

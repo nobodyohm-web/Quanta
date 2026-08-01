@@ -1,6 +1,6 @@
 [package]
 name = "quanta-protocol"
-version = "3.4.0"
+version = "3.13.1"
 # Two binaries live in this package: the Tauri desktop app (`quanta-protocol`,
 # from src/main.rs) and the headless daemon (`quanta-node`, src/bin/quanta-node.rs).
 # `default-run` tells a bare `cargo run` (used by `tauri dev`) which one to launch,
@@ -23,7 +23,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # ─── Tauri ───
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
 
 # ─── Serialization ───
 serde = { version = "1", features = ["derive"] }
@@ -52,7 +51,6 @@ iroh = { version = "0.98", default-features = false, features = [
     "portmapper",
     "tls-aws-lc-rs",
 ] }
-iroh-blobs = "0.100"
 iroh-gossip = "0.98"
 
 # PQ-TRANSPORT-1 — rustls en dépendance **directe** uniquement pour activer la
@@ -85,18 +83,25 @@ argon2 = "0.5"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # ─── Database (libSQL — SQLite + F32_BLOB vectors) ───
-libsql = "0.9"
+# AUDIT-2026-07-25 — the database is opened with `Builder::new_local`, so the
+# remote/replication stack (hyper-rustls -> rustls 0.22 -> rustls-webpki 0.102)
+# is compiled but never exercised. Dropping default features removes four
+# RUSTSEC advisories from the tree that only ever applied to dead code.
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 
 # ─── Random ───
 rand = "0.8"
 
 # ─── Encoding ───
 hex = "0.4"
-base64 = "0.22"
 # BIP39 mnemonic (RECOVER-1): the 32-byte ML-DSA fund seed ⇄ a 24-word recovery
 # phrase — the industry-standard wallet backup, far more robust to transcribe than
 # 64 hex chars. `default-features = false` + `std` keeps only the English wordlist.
-bip39 = { version = "2", default-features = false, features = ["std"] }
+# AUDIT-2026-07-25 — the 24-word phrase IS the fund-controlling secret
+# (RECOVER-1). Without the `zeroize` feature the `Mnemonic` kept the words
+# in memory after use, so the one secret that can move every coin outlived
+# its scope. The feature derives Zeroize + ZeroizeOnDrop on Mnemonic.
+bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }
 
 # ─── Identifiers ───
 uuid = { version = "1", features = ["v4"] }
@@ -107,9 +112,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # ─── Logging ───
 log = "0.4"
 env_logger = "0.11"
-
-# ─── Error Handling ───
-anyhow = "1"
 
 # ─── Platform Dirs ───
 dirs = "6"
@@ -139,6 +141,12 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # ─── macOS Keychain (Touch ID–gated quick unlock, security/biometric.rs) ───
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+# App Nap opt-out (node_runtime::prevent_app_nap) — same version Tauri already
+# carries transitively, so this adds no new build unit family.
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
+# NSWindow.occlusionState (guardian.rs) — the ONLY truthful "is macOS throttling
+# this window" signal (minimized ∪ hidden ∪ fully occluded by another window).
+objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
 
 [dev-dependencies]
 proptest = "1"     # Property-based testing for invariants (Shapley, ledger overflow)

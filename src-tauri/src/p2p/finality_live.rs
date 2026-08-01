@@ -85,6 +85,23 @@ pub struct FinalityTracker {
     /// DoS bound on `pool` size ([`MAX_PENDING_LINKS`] in production). A field so a
     /// test can use a tiny cap without signing thousands of votes.
     max_pending_links: usize,
+    /// C1 (AUDIT-2026-07-25) — **slashing-protection memo**: for each target epoch,
+    /// the exact vote this node already signed.
+    ///
+    /// Without it, `build_vote_to_cast` re-derived `(source, target)` from live
+    /// state on every 60 s tick with only a `target.height <= source.height` guard,
+    /// so an equal-height tie-break reorg at a boundary (a normal outcome of PoS
+    /// leader fallback) or a late certificate advancing `justified` made an honest
+    /// validator emit two DIFFERENT votes for one target epoch — a `DoubleVote`
+    /// that every peer can prove and that burns 100 % of its bonded + unbonding
+    /// stake. This is the standard Ethereum-client anti-slashing DB; without it the
+    /// client is its own attacker.
+    cast_memo: BTreeMap<u64, Vote>,
+    /// M2 — chain height already folded into `tree`, with the tip hash it ended on.
+    /// The pair is the cursor for [`Self::observe_chain`]: the height says where to
+    /// resume, the hash proves the prefix was not rewritten under us by a reorg.
+    observed_height: u64,
+    observed_tip: String,
 }
 
 /// What ingesting one vote advanced — for observability/tests. `accepted` false
@@ -134,6 +151,9 @@ impl FinalityTracker {
             pool: BTreeMap::new(),
             epoch_len: epoch_len.max(1),
             max_pending_links: max_pending_links.max(1),
+            cast_memo: BTreeMap::new(),
+            observed_height: 0,
+            observed_tip: String::new(),
         }
     }
 
@@ -178,14 +198,69 @@ impl FinalityTracker {
     /// chain). Registers each block as a child of its predecessor so GHOST has a
     /// tree to walk. Idempotent — re-adding a known edge is a no-op — so it can
     /// be called after every integrated block. Genesis stays the root.
+    ///
+    /// M2 (AUDIT-2026-07-25) — **incremental**. This used to walk block 1 → tip on
+    /// every call, and the dispatcher calls it on every accepted `FinalityVote`,
+    /// inside the finality write lock that the mining tick also needs. On a 100k
+    /// chain that is ~500k BTreeMap operations and ~300k string allocations per
+    /// vote; a hundred peers sending their legitimate quota queue block sealing
+    /// behind pure re-computation. The tree is append-only on a linear chain, so a
+    /// cursor is exact — and the cursor is validated against the stored tip hash,
+    /// so a reorg (which rewrites blocks below the tip) falls back to a full walk
+    /// instead of silently keeping stale edges.
     pub fn observe_chain(&mut self, ledger: &Ledger) {
         let height = ledger.chain_height();
-        for i in 1..height {
+        // Resume only if the chain we already folded in is still a prefix of this
+        // one. Any mismatch means the history was rewritten → rebuild from scratch.
+        let resumable = self.observed_height > 0
+            && self.observed_height <= height
+            && ledger
+                .block_at(self.observed_height - 1)
+                .is_some_and(|b| b.hash == self.observed_tip);
+        let start = if resumable { self.observed_height.max(1) } else { 1 };
+        for i in start..height {
             let (Some(block), Some(prev)) = (ledger.block_at(i), ledger.block_at(i - 1)) else {
                 continue;
             };
             self.tree.add_block(&block.hash, &prev.hash);
         }
+        if height > 0 {
+            if let Some(tip) = ledger.block_at(height - 1) {
+                self.observed_height = height;
+                self.observed_tip = tip.hash.clone();
+            }
+        }
+    }
+
+    /// M2 — the chain height already folded into the block tree. Test-facing.
+    pub fn observed_height(&self) -> u64 {
+        self.observed_height
+    }
+
+    /// C1 — record the vote this node just cast, so no later tick can sign a
+    /// different one for the same target epoch. Call it right after the vote is
+    /// broadcast (and self-ingested), on the same tracker lock.
+    pub fn remember_cast(&mut self, vote: &Vote) {
+        self.cast_memo.insert(vote.target.epoch, vote.clone());
+    }
+
+    /// C1 — the vote already cast for `epoch`, if any.
+    pub fn cast_for_epoch(&self, epoch: u64) -> Option<&Vote> {
+        self.cast_memo.get(&epoch)
+    }
+
+    /// C1 — restore the memo from a snapshot. A protection DB a restart forgets
+    /// protects nothing: a node rebooting at an epoch boundary would re-derive and
+    /// possibly equivocate against the vote it cast before the restart.
+    pub fn restore_cast_memo(&mut self, votes: Vec<Vote>) {
+        for v in votes {
+            self.cast_memo.insert(v.target.epoch, v);
+        }
+    }
+
+    /// C1 — the memo's votes, for persistence.
+    pub fn cast_memo_votes(&self) -> Vec<Vote> {
+        self.cast_memo.values().cloned().collect()
     }
 
     /// **Ingest one finality vote (the LIVE-1 receive path).** Re-verifies the
@@ -252,6 +327,21 @@ impl FinalityTracker {
             return outcome; // stale — observed for fork-choice, but not pooled
         }
 
+        // H2 (AUDIT-2026-07-25): bound the attested epoch against the chain. A vote
+        // can never legitimately attest an epoch our chain has not reached — and
+        // `link_well_formed` only checks internal consistency (multiple of E,
+        // ordered), never the epoch itself. Unbounded, the epoch is the attacker's
+        // handle on where their link sorts in the pool. A generous slack keeps a
+        // node that is a few epochs behind from discarding votes it will soon need.
+        const EPOCH_SLACK: u64 = 4;
+        let chain_epoch = epoch_of_height(
+            ledger.chain_height().saturating_sub(1),
+            self.epoch_len,
+        );
+        if vote.target.epoch > chain_epoch.saturating_add(EPOCH_SLACK) {
+            return outcome; // observed for fork-choice, never pooled
+        }
+
         let link: Link = (vote.source.clone(), vote.target.clone());
         let entry = self.pool.entry(link.clone()).or_default();
         // De-dup a validator's repeat vote for the SAME link (idempotent gossip);
@@ -274,12 +364,28 @@ impl FinalityTracker {
             }
         }
 
-        // Hard cap (bound #2): evict the lowest-key (stalest) links until under cap.
+        // Hard cap (bound #2). H2 (AUDIT-2026-07-25): evict by ARRIVAL ORDER, not
+        // by BTreeMap key. `Link` starts with the source `Checkpoint`, ordered on
+        // (epoch, height, hash), and the epoch is attacker-chosen — nothing bounded
+        // it against the chain. So absurd high-epoch links sorted above every
+        // honest one and survived, while the honest current-epoch link (lowest key)
+        // was evicted on every insertion. The ⅔ certificate could then never
+        // assemble: one validator bonding 1 µQTA halted finality network-wide.
         while self.pool.len() > self.max_pending_links {
-            let Some(oldest) = self.pool.keys().next().cloned() else {
-                break;
-            };
-            self.pool.remove(&oldest);
+            // Evict the link whose target epoch is FURTHEST from the chain's own
+            // epoch — the one least likely to ever certify. Arrival order would be
+            // wrong here: the honest link is typically the oldest in the pool.
+            // Ties break on the link itself, keeping eviction deterministic across
+            // nodes (two nodes with the same pool evict the same entry).
+            let victim = self
+                .pool
+                .keys()
+                .max_by_key(|(_, target)| {
+                    (chain_epoch.abs_diff(target.epoch), (*target).clone())
+                })
+                .cloned();
+            let Some(victim) = victim else { break };
+            self.pool.remove(&victim);
         }
         outcome
     }
@@ -372,6 +478,30 @@ pub fn build_vote_to_cast(
         });
     if target.height <= source.height {
         return None;
+    }
+
+    // C1 (AUDIT-2026-07-25) — slashing protection. Everything above is derived
+    // from LIVE state, so between two 60 s ticks the target's hash can change at a
+    // fixed height (equal-height lexicographic tie-break at a boundary) or the
+    // source can advance (a late certificate completing a link). Either produces a
+    // second, DIFFERENT vote for the SAME target epoch, which `detect_fault`
+    // classifies as a DoubleVote — a valid, gossipable proof that burns this
+    // node's entire bonded + unbonding stake.
+    //
+    // So: for a target epoch already voted, re-emit that exact vote or nothing.
+    // Re-emitting the identical vote is safe (`detect_fault` short-circuits on an
+    // identical link) and keeps liveness when a broadcast was lost.
+    if let Some(prior) = tracker.cast_for_epoch(target.epoch) {
+        return if prior.source == source && prior.target == target {
+            Some(prior.clone())
+        } else {
+            log::warn!(
+                "◈ [Finality] C1: refus de voter une seconde fois pour l'époque {} \
+                 (l'état a changé sous nous — un second vote serait une auto-équivocation)",
+                target.epoch
+            );
+            None
+        };
     }
 
     // Construct the unsigned vote, then sign its OWN canonical bytes
@@ -496,6 +626,50 @@ mod tests {
     fn conserves(l: &Ledger) -> bool {
         let spendable: u64 = l.all_balances().values().sum();
         spendable + l.locked_stake_total() + l.total_burned() == l.total_minted()
+    }
+
+    #[test]
+    fn m2_observe_chain_is_incremental_and_stays_correct() {
+        // M2 (AUDIT-2026-07-25): observe_chain used to re-walk block 1 → tip on
+        // EVERY accepted finality vote, inside the finality write lock the mining
+        // tick also needs. The cursor makes it incremental; this asserts it both
+        // advances and never loses an edge (a wrong cursor would silently starve
+        // GHOST of the newest block).
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        let mut tracker = FinalityTracker::new(ledger.genesis_hash());
+
+        tracker.observe_chain(&ledger);
+        let first = tracker.observed_height();
+        assert_eq!(first, ledger.chain_height(), "the cursor tracks the observed height");
+
+        // Same chain again: nothing new to fold in, cursor unchanged.
+        tracker.observe_chain(&ledger);
+        assert_eq!(tracker.observed_height(), first, "an unchanged chain is not re-walked");
+
+        // Grow the chain: the cursor must advance and the new block must be in the
+        // tree, i.e. the incremental path folds in exactly what the full walk would.
+        ledger.mine_tx(&addr, MICRO, 0.0);
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:00:00+00:00".into())
+            .expect("seal one more block");
+        tracker.observe_chain(&ledger);
+        assert_eq!(
+            tracker.observed_height(),
+            ledger.chain_height(),
+            "the cursor follows the growing chain"
+        );
+
+        // Cross-check against a tracker that only ever did full walks: the two must
+        // hold the same view, which is the property the optimisation must preserve.
+        let mut reference = FinalityTracker::new(ledger.genesis_hash());
+        reference.observe_chain(&ledger);
+        assert_eq!(
+            tracker.observed_height(),
+            reference.observed_height(),
+            "incremental and from-scratch observation agree"
+        );
     }
 
     #[test]
@@ -724,6 +898,66 @@ mod tests {
             tracker.pending_links() <= CAP,
             "the pool stays bounded under a vote flood (got {})",
             tracker.pending_links(),
+        );
+    }
+
+    #[test]
+    fn h2_absurd_target_epoch_is_refused() {
+        // H2 (AUDIT-2026-07-25): `Vote::link_well_formed` only checks that the
+        // heights are epoch multiples and ordered — NOTHING bounded the epoch
+        // against the chain's actual height. Since the pool is a BTreeMap keyed by
+        // (epoch, height, hash), an attacker-chosen astronomic epoch sorted ABOVE
+        // every honest link and survived eviction, while the honest one — lowest
+        // key, i.e. current epoch — was always the one dropped.
+        let a = identity(1);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let mut tracker = FinalityTracker::new(ledger.genesis_hash());
+        let g = cp(0, ledger.genesis_hash().as_str());
+        let absurd = cp(u64::MAX / (E * 4), "far-future");
+        let v = signed_vote(&a, &g, &absurd);
+        let out = tracker.ingest_vote(v, &ledger);
+        assert!(
+            !out.accepted,
+            "a vote attesting an epoch the chain cannot have reached must be refused"
+        );
+        assert_eq!(tracker.pending_links(), 0, "and it must not occupy the pool");
+    }
+
+    #[test]
+    fn h2_flood_cannot_evict_the_honest_link_and_halt_finality() {
+        // H2: the real damage is not memory, it is LIVENESS. Eviction dropped the
+        // lowest BTreeMap key — the honest, current-epoch link — so each honest
+        // vote was inserted and then immediately evicted by the next flood vote,
+        // and the ⅔ certificate could never assemble. One validator bonding
+        // 1 µQTA could halt finality network-wide, permanently.
+        //
+        // Here: two equal-stake validators. A votes the honest link, a flood
+        // follows, then B votes the SAME link. If the link survived, the two votes
+        // form a certificate and finality advances. If it was evicted, B's vote
+        // starts a fresh entry alone and nothing justifies.
+        let a = identity(1);
+        let b = identity(2);
+        let ledger = staked_ledger(&[(&a, 5 * MICRO), (&b, 5 * MICRO)]);
+        const CAP: usize = 4;
+        let mut tracker = FinalityTracker::with_caps(ledger.genesis_hash(), E, CAP);
+        let g = cp(0, ledger.genesis_hash().as_str());
+        let honest = cp(1, "honest-target");
+
+        assert!(tracker.ingest_vote(signed_vote(&a, &g, &honest), &ledger).accepted);
+
+        // Flood with distinct links, all within the epoch bound so they are valid.
+        for i in 0..(CAP * 4) {
+            let target = cp(2, &format!("flood-{i}"));
+            let v = signed_vote(&a, &g, &target);
+            tracker.ingest_vote(v, &ledger);
+        }
+        assert!(tracker.pending_links() <= CAP, "the cap still holds");
+
+        let out = tracker.ingest_vote(signed_vote(&b, &g, &honest), &ledger);
+        assert!(
+            out.justified,
+            "the honest link must survive the flood so its ⅔ certificate can form — \
+             otherwise one cheap validator halts finality for everyone"
         );
     }
 
@@ -993,6 +1227,128 @@ mod tests {
         assert_eq!(receiver.unbonding_of(&addr), 0, "receiver destroyed the same entry");
         assert_eq!(receiver.total_burned(), 5 * MICRO);
         assert!(conserves(&receiver), "receiver conserves identically");
+    }
+
+    /// C1 (AUDIT-2026-07-25) — a bonded validator sitting exactly on an epoch
+    /// boundary, at a small epoch length so we need not seal 32 blocks.
+    fn validator_at_epoch_boundary() -> (Ledger, CryptoEngine, FinalityTracker) {
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+        // staked_ledger leaves us at height 2 (tip index 1); seal one more so the
+        // tip index is 2 — a boundary for epoch_len = 2.
+        ledger.mine_tx(&addr, MICRO, 0.0);
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:05:00+00:00".into())
+            .expect("seal to reach the boundary");
+        let tracker = FinalityTracker::with_epoch_len(ledger.genesis_hash(), 2);
+        (ledger, a, tracker)
+    }
+
+    #[test]
+    fn c1_cast_never_signs_two_different_votes_for_one_epoch() {
+        // C1: `build_vote_to_cast` runs on EVERY 60s mining tick (not just seal
+        // ticks) and re-derives (source, target) from live state, guarded only by
+        // `target.height <= source.height`. Nothing recorded "I already voted for
+        // epoch N". So an equal-height tie-break reorg at a boundary — an expected
+        // outcome of PoS leader fallback — or a late certificate advancing
+        // `justified` made an HONEST validator sign a second, different vote for
+        // the same target epoch. `detect_fault` calls that a DoubleVote, every peer
+        // gossips a cryptographically valid proof, and the penalty is a full burn
+        // of bonded + unbonding stake. No adversary required; an adversary can
+        // induce it cheaply.
+        let (ledger, crypto, mut tracker) = validator_at_epoch_boundary();
+
+        let first = build_vote_to_cast(&ledger, &tracker, &crypto)
+            .expect("a bonded validator at an epoch boundary votes");
+        tracker.remember_cast(&first);
+
+        // Re-emitting the IDENTICAL vote is safe (detect_fault short-circuits on an
+        // identical link) and must still be allowed — losing it would cost liveness.
+        let again = build_vote_to_cast(&ledger, &tracker, &crypto)
+            .expect("the same vote may be re-emitted");
+        assert_eq!(again.target, first.target, "same target");
+        assert_eq!(again.source, first.source, "same source");
+
+        // Now the dangerous case: the memo holds a DIFFERENT vote for this epoch,
+        // which is exactly what a boundary reorg produces (same height, new hash).
+        let mut rewritten = first.clone();
+        rewritten.target.hash = "ff".repeat(32);
+        let mut tracker2 = FinalityTracker::with_epoch_len(ledger.genesis_hash(), 2);
+        tracker2.remember_cast(&rewritten);
+        assert!(
+            build_vote_to_cast(&ledger, &tracker2, &crypto).is_none(),
+            "a second, DIFFERENT vote for target epoch {} would be self-slashing",
+            first.target.epoch
+        );
+    }
+
+    #[test]
+    fn c1_memo_does_not_freeze_later_epochs() {
+        // The guard must not cost liveness: a strictly later epoch is still votable.
+        let (ledger, crypto, mut tracker) = validator_at_epoch_boundary();
+        let first = build_vote_to_cast(&ledger, &tracker, &crypto).expect("first vote");
+        tracker.remember_cast(&first);
+        assert!(
+            tracker.cast_for_epoch(first.target.epoch).is_some(),
+            "the memo records the epoch just cast"
+        );
+        assert!(
+            tracker.cast_for_epoch(first.target.epoch + 1).is_none(),
+            "a later epoch is untouched and remains votable"
+        );
+    }
+
+    #[test]
+    fn h4_coverage_replay_consumes_slashed_unbonding() {
+        // H4 (AUDIT-2026-07-25): `onchain_spendable_before` — the single seed of the
+        // COVER-1/COVER-2 rule on EVERY admission path — rebuilt the unbonding pool
+        // from Unstake txs and matured it height by height, but skipped `Slash`
+        // entirely (`continue`). LIVE-3B slashes DESTROY unbonding entries, and the
+        // live path removes them, so the replay kept entries the chain had burned
+        // and would credit them back at maturation. Two views of one chain,
+        // permanently disagreeing — on the very map that decides what is spendable.
+        //
+        // The existing no-drift guard (cover1_onchain_replay_matches_live_cache)
+        // walks mine/transfer/burn/stake/unstake — no Slash — which is exactly why
+        // this survived.
+        let a = identity(1);
+        let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
+        let addr = a.pq_address_hex().unwrap();
+
+        ledger
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-25T00:00:00+00:00".into(), true)
+            .expect("full unstake");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:01:00+00:00".into())
+            .expect("seal the unstake");
+        assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "coins in flight");
+
+        let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
+        ledger.queue_slash(&proof).expect("an unbonding offender is slashable");
+        ledger
+            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:02:00+00:00".into())
+            .expect("seal the slash");
+        assert_eq!(ledger.unbonding_of(&addr), 0, "the chain destroyed the entry");
+        assert_eq!(ledger.pending_count(), 0, "cache is chain-only");
+
+        let tip = ledger.block_at(ledger.chain_height() - 1).unwrap().clone();
+        let replay = ledger.onchain_spendable_before(&tip);
+        let stake_sink = replay.get(Ledger::STAKE_SINK).copied().unwrap_or(0);
+
+        // Everything the offender had locked was destroyed: bonded 0, unbonding 0,
+        // so the replayed STAKE sink must be 0 too. Skipping the Slash left the
+        // 5 QTA sitting there, still scheduled to mature into spendable coins.
+        assert_eq!(
+            ledger.staked_of(&addr) + ledger.unbonding_of(&addr),
+            0,
+            "the chain holds nothing locked for the offender"
+        );
+        assert_eq!(
+            stake_sink, 0,
+            "the coverage replay must consume what the slash destroyed — otherwise \
+             burned coins mature back into spendable balance on every node"
+        );
     }
 
     #[test]

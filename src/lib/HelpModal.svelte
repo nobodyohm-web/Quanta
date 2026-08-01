@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { t } from "./i18n.svelte";
+  import { getSecurityAudit, type SecurityAudit } from "./api";
 
   let { isOpen, onClose }: { isOpen: boolean; onClose: () => void } = $props();
   let tab = $state<"start" | "economy" | "security" | "shortcuts">("start");
-  let audit = $state<any>(null);
+  let audit = $state<SecurityAudit | null>(null);
 
   $effect(() => {
     if (isOpen && !audit) {
-      invoke("get_security_audit").then(a => audit = a).catch(() => {});
+      getSecurityAudit().then(a => audit = a).catch(() => {});
     }
     if (isOpen) {
       const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -102,10 +102,11 @@
               <div class="hc-value">{audit.hashing?.name}</div>
               <div class="hc-meta">{audit.hashing?.standard}</div>
             </div>
-          </div>
-          <div class="help-grade">
-            <span class="hg-label">{t('help.sec_grade')}</span>
-            <span class="hg-value">{audit.grade}</span>
+            <div class="help-cell">
+              <div class="hc-label">{t('help.sec_transport')}</div>
+              <div class="hc-value">{audit.transport_auth?.name}</div>
+              <div class="hc-meta">{audit.transport_auth?.standard}</div>
+            </div>
           </div>
         {/if}
         <p class="help-tip">
@@ -200,13 +201,6 @@
   .hc-label { font-size: 10px; color: var(--color-text-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
   .hc-value { font-size: 13px; font-weight: 700; color: var(--color-text-0); }
   .hc-meta { font-size: 10px; color: var(--color-text-2); font-family: var(--font-mono); }
-  .help-grade {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 16px; background: var(--color-bg-2);
-    border-radius: 10px; margin-top: 8px;
-  }
-  .hg-label { font-size: 12px; color: var(--color-text-1); font-weight: 600; }
-  .hg-value { font-size: 14px; color: var(--cyan); font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums lining-nums; }
 
   .help-keys { display: flex; flex-direction: column; gap: 4px; }
   .hk-row {

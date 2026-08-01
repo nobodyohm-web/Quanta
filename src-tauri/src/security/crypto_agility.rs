@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 pub struct CryptoBOM {
     pub signing: AlgorithmEntry,
     pub key_exchange: AlgorithmEntry,
+    /// M3 (AUDIT-2026-07-25) — the node's *transport* identity, kept as its own
+    /// entry because it is the only classical primitive left and hiding it inside
+    /// `signing` is exactly the misstatement this audit found. Ed25519 here is the
+    /// Iroh NodeId, an upstream dependency: the account authority and the gossip
+    /// envelopes are both ML-DSA-65 since PQ-MIG-3B / PQ-ENVELOPE-1.
+    pub transport_auth: AlgorithmEntry,
     pub hashing: AlgorithmEntry,
     pub symmetric: AlgorithmEntry,
     pub kdf: AlgorithmEntry,
@@ -31,19 +37,38 @@ pub enum AlgorithmStatus {
 }
 
 impl CryptoBOM {
-    /// Current QUANTA v4 CBOM — used for audit reporting
+    /// The CBOM as it actually is — rendered to the user in the Help screen, so
+    /// it is held to the project's zero-fake rule like any other displayed value.
+    ///
+    /// M3 (AUDIT-2026-07-25): this used to report `signing: Ed25519 / RFC 8032 /
+    /// quantum_safe: false` and `key_exchange: X25519 / PendingMigration`. Both
+    /// were false — PQ-MIG-3B made ML-DSA-65 the sole tx authority (the Ed25519
+    /// co-factor was removed from `verify_tx`), PQ-ENVELOPE-1 made every gossip
+    /// envelope ML-DSA-signed with the classical fallback deleted, and
+    /// PQ-TRANSPORT-1 made the QUIC/TLS handshake negotiate the X25519MLKEM768
+    /// hybrid. The app was telling its own users that its signatures were the
+    /// exact primitive the whole migration removed.
     pub fn current() -> Self {
         Self {
             signing: AlgorithmEntry {
-                name: "Ed25519".into(),
-                standard: "RFC 8032".into(),
-                key_size_bits: 256,
-                quantum_safe: false,
+                name: "ML-DSA-65".into(),
+                standard: "FIPS 204".into(),
+                // Public key size: 1952 bytes.
+                key_size_bits: 15_616,
+                quantum_safe: true,
                 status: AlgorithmStatus::Active,
             },
             key_exchange: AlgorithmEntry {
-                name: "X25519 (ML-KEM-768 ready)".into(),
-                standard: "RFC 7748 → FIPS 203".into(),
+                name: "X25519MLKEM768".into(),
+                standard: "FIPS 203 hybrid (ML-KEM-768 ⊕ X25519)".into(),
+                // Combined encapsulation key: 1184 + 32 bytes.
+                key_size_bits: 9_728,
+                quantum_safe: true,
+                status: AlgorithmStatus::Active,
+            },
+            transport_auth: AlgorithmEntry {
+                name: "Ed25519 (Iroh NodeId)".into(),
+                standard: "RFC 8032".into(),
                 key_size_bits: 256,
                 quantum_safe: false,
                 status: AlgorithmStatus::PendingMigration,
@@ -72,21 +97,39 @@ impl CryptoBOM {
         }
     }
 
-    /// Count algorithms needing PQ migration
+    /// Count algorithms needing PQ migration. After PQ-TRANSPORT-1 this is 1 —
+    /// the Iroh NodeId — and that one is upstream-blocked, not deferred by us.
     pub fn pq_migration_count(&self) -> usize {
-        [&self.signing, &self.key_exchange, &self.hashing, &self.symmetric, &self.kdf]
-            .iter()
-            .filter(|a| !a.quantum_safe)
-            .count()
+        [
+            &self.signing,
+            &self.key_exchange,
+            &self.transport_auth,
+            &self.hashing,
+            &self.symmetric,
+            &self.kdf,
+        ]
+        .iter()
+        .filter(|a| !a.quantum_safe)
+        .count()
     }
+}
 
-    /// Overall security grade
-    pub fn security_grade(&self) -> &'static str {
-        match self.pq_migration_count() {
-            0 => "A+ (Full PQ)",
-            1 => "A (Near PQ)",
-            2 => "B (Hybrid)",
-            _ => "C (Classical)",
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M3 (AUDIT-2026-07-25) — the in-app security disclosure is rendered to the
+    /// user, so it falls under the zero-fake rule: every entry must match what the
+    /// code actually runs.
+    #[test]
+    fn m3_cbom_reports_the_real_primitives() {
+        let bom = CryptoBOM::current();
+        assert_eq!(bom.signing.name, "ML-DSA-65", "PQ-MIG-3B: ML-DSA is the tx authority");
+        assert!(bom.signing.quantum_safe);
+        assert_eq!(bom.key_exchange.name, "X25519MLKEM768", "PQ-TRANSPORT-1");
+        assert!(bom.key_exchange.quantum_safe);
+        // The one honest remaining debt, kept visible on purpose.
+        assert!(!bom.transport_auth.quantum_safe);
+        assert_eq!(bom.pq_migration_count(), 1, "only the Iroh NodeId is still classical");
     }
 }

@@ -12,7 +12,8 @@ paths: ["src-tauri/src/**/*.rs"]
 5. **Serde** : Tout type partagé avec le frontend doit être `Serialize + Deserialize`
 6. **CRDT** : Les compteurs utilisent `crdts` crate — `PNCounter` pour balances, `GCounter` pour métriques
 7. **DAG** : Les nœuds sont content-addressed via BLAKE3(parents + payload + author)
-8. **Gossip** : Messages signés Ed25519, enveloppés dans `GossipEnvelope`, dedupliqués via `seen_messages`
+8. **Gossip** : Messages signés **ML-DSA-65** (PQ-ENVELOPE-1), enveloppés dans
+   `GossipEnvelope`, dédupliqués via `seen_messages` (insertion post-signature, H1)
 9. **Émission V3 (tokenomics rareté)** : plafond DUR `MAX_SUPPLY_MICRO = 100M QUANTA`,
    émission **décroissante front-loaded** `emission_for_tick = (MAX − total_mined) / EMISSION_DIVISOR`
    (rythme réaliste, ~4 QUANTA/bloc à la genèse). **Zéro premine, zéro autorité de mint.**
