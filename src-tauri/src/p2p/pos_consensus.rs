@@ -68,6 +68,37 @@ use std::collections::HashMap;
 /// redéfini ici. À fixer quand l'échelle l'est ; ne bloque pas le câblage du gadget.
 pub const MIN_VALIDATOR_STAKE: u64 = 1_000_000;
 
+/// OPEN-DOOR-1 — cadence des **slots ouverts** : un bloc sur `OPEN_SLOT_EVERY_BLOCKS`
+/// peut être proposé par **n'importe quelle adresse**, bondée ou non.
+///
+/// Le trou qu'elle ferme : `PROPOSER-1` n'autorise à proposer que les validateurs
+/// bondés — sauf tant que *personne* n'a staké (amorçage permissionless). Dès
+/// qu'un seul compte bonde 1 QUANTA, la porte se referme, et un nouvel arrivant
+/// est piégé dans une boucle fermée : il lui faut 1 QUANTA pour staker, staker
+/// pour proposer, proposer pour gagner 1 QUANTA. Il n'existe ni faucet, ni
+/// airdrop, ni premine — donc aucun chemin vers sa première pièce. Le réseau se
+/// fermait définitivement au premier staker.
+///
+/// Le prix assumé, en toutes lettres : le trilemme de vulnérabilité Sybil (Platt,
+/// Platt & McBurney, 2024) démontre qu'un protocole ne peut pas être à la fois
+/// *sans permission*, *résistant aux Sybils* et *gratuit*. Une entrée gratuite
+/// s'achète donc en résistance Sybil. Ici l'achat est **borné et prévisible** :
+/// une ferme de fausses identités ne peut capter qu'au plus `1/OPEN_SLOT_EVERY_BLOCKS`
+/// de l'émission — jamais davantage, quel que soit le nombre d'identités — parce
+/// que l'ouverture est **cadencée par la hauteur**, pas par le nombre de
+/// prétendants. Les 15/16 restants exigent un enjeu bondé, donc la sécurité du
+/// consensus reste adossée à l'enjeu.
+///
+/// Fonction pure de la hauteur : aucun état, aucune horloge, O(1) — chaque nœud
+/// tranche identiquement (C1).
+pub const OPEN_SLOT_EVERY_BLOCKS: u64 = 16;
+
+/// OPEN-DOOR-1 — ce bloc est-il un slot ouvert ? La genèse (index 0) n'en est
+/// jamais un : elle n'est proposée par personne.
+pub fn is_open_slot(index: u64) -> bool {
+    index > 0 && index.is_multiple_of(OPEN_SLOT_EVERY_BLOCKS)
+}
+
 /// Timeout in seconds after which the next validator in line can propose.
 pub const LEADER_TIMEOUT_SECS: u64 = 30;
 

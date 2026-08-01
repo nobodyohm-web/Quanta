@@ -576,10 +576,13 @@ mod late_joiner_simulation {
         // address; Ed25519 stays the transport key, off the value path.
         let pk = crypto.pq_address_hex().expect("ml-dsa address");
 
-        // Seed: mine 1000 QUANTA to sender
+        // Seed: mine 1000 QUANTA to sender. MINT-EXACT-1 : `mine_tx` ne scelle
+        // plus tout seul à 10 tx en attente (c'était le fork privé silencieux —
+        // un bloc jamais diffusé), donc le scellement est explicite ici.
         for _ in 0..10 {
             ledger.mine_tx(&pk, 100 * MICRO, 0.5);
         }
+        ledger.seal_block(&pk, 0.5);
         let initial_supply = ledger.total_supply();
         assert_eq!(initial_supply, 1000 * MICRO, "initial supply = 1000 QNT");
 

@@ -15,22 +15,33 @@ JAMAIS l'inverse — risque de deadlock
 ```
 toutes les 60s:
   watts = estimate_watts()
-  total = node.total_network_watts() + watts
-  (qta, kwh) = reputation.uptime_tick(pk, blocks_verified, emission_for_tick, peer_contribs)
-  ledger.mine_tx(pk, qta, kwh)
+  reputation.uptime_tick(...)      ← compteurs d'AFFICHAGE seulement (MINT-EXACT-1)
+                                      le tick ne crée PLUS de monnaie
 
-toutes les 2 ticks (seal):
-  block = ledger.seal_if_pending(pk, kwh)
-  if block → broadcast NewBlock
+toutes les 2 ticks (si proposeur élu OU slot ouvert):
+  ledger.mint_block_reward(pk)     ← coinbase CANONIQUE = emission_for_block(chaîne)
+  block = ledger.seal_block(pk, 0.0)  ← le proposeur produit toujours son bloc
+  broadcast NewBlock
 ```
+> **MINT-EXACT-1.** Le tick appelait `mine_tx` avec un montant calculé *localement*
+> (part Shapley sur des watts **auto-déclarés** par les pairs). Trois conséquences,
+> toutes fermées : (1) `mine_tx` scellait tout seul à 10 tx en attente, **sans
+> diffuser** → chaîne privée + solde fantôme ; (2) la tx `Mining` diffusée était
+> rejetée par chaque pair (MINT-GUARD-1) → trafic mort ; (3) les parts Shapley
+> sommant à 1, l'émission réalisée s'effondrait en `1/N`. `mine_tx` est désormais
+> `#[cfg(test)]` — en release **rien** ne peut poser de `Mining` au mempool.
 
 ## Émission (rareté — plafond dur + décroissance)
 - `MAX_SUPPLY_MICRO = 100_000_000 * MICRO` (plafond DUR, vérifié au consensus)
 - `EMISSION_DIVISOR = 50_000_000`
 - `emission_for_tick(total_mined) = (MAX_SUPPLY_MICRO − total_mined) / EMISSION_DIVISOR`
   → ≈2 QUANTA/tick à la genèse (~120 QUANTA/h), décroît vers le plafond
-- Solo : 100% du tick ; Multi : part proportionnelle à la contribution mesurée
-  (Shapley) — `uptime_tick` crédite selon `shapley::compute_all_shares` (parts qui somment à 1)
+- **MINT-EXACT-1** : `emission_for_block(total_mined) = emission_for_tick × TICKS_PER_BLOCK`
+  → la récompense d'un bloc est une **fonction pure de la chaîne**, identique pour
+  tous, indépendante du nombre de nœuds et de l'énergie déclarée. Le récepteur la
+  **recalcule** (`block_minted ≤ emission_for_block(prior)`) au lieu de la borner
+  mollement — l'ancienne marge `64 ticks` valait `32 × N` fois le montant honnête.
+  Shapley/énergie restent des signaux d'**affichage**, hors du chemin monétaire.
 - Zéro premine, zéro autorité d'émission ; le minage en direct (`mining_loop`)
   appelle `emission_for_tick(total_mined)`
 

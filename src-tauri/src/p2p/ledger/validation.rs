@@ -303,22 +303,29 @@ impl Ledger {
                 crate::p2p::reputation::MAX_SUPPLY_MICRO
             ));
         }
-        // ② Borne PAR BLOC — un sceleur ne peut pas rafler l'émission restante d'un
-        // seul coup. L'émission légitime/bloc ≈ emission_for_tick × quelques ticks
-        // (seal toutes les 2). On autorise une marge LARGE (64 ticks) pour ne jamais
-        // rejeter un bloc honnête malgré les retards réseau / multi-pairs, tout en
-        // bloquant un mint massif (ordre 1e4×+ au-dessus du légitime). Plancher de
-        // 10 QUANTA près du plafond où emission_for_tick → 0.
-        const PER_BLOCK_EMISSION_TICKS: u64 = 64;
-        let per_tick = crate::p2p::reputation::emission_for_tick(current);
-        let max_per_block = per_tick
-            .saturating_mul(PER_BLOCK_EMISSION_TICKS)
-            .max(10 * crate::p2p::ledger_types::MICRO);
-        if block_minted > max_per_block {
+        // ② MINT-EXACT-1 — borne PAR BLOC **serrée** : la récompense d'un bloc est
+        // une fonction pure de la chaîne (`emission_for_block`), donc chaque nœud la
+        // re-dérive à l'identique et un sceleur ne peut pas s'en écarter.
+        //
+        // Avant, la borne valait `64 × emission_for_tick` là où le montant honnête
+        // est `TICKS_PER_BLOCK × emission_for_tick / N` (N nœuds vivants) : une marge
+        // exploitable de `32 × N` — à 100 nœuds, un validateur bondé pouvait se
+        // minter 3 200 fois sa récompense légitime, à chaque bloc, et tout le réseau
+        // l'acceptait (seul le plafond dur des 100 M était vérifié). Le montant
+        // venait d'un calcul **local** (part Shapley sur des watts auto-déclarés),
+        // donc invérifiable par définition ; le réseau ne pouvait que le borner.
+        // Désormais il le **recalcule**, et la marge disparaît.
+        //
+        // `block_minted == 0` est déjà sorti plus haut : un bloc peut ne porter
+        // aucune récompense (le sceleur y renonce, ou l'émission a atteint le
+        // plafond) — c'est strictement non-inflationnaire, donc autorisé.
+        let expected = crate::p2p::reputation::emission_for_block(current);
+        if block_minted > expected {
             return Err(format!(
-                "bloc rejeté : émission/bloc {} dépasse le max légitime {} — un sceleur ne peut \
-                 pas rafler l'émission restante d'un coup",
-                block_minted, max_per_block
+                "bloc rejeté : émission/bloc {} dépasse la récompense canonique {} \
+                 (offre minée avant ce bloc : {}) — la récompense est une fonction \
+                 pure de la chaîne, pas un montant choisi par le sceleur",
+                block_minted, expected, current
             ));
         }
         Ok(())
@@ -580,7 +587,18 @@ impl Ledger {
         // Bootstrap: before anyone has staked, `bonded_before` has no eligible
         // entry → sealing is permissionless (mirrors `mining_loop`'s bootstrap
         // branch), so the fresh v4 chain can start from an empty genesis.
-        if block.index > 0 {
+        //
+        // OPEN-DOOR-1 : un bloc sur `OPEN_SLOT_EVERY_BLOCKS` est un **slot ouvert**
+        // — n'importe quelle adresse peut le proposer, bondée ou non. Sans lui, la
+        // règle ci-dessus refermait le réseau **définitivement** au premier staker :
+        // un nouvel arrivant a besoin d'un enjeu pour proposer, de proposer pour
+        // gagner, et il n'existe ni faucet ni airdrop pour rompre la boucle. La
+        // fenêtre est cadencée par la hauteur (fonction pure, O(1)), donc une ferme
+        // Sybil ne capte au plus qu'`1/OPEN_SLOT_EVERY_BLOCKS` de l'émission quel
+        // que soit son nombre d'identités — le prix, borné et assumé, de l'entrée
+        // libre (trilemme Sybil : sans-permission + résistant + gratuit est
+        // impossible ; on relâche « gratuit » d'exactement un seizième).
+        if block.index > 0 && !crate::p2p::pos_consensus::is_open_slot(block.index) {
             let has_eligible = bonded_before
                 .values()
                 .any(|&s| s >= crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE);

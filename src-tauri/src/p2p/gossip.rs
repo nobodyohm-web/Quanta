@@ -75,7 +75,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// Genesis is untouched by these rules, but the wire and validation surfaces are
 /// incompatible, hence the bump.
-pub const TORUS_PROTOCOL_VERSION: u8 = 7;
+/// **7→8 (MINT-EXACT-1) — la récompense de bloc devient une fonction pure de la
+/// chaîne.** Une seule règle d'admission change, mais elle porte la politique
+/// monétaire, donc un nœud v7 et un nœud v8 n'acceptent pas le même ensemble de
+/// blocs :
+/// - v7 bornait l'émission d'un bloc à `64 × emission_for_tick` — une marge de
+///   `32 × N` au-dessus du montant honnête (`≈ 2 × emission_for_tick / N` avec N
+///   nœuds vivants), parce que le montant était calculé **localement** par le
+///   sceleur (part Shapley dérivée de watts auto-déclarés, invérifiables) et que
+///   le réseau ne pouvait donc que le borner. À 100 nœuds, un validateur bondé
+///   pouvait se frapper 3 200 fois sa récompense légitime à chaque bloc.
+/// - v8 **recalcule** : `block_minted ≤ emission_for_block(offre minée avant ce
+///   bloc)`, une fonction pure de la chaîne que producteur et vérificateur lisent
+///   à l'identique. L'énergie auto-déclarée quitte le chemin monétaire (elle reste
+///   un signal d'affichage) et l'émission réalisée cesse de s'effondrer en `1/N`
+///   quand le réseau grandit.
+///
+/// - **OPEN-DOOR-1** — un bloc sur `OPEN_SLOT_EVERY_BLOCKS` (16) est un **slot
+///   ouvert** que n'importe quelle adresse peut proposer, bondée ou non. v7
+///   refusait tout proposeur non bondé dès qu'un seul compte avait staké, ce qui
+///   refermait le réseau **définitivement** : sans faucet ni airdrop ni premine,
+///   un nouvel arrivant n'avait aucun chemin vers sa première pièce. v8 laisse
+///   passer ces blocs ; v7 les rejette. Capture Sybil bornée à 1/16 de l'émission.
+///
+/// La genèse est intacte ; c'est la surface de validation qui diverge, d'où le bump.
+pub const TORUS_PROTOCOL_VERSION: u8 = 8;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 

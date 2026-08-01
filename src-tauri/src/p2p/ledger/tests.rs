@@ -734,8 +734,9 @@
             .expect("signed transfer");
         let burn = burn_opt.expect("burn leg present");
 
-        // LOSER block (index 2): the user transfer + burn + a 5 QTA mining reward.
-        let loser_reward = ledger.build_unsigned_tx("NETWORK", &pk, 5 * MICRO, TxType::Mining);
+        // LOSER block (index 2): the user transfer + burn + a 3 QTA mining reward
+        // (MINT-EXACT-1 : ≤ la récompense canonique du bloc, sinon rejeté).
+        let loser_reward = ledger.build_unsigned_tx("NETWORK", &pk, 3 * MICRO, TxType::Mining);
         let loser = Ledger::forge_block_at(
             2,
             &b1.hash,
@@ -745,10 +746,10 @@
         );
         assert_eq!(ledger.integrate_remote_block(loser.clone()), Ok(true), "loser sealed at index 2");
         assert_eq!(ledger.pending_count(), 0, "transfer + burn now sealed in the loser block");
-        assert_eq!(ledger.total_minted(), 105 * MICRO, "b1(100) + loser mining(5)");
+        assert_eq!(ledger.total_minted(), 103 * MICRO, "b1(100) + loser mining(3)");
 
-        // WINNER fork (index 2, rooted at b1): mining only (7 QTA) — replaces the loser.
-        let winner_reward = ledger.build_unsigned_tx("NETWORK", &pk, 7 * MICRO, TxType::Mining);
+        // WINNER fork (index 2, rooted at b1): mining only (2 QTA) — replaces the loser.
+        let winner_reward = ledger.build_unsigned_tx("NETWORK", &pk, 2 * MICRO, TxType::Mining);
         let winner = Ledger::forge_block_at(2, &b1.hash, &ts, &pk, vec![winner_reward]);
 
         assert_eq!(
@@ -776,11 +777,11 @@
             "the loser's mining reward is NOT re-queued — no double-mint (EMIT-1 §4.1)"
         );
 
-        // (c) the loser's emission was UNDONE: minted counts the winner's 7 QTA,
-        //     not the dropped loser's 5 (b1 100 + winner 7 = 107).
+        // (c) the loser's emission was UNDONE: minted counts the winner's 2 QTA,
+        //     not the dropped loser's 3 (b1 100 + winner 2 = 102).
         assert_eq!(
             ledger.total_minted(),
-            107 * MICRO,
+            102 * MICRO,
             "loser emission reverted, winner counted — the revert is load-bearing"
         );
 
@@ -1369,15 +1370,20 @@
         // amount each try until its hash beats the loser's — sealed by its own
         // miner (EMIT-1 §4.2: the reward credits the block's miner).
         let winner_tip = {
-            let mut amount = 75 * MICRO;
+            // MINT-EXACT-1 : l'émission ne peut plus servir de « nonce » pour
+            // chercher un hash supérieur — elle est bornée par la récompense
+            // canonique du bloc. On fait donc varier l'horodatage, qui entre
+            // dans la pré-image du hash sans toucher à la monnaie.
+            let mut n = 0u32;
             loop {
                 let mut w = Ledger::new();
-                w.mine_tx(&signer, amount, 0.0);
-                let tip = w.seal_block(&signer, 0.0);
+                w.mine_tx(&signer, 3 * MICRO, 0.0);
+                let ts = format!("2026-06-25T00:00:00.{n:06}+00:00");
+                let tip = w.seal_block_at(&signer, 0.0, ts);
                 if tip.hash > loser_tip.hash {
                     break tip;
                 }
-                amount += MICRO;
+                n += 1;
             }
         };
 
@@ -2222,10 +2228,10 @@
         // A NETWORK→alice mining reward, minted on a throwaway ledger.
         let mining_tx = {
             let mut tmp = Ledger::new();
-            tmp.mine_tx(&alice, 5 * MICRO, 0.0)
+            tmp.mine_tx(&alice, 3 * MICRO, 0.0)
         };
-        // Alice spends 3 of the reward she receives IN THE SAME BLOCK (§3).
-        let spend = l.build_signed_tx_at(&alice, &bob, 3 * MICRO, TxType::Transfer, &crypto_a,
+        // Alice spends 2 of the reward she receives IN THE SAME BLOCK (§3).
+        let spend = l.build_signed_tx_at(&alice, &bob, 2 * MICRO, TxType::Transfer, &crypto_a,
             "2026-03-01T00:00:00Z".into(), false).unwrap();
         // miner == alice (EMIT-1: the single reward is credited to block.miner).
         let block = Ledger::forge_block_at(1, &genesis.hash, "2026-03-01T00:00:01Z",
@@ -2233,8 +2239,8 @@
 
         assert_eq!(l.integrate_remote_block(block), Ok(true),
             "reward-funds-same-block-spend is covered sequentially (§3)");
-        assert_eq!(l.balance_of(&alice), 2 * MICRO, "5 reward − 3 spent = 2");
-        assert_eq!(l.balance_of(&bob), 3 * MICRO, "bob received 3");
+        assert_eq!(l.balance_of(&alice), MICRO, "3 reward − 2 spent = 1");
+        assert_eq!(l.balance_of(&bob), 2 * MICRO, "bob received 2");
         assert_eq!(conservation_lhs(&l), l.total_minted(), "conservation holds for the accepted block");
     }
 
@@ -2981,9 +2987,261 @@
             mining("NETWORK", 20, "b"),
             mining("attacker", 1000, "c"),
         ];
+        // MINT-EXACT-1 : la canonique est ignorée quand le mempool porte déjà des
+        // récompenses (chemin du robinet de test) — ce test vise MINT-GUARD-2, la
+        // règle « une `Mining` d'un expéditeur non-NETWORK est une forgerie ».
         let out = Ledger::coalesce_block_rewards(txs, "miner", 1, "ts");
         let rewards: Vec<&Transaction> = out.iter().filter(|t| t.tx_type == TxType::Mining).collect();
         assert_eq!(rewards.len(), 1, "exactly one coalesced reward");
         assert_eq!(rewards[0].from, "NETWORK");
         assert_eq!(rewards[0].amount, 30, "forged Mining amount is DROPPED, never minted");
+    }
+
+    // ─── MINT-EXACT-1 : la récompense est une fonction PURE de la chaîne ─────
+    //
+    // Le trou fermé ici : le montant de la récompense était calculé **localement**
+    // par le sceleur (part Shapley dérivée de watts auto-déclarés par les pairs,
+    // donc invérifiables), et le réseau se contentait de le BORNER à
+    // `64 × emission_for_tick`. Le montant honnête valant `2 × emission_for_tick / N`
+    // (N nœuds vivants), la marge exploitable était de `32 × N` : à 100 nœuds, tout
+    // validateur bondé pouvait se frapper 3 200 fois sa récompense légitime, à
+    // chaque bloc, et chaque nœud l'acceptait — seul le plafond dur des 100 M
+    // était vérifié. Désormais le récepteur **recalcule** au lieu de borner.
+
+    /// La récompense canonique est une fonction pure de la chaîne : elle ne
+    /// dépend **ni** du nombre de pairs, **ni** de l'énergie déclarée, **ni** de
+    /// quoi que ce soit de local. Deux nœuds sur la même chaîne obtiennent le
+    /// même nombre — c'est ce qui permet de recalculer plutôt que de borner.
+    #[test]
+    fn mint_exact_reward_is_a_pure_function_of_the_chain() {
+        let a = Ledger::new();
+        let b = Ledger::new();
+        assert_eq!(
+            a.canonical_block_reward(),
+            b.canonical_block_reward(),
+            "deux chaînes identiques ⇒ même récompense canonique"
+        );
+        assert_eq!(
+            a.canonical_block_reward(),
+            crate::p2p::reputation::emission_for_block(a.stats().total_mined),
+            "la récompense EST emission_for_block(offre minée) — rien d'autre"
+        );
+        // Et elle décroît strictement avec l'offre déjà minée (rareté).
+        let mut c = Ledger::new();
+        let before = c.canonical_block_reward();
+        c.mine_tx(&"a".repeat(64), 3 * MICRO, 0.0);
+        c.seal_block(&"a".repeat(64), 0.0);
+        assert!(
+            c.canonical_block_reward() < before,
+            "l'émission décroît à mesure que l'offre est minée"
+        );
+    }
+
+    /// **La vulnérabilité elle-même.** Un bloc frappant nettement plus que la
+    /// récompense canonique — ce que l'ancienne marge de `64 ticks` autorisait —
+    /// est REJETÉ. C'est le test qui aurait attrapé le trou.
+    #[test]
+    fn mint_exact_over_emission_is_rejected() {
+        let mut node = Ledger::new();
+        let miner = "e".repeat(64);
+        let canonical = node.canonical_block_reward();
+        let genesis = node.block_at(0).unwrap().hash.clone();
+
+        // L'ancienne borne tolérait 64 ticks == 32 × la récompense d'un bloc.
+        let greedy = canonical * 32;
+        let block = Ledger::forge_block_at(
+            1,
+            &genesis,
+            "2026-08-01T00:00:00+00:00",
+            &miner,
+            vec![node.build_unsigned_tx("NETWORK", &miner, greedy, TxType::Mining)],
+        );
+        let verdict = node.integrate_remote_block(block);
+        assert!(
+            verdict.is_err(),
+            "un bloc frappant 32× la canonique doit être rejeté, obtenu {verdict:?}"
+        );
+        assert_eq!(node.chain_height(), 1, "la chaîne n'a pas bougé");
+        assert_eq!(node.total_minted(), 0, "aucune monnaie créée");
+
+        // Et la frontière est exacte : canonique + 1 µQTA passe déjà de l'autre côté.
+        let over_by_one = Ledger::forge_block_at(
+            1,
+            &genesis,
+            "2026-08-01T00:00:00+00:00",
+            &miner,
+            vec![node.build_unsigned_tx("NETWORK", &miner, canonical + 1, TxType::Mining)],
+        );
+        assert!(
+            node.integrate_remote_block(over_by_one).is_err(),
+            "la borne est EXACTE — un seul µQTA de trop suffit à invalider"
+        );
+    }
+
+    /// Symétrie produire/vérifier (règle COVER-2) : un bloc produit par le chemin
+    /// de production — `mint_block_reward` puis `seal_block` — est **valide par
+    /// construction** pour un pair frais sur la même genèse.
+    #[test]
+    fn mint_exact_produced_block_is_valid_by_construction() {
+        let mut producer = Ledger::new();
+        let miner = "f".repeat(64);
+        let expected = producer.canonical_block_reward();
+
+        let minted = producer.mint_block_reward(&miner).expect("émission non nulle");
+        assert_eq!(minted.amount, expected, "le producteur frappe EXACTEMENT la canonique");
+        let block = producer.seal_block(&miner, 0.0);
+
+        let mut receiver = Ledger::new();
+        assert_eq!(
+            receiver.integrate_remote_block(block),
+            Ok(true),
+            "le bloc de production passe la validation d'un pair frais"
+        );
+        assert_eq!(receiver.balance_of(&miner), expected, "le sceleur est crédité de la canonique");
+        assert_eq!(receiver.total_minted(), expected, "l'offre a grandi d'exactement un bloc");
+    }
+
+    /// Frapper deux fois ne rapporte rien : la coalescence somme, et la somme
+    /// dépasse la canonique — le bloc devient invalide pour tout le réseau.
+    #[test]
+    fn mint_exact_double_mint_is_rejected() {
+        let mut producer = Ledger::new();
+        let miner = "0".repeat(64);
+        producer.mint_block_reward(&miner);
+        producer.mint_block_reward(&miner); // le producteur triche
+        let block = producer.seal_block(&miner, 0.0);
+
+        let rewards = block
+            .transactions
+            .iter()
+            .filter(|t| t.tx_type == TxType::Mining)
+            .count();
+        assert_eq!(rewards, 1, "EMIT-1 : une seule récompense, mais de montant doublé");
+
+        let mut receiver = Ledger::new();
+        assert!(
+            receiver.integrate_remote_block(block).is_err(),
+            "le double-mint dépasse la canonique ⇒ rejeté"
+        );
+    }
+
+    /// **Le fork privé silencieux est fermé.** `mine_tx` scellait tout seul dès
+    /// 10 tx en attente — sans contrôle de proposeur PoS et **sans jamais
+    /// diffuser** le bloc. Un nœud non éligible accumulant une tx par minute se
+    /// fabriquait donc une chaîne privée toutes les 10 minutes et affichait à son
+    /// porteur un solde que le réseau ne reconnaissait pas. Plus aucun scellement
+    /// ne peut naître d'une simple admission au mempool.
+    #[test]
+    fn mint_exact_admission_never_seals_a_block() {
+        let mut l = Ledger::new();
+        let pk = "1".repeat(64);
+        let height_before = l.chain_height();
+        for _ in 0..25 {
+            l.mine_tx(&pk, MICRO, 0.0);
+        }
+        assert_eq!(
+            l.chain_height(),
+            height_before,
+            "aucun bloc ne doit naître d'une admission au mempool (fork privé fermé)"
+        );
+        assert_eq!(l.pending_count(), 25, "les tx restent en attente, rien n'est scellé");
+    }
+
+    // ─── OPEN-DOOR-1 : la porte ne se referme plus au premier staker ─────────
+
+    /// **Le blocage de lancement, reproduit puis fermé.** Dès qu'un seul compte
+    /// bonde l'enjeu minimum, `PROPOSER-1` refuse tout proposeur non bondé — et
+    /// comme il n'existe ni faucet, ni airdrop, ni premine, un nouvel arrivant
+    /// n'a **aucun** chemin vers sa première pièce : il lui faut un enjeu pour
+    /// proposer et proposer pour gagner. Ce test montre les deux faces :
+    /// un slot ordinaire lui reste fermé, un **slot ouvert** le laisse entrer.
+    #[test]
+    fn open_door_newcomer_can_seal_on_an_open_slot_only() {
+        use crate::p2p::pos_consensus::{is_open_slot, MIN_VALIDATOR_STAKE};
+
+        // Un validateur bondé existe ⇒ le mode bootstrap permissionless est clos.
+        let mut wallet = pq_wallet();
+        let whale = gen_addr(&mut wallet);
+        let mut l = Ledger::new();
+        l.mine_tx(&whale, 3 * MICRO, 0.0);
+        l.seal_block(&whale, 0.0);
+        l.stake_tx(&whale, MIN_VALIDATOR_STAKE, &wallet).expect("stake builds");
+        l.seal_block(&whale, 0.0);
+        assert!(
+            l.validator_stakes().values().any(|&s| s >= MIN_VALIDATOR_STAKE),
+            "la porte est bien refermée : quelqu'un a staké"
+        );
+
+        // Le nouvel arrivant : zéro pièce, zéro enjeu.
+        let newcomer = "9".repeat(64);
+        assert_eq!(l.balance_of(&newcomer), 0, "il n'a rien");
+        assert_eq!(l.staked_of(&newcomer), 0, "et rien de bondé");
+
+        // Amener la chaîne juste avant un slot ouvert, scellée par le validateur.
+        // `chain_height()` == nombre de blocs == index du PROCHAIN bloc.
+        while !is_open_slot(l.chain_height()) {
+            l.mint_block_reward(&whale);
+            l.seal_block(&whale, 0.0);
+        }
+        let open_index = l.chain_height();
+        assert!(is_open_slot(open_index), "la prochaine hauteur est un slot ouvert");
+
+        // (a) Sur un slot ORDINAIRE, il reste refusé — la règle n'a pas été
+        //     affaiblie, elle a été *cadencée*.
+        let ordinary_index = open_index + 1;
+        assert!(!is_open_slot(ordinary_index));
+
+        // (b) Sur le slot OUVERT, son bloc est accepté par le réseau.
+        let tip = l.chain.last().unwrap().hash.clone();
+        let reward = l.canonical_block_reward();
+        let open_block = Ledger::forge_block_at(
+            open_index,
+            &tip,
+            "2026-08-01T00:00:00+00:00",
+            &newcomer,
+            vec![l.build_unsigned_tx("NETWORK", &newcomer, reward, TxType::Mining)],
+        );
+        assert_eq!(
+            l.integrate_remote_block(open_block),
+            Ok(true),
+            "un nouvel arrivant sans enjeu DOIT pouvoir sceller un slot ouvert"
+        );
+        assert_eq!(
+            l.balance_of(&newcomer),
+            reward,
+            "il tient sa première pièce — la boucle œuf-poule est rompue"
+        );
+        assert!(
+            reward >= MIN_VALIDATOR_STAKE,
+            "et un seul slot ouvert suffit à financer son enjeu minimum"
+        );
+
+        // (c) Le slot suivant lui est de nouveau fermé : la fenêtre est bornée.
+        let tip2 = l.chain.last().unwrap().hash.clone();
+        let next = Ledger::forge_block_at(
+            ordinary_index,
+            &tip2,
+            "2026-08-01T00:00:02+00:00",
+            &newcomer,
+            vec![],
+        );
+        assert!(
+            l.integrate_remote_block(next).is_err(),
+            "hors slot ouvert, PROPOSER-1 s'applique intégralement"
+        );
+    }
+
+    /// La cadence est une fonction PURE de la hauteur — aucun état, aucune
+    /// horloge, donc tous les nœuds tranchent identiquement (C1) — et elle borne
+    /// la capture Sybil à exactement une fenêtre sur `OPEN_SLOT_EVERY_BLOCKS`.
+    #[test]
+    fn open_door_cadence_is_a_pure_function_of_height() {
+        use crate::p2p::pos_consensus::{is_open_slot, OPEN_SLOT_EVERY_BLOCKS};
+        assert!(!is_open_slot(0), "la genèse n'est proposée par personne");
+        let window = OPEN_SLOT_EVERY_BLOCKS;
+        let open = (1..=window * 4).filter(|&i| is_open_slot(i)).count() as u64;
+        assert_eq!(open, 4, "exactement une fenêtre ouverte par cycle de {window} blocs");
+        for i in 1..=window * 4 {
+            assert_eq!(is_open_slot(i), i.is_multiple_of(window), "cadence déterministe à la hauteur {i}");
+        }
     }

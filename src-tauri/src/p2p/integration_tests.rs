@@ -33,9 +33,9 @@ mod integration_tests {
         let mut node_c = Ledger::new();
 
         // ── Phase 1: Each node mines locally ──
-        node_a.mine_tx(&pk_a, 100 * MICRO, 0.5);
-        node_b.mine_tx(&pk_b, 80 * MICRO, 0.3);
-        node_c.mine_tx(&pk_c, 60 * MICRO, 0.2);
+        node_a.mine_tx(&pk_a, 2 * MICRO, 0.5);
+        node_b.mine_tx(&pk_b, MICRO, 0.3);
+        node_c.mine_tx(&pk_c, MICRO, 0.2);
 
         // ── Phase 2: Node A seals block #1 and broadcasts ──
         let block_a = node_a.seal_block(&pk_a, 0.5);
@@ -52,14 +52,14 @@ mod integration_tests {
         );
 
         // ── Phase 3: Node B mines more and seals block #2 ──
-        // B's pending holds TWO of its own mining rewards (phase-1 80 + phase-3
-        // 20 — no longer falsely dropped since BLK-HASH-1). EMIT-1 (Option A —
-        // one reward per block): `seal_block` COALESCES them into a single
-        // NETWORK→B reward (Σ = 100), so block #2 carries exactly ONE mining tx
-        // and passes the "≤1 reward/block" rule peers now enforce. Σ stays under
-        // the per-block emission cap (this test checks convergence; the cap is
-        // covered by the trust_* tests).
-        node_b.mine_tx(&pk_b, 20 * MICRO, 0.1);
+        // B's pending holds TWO of its own mining rewards (phase-1 + phase-3 —
+        // no longer falsely dropped since BLK-HASH-1). EMIT-1 (Option A — one
+        // reward per block): `seal_block` COALESCES them into a single NETWORK→B
+        // reward (Σ = 2 QTA), so block #2 carries exactly ONE mining tx and
+        // passes the "≤1 reward/block" rule peers enforce. MINT-EXACT-1 : Σ reste
+        // sous la récompense canonique du bloc (~4 QTA), sinon les pairs le
+        // rejetteraient — c'est exactement ce que ce test doit refléter.
+        node_b.mine_tx(&pk_b, MICRO, 0.1);
         let block_b = node_b.seal_block(&pk_b, 0.1);
         assert_eq!(block_b.index, 2);
         let mining_in_b2 = block_b
@@ -78,9 +78,9 @@ mod integration_tests {
 
         // ── Phase 4: All three nodes seal block #3 independently ──
         // This creates a 3-way fork. Deterministic resolution via hash comparison.
-        node_a.mine_tx(&pk_a, 10 * MICRO, 0.01);
-        node_b.mine_tx(&pk_b, 10 * MICRO, 0.01);
-        node_c.mine_tx(&pk_c, 10 * MICRO, 0.01);
+        node_a.mine_tx(&pk_a, MICRO, 0.01);
+        node_b.mine_tx(&pk_b, MICRO, 0.01);
+        node_c.mine_tx(&pk_c, MICRO, 0.01);
         // TEST-TEETH (HARDEN-HYGIENE-1): the three blocks already differ by miner
         // (pk_a/pk_b/pk_c is bound into the block hash), so their hashes are
         // content-distinct without any wall-clock sleep — the old

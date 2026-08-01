@@ -778,16 +778,71 @@ impl Ledger {
         tx
     }
 
-    /// Create a mining transaction (network-issued, no signature). Amount in
-    /// µQTA.
-    pub fn mine_tx(&mut self, miner_pk: &str, amount: u64, kwh: f64) -> Transaction {
+    /// **Robinet de test uniquement** — crée une tx de minage (émise par le
+    /// réseau, sans signature) et la pose dans le mempool. Montant en µQTA.
+    ///
+    /// MINT-EXACT-1 : ce n'était PAS un robinet de test, c'était le chemin de
+    /// création monétaire de production (`mining_loop` l'appelait chaque tick avec
+    /// un montant calculé **localement**). Deux défauts en découlaient :
+    ///
+    /// 1. **Fork privé silencieux.** À `pending.len() >= 10`, cette fonction
+    ///    appelait `seal_block` — sans contrôle de proposeur PoS et **sans jamais
+    ///    diffuser** le bloc. Un nœud non éligible accumulait exactement une tx par
+    ///    minute, donc au bout de 10 minutes il se scellait une chaîne privée et
+    ///    affichait à son porteur un solde qui n'existait pour personne d'autre.
+    /// 2. **Solde fantôme.** Même sans auto-scellement, le crédit était appliqué au
+    ///    cache dès l'admission alors que seul le sceleur du bloc survivant est
+    ///    réellement payé — le reste expirait au TTL du mempool (10 min).
+    ///
+    /// La production ne passe plus par ici : la récompense est frappée **au
+    /// scellement**, pour un montant canonique dérivé de la chaîne
+    /// (`reputation::emission_for_block`). Le mempool ne peut donc plus contenir
+    /// de `Mining` en release — `MINT-GUARD-1` rejette déjà celles reçues par
+    /// `BroadcastTx` —, ce qui rend le chemin de coalescence de `seal_block_at`
+    /// atteignable **uniquement** par ce robinet de test.
+    #[cfg(test)]
+    pub(crate) fn mine_tx(&mut self, miner_pk: &str, amount: u64, _kwh: f64) -> Transaction {
         let tx = self.build_unsigned_tx("NETWORK", miner_pk, amount, TxType::Mining);
         self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
-        if self.pending.len() >= 10 {
-            self.seal_block(miner_pk, kwh);
-        }
         tx
+    }
+
+    /// MINT-EXACT-1 — la récompense canonique du **prochain** bloc de cette
+    /// chaîne : `emission_for_block(offre minée jusqu'ici)`. Fonction pure de la
+    /// chaîne, donc le producteur et chaque vérificateur obtiennent le même
+    /// nombre — c'est ce qui permet à `validate_block_emission_against` de
+    /// *recalculer* au lieu de *borner*.
+    pub fn canonical_block_reward(&self) -> u64 {
+        crate::p2p::reputation::emission_for_block(self.stats().total_mined)
+    }
+
+    /// MINT-EXACT-1 — frappe la récompense **canonique** du bloc que ce nœud
+    /// s'apprête à sceller, et la pose dans le mempool. À appeler exactement une
+    /// fois par bloc produit, juste avant `seal_block` (voir
+    /// `mining_loop::seal_and_broadcast`).
+    ///
+    /// C'est le SEUL chemin de création monétaire en release. Le montant n'est pas
+    /// choisi : il est dérivé de la chaîne par [`Self::canonical_block_reward`],
+    /// exactement comme `validate_block_emission_against` le re-dérive à la
+    /// réception — produire et vérifier lisent la même fonction pure, donc un bloc
+    /// honnête est valide par construction (symétrie COVER-2) et un producteur ne
+    /// peut pas s'écarter du barème.
+    ///
+    /// Frapper deux fois ne rapporte rien : `coalesce_block_rewards` somme, et la
+    /// somme dépasse alors la canonique — le bloc est rejeté par tout le réseau.
+    ///
+    /// Renvoie `None` au plafond d'offre (émission nulle) : le bloc est alors scellé
+    /// sans récompense, ce qui reste valide (strictement non-inflationnaire).
+    pub fn mint_block_reward(&mut self, miner: &str) -> Option<Transaction> {
+        let amount = self.canonical_block_reward();
+        if amount == 0 {
+            return None;
+        }
+        let tx = self.build_unsigned_tx("NETWORK", miner, amount, TxType::Mining);
+        self.cache_apply_tx(&tx);
+        self.pending.push(tx.clone());
+        Some(tx)
     }
 
     /// Create a transfer transaction signed by the active identity (amount in

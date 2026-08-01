@@ -45,11 +45,12 @@ impl Ledger {
 
         // EMIT-1 (Option A — one reward per block): fold the pending mining
         // rewards into a SINGLE coalesced `NETWORK→miner` tx before sealing.
-        // Production mines once per tick but seals every `SEAL_EVERY_N_TICKS`
-        // ticks, so a leader's pending can hold several of its own rewards;
-        // bundling them keeps the chain at exactly one reward per block (the
-        // §4.2 rule peers enforce + the §4.3 emission invariant). A block with
-        // ≤1 mining tx is returned byte-identical to the pre-EMIT-1 seal.
+        // MINT-EXACT-1 : la récompense a été posée dans le mempool par
+        // `mint_block_reward` (production) — un montant CANONIQUE dérivé de la
+        // chaîne, que `validate_block_emission_against` recalcule à la réception.
+        // Le scellement ne fait donc que coalescer, sans jamais créer de monnaie
+        // de sa propre initiative : le cœur déterministe (`sm/`) garde exactement
+        // la sémantique qu'il avait.
         let candidate = Self::coalesce_block_rewards(std::mem::take(&mut self.pending), miner, index, &ts);
 
         // COVER-2 §2: build a VALID-BY-CONSTRUCTION block — EXCLUDE any uncovered
@@ -154,16 +155,18 @@ impl Ledger {
     /// preserving every non-mining tx in its original order (the coalesced
     /// reward leads). A block with ≤1 mining tx is returned **unchanged** —
     /// byte-identical to the pre-EMIT-1 seal — so only the genuinely
-    /// multi-reward case (a leader bundling several ticks) is rewritten.
+    /// multi-reward case is rewritten.
+    ///
+    /// MINT-EXACT-1 : la somme n'est plus un montant *choisi* — en production le
+    /// seul contributeur du mempool est [`Ledger::mint_block_reward`], qui pose la
+    /// récompense **canonique** dérivée de la chaîne. Coalescer reste utile comme
+    /// défense en profondeur (un mempool corrompu, ou un producteur qui frappe
+    /// deux fois, produit une somme unique que `validate_block_emission_against`
+    /// compare ensuite à la canonique et rejette).
     ///
     /// The merged tx is fully deterministic: its id derives from the block
     /// `index`, its timestamp is the **injected** block `ts` (no wall-clock
-    /// read), and its content/hash follow the same scheme as `next_tx`. All
-    /// pending mining rewards are `NETWORK→self` and `miner == self` on every
-    /// real path (mining-loop and core seal with the node's own key; remote
-    /// mining txs are no-ops on admission), so crediting `miner` matches the
-    /// per-tick cache effect already summed to Σ — the block stays consistent
-    /// with the balance cache without re-touching it.
+    /// read), and its content/hash follow the same scheme as `next_tx`.
     pub(super) fn coalesce_block_rewards(
         txs: Vec<Transaction>,
         miner: &str,

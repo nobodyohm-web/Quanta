@@ -1140,8 +1140,8 @@ mod tests {
         assert_eq!(ledger.staked_of(&addr), 0, "O slashed on the loser branch");
         assert!(conserves(&ledger), "conserves after the loser slash");
 
-        // WINNER fork (index 2, rooted at b1): a larger mining reward, NO slash.
-        let winner_reward = ledger.build_unsigned_tx("NETWORK", &addr, 5 * MICRO, TxType::Mining);
+        // WINNER fork (index 2, rooted at b1): un autre montant de récompense (bloc distinct), NO slash.
+        let winner_reward = ledger.build_unsigned_tx("NETWORK", &addr, 2 * MICRO, TxType::Mining);
         let winner = Ledger::forge_block_at(
             2,
             &b1_hash,
