@@ -12,14 +12,6 @@ import { EX_EN, EX_FR, EX_ES, EX_RU, EX_ZH, EX_JA } from "./i18n.generated";
 const en = {
   "loading": "Loading…",
 
-  // native language names (identical across dictionaries)
-  "lang.en": "English",
-  "lang.fr": "Français",
-  "lang.es": "Español",
-  "lang.ru": "Русский",
-  "lang.zh": "中文",
-  "lang.ja": "日本語",
-
   "node.label": "Node",
 
   // navigation
@@ -140,7 +132,6 @@ export type TKey = CoreKey | keyof typeof EX_EN;
 
 const fr: Dict = {
   "loading": "Chargement…",
-  "lang.en": "English", "lang.fr": "Français", "lang.es": "Español", "lang.ru": "Русский", "lang.zh": "中文", "lang.ja": "日本語",
   "node.label": "Nœud",
   "nav.wallet": "Portefeuille", "nav.contacts": "Contacts", "nav.dashboard": "Minage", "nav.network": "Réseau", "nav.profile": "Profil", "nav.whitepaper": "Livre blanc",
   "welcome.headline": "La monnaie que tu forges,<br/>que personne ne peut t'enlever.",
@@ -201,7 +192,6 @@ const fr: Dict = {
 const es: Dict = {
   ...en,
   "loading": "Cargando…",
-  "lang.en": "English", "lang.fr": "Français", "lang.es": "Español", "lang.ru": "Русский", "lang.zh": "中文", "lang.ja": "日本語",
   "node.label": "Nodo",
   "nav.wallet": "Cartera", "nav.contacts": "Contactos", "nav.dashboard": "Minería", "nav.network": "Red", "nav.profile": "Perfil",
   "welcome.headline": "El dinero que forjas,<br/>que nadie puede quitarte.",
@@ -261,7 +251,6 @@ const es: Dict = {
 const ru: Dict = {
   ...en,
   "loading": "Загрузка…",
-  "lang.en": "English", "lang.fr": "Français", "lang.es": "Español", "lang.ru": "Русский", "lang.zh": "中文", "lang.ja": "日本語",
   "node.label": "Узел",
   "nav.wallet": "Кошелёк", "nav.contacts": "Контакты", "nav.dashboard": "Майнинг", "nav.network": "Сеть", "nav.profile": "Профиль",
   "welcome.headline": "Деньги, которые ты куёшь,<br/>и которые никто не отнимет.",
@@ -321,7 +310,6 @@ const ru: Dict = {
 const zh: Dict = {
   ...en,
   "loading": "加载中…",
-  "lang.en": "English", "lang.fr": "Français", "lang.es": "Español", "lang.ru": "Русский", "lang.zh": "中文", "lang.ja": "日本語",
   "node.label": "节点",
   "nav.wallet": "钱包", "nav.contacts": "联系人", "nav.dashboard": "挖矿", "nav.network": "网络", "nav.profile": "个人资料",
   "welcome.headline": "你铸造的货币，<br/>无人能够夺走。",
@@ -381,7 +369,6 @@ const zh: Dict = {
 const ja: Dict = {
   ...en,
   "loading": "読み込み中…",
-  "lang.en": "English", "lang.fr": "Français", "lang.es": "Español", "lang.ru": "Русский", "lang.zh": "中文", "lang.ja": "日本語",
   "node.label": "ノード",
   "nav.wallet": "ウォレット", "nav.contacts": "連絡先", "nav.dashboard": "マイニング", "nav.network": "ネットワーク", "nav.profile": "プロフィール",
   "welcome.headline": "あなたが鋳造する通貨、<br/>誰にも奪えない。",
