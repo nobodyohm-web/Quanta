@@ -28,6 +28,8 @@ pub mod pos_consensus;
 pub mod finality_live;
 // LIVE-4 — réconciliation de fork profonde en vivant (l'appelant réseau de GADGET-5B)
 pub mod fork_heal;
+// RDV-1 — rendez-vous par topic sur la DHT mainline (amorçage sans serveur)
+pub mod rendezvous;
 // Identité — registre P2P de pseudos uniques @handle (adresse de wallet lisible)
 pub mod username;
 // Simulation réseau

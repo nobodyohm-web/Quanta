@@ -48,7 +48,7 @@ async fn main() {
         log::error!("◈ [quanta-node] initialisation du wallet impossible: {e}");
         std::process::exit(1);
     }
-    node_runtime::start_network(&state, cfg.mine).await;
+    node_runtime::start_network(&state, cfg.mine, &cfg.data_dir).await;
 
     let address = state.crypto.lock().await.pq_address_bech32().unwrap_or_default();
     log::info!(

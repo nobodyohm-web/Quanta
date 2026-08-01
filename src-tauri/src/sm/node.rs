@@ -839,9 +839,9 @@ mod tests {
 
         // Origin builds a SIGNED transfer (sender funded so it's valid).
         let mut origin = Ledger::new();
-        origin.mine_tx(&addr, 50 * MICRO, 0.0);
+        origin.mine_tx(&addr, 3 * MICRO, 0.0);
         let (tx, _burn, _amt) = origin
-            .transfer_with_burn(&addr, &recipient, 10 * MICRO, &crypto)
+            .transfer_with_burn(&addr, &recipient, 2 * MICRO, &crypto)
             .expect("transfer builds");
         let credited = tx.amount; // net after the 1% burn
         let tx_json = serde_json::to_string(&tx).unwrap();
@@ -1049,7 +1049,7 @@ mod tests {
 
         // Origin seals a block at height 1 (shared fixed genesis ⇒ links to B).
         let mut origin = Ledger::new();
-        origin.mine_tx(&pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&pk, 3 * MICRO, 0.0);
         let block = origin.seal_block(&pk, 0.0);
         let tip_hash = block.hash.clone();
         let bytes = signed_envelope(
@@ -1094,7 +1094,7 @@ mod tests {
         let pk = sealer.get_identity().unwrap().public_key_hex;
 
         let mut origin = Ledger::new();
-        origin.mine_tx(&pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&pk, 3 * MICRO, 0.0);
         let mut block = origin.seal_block(&pk, 0.0);
         block.prev_hash = "0".repeat(64); // break the chain linkage
         let bytes = signed_envelope(
@@ -1185,7 +1185,7 @@ mod tests {
         // Block #1 funds alice via a NETWORK mining tx (chain-backed funds are
         // never pruned), sealed in a throwaway origin sharing our fixed genesis.
         let mut origin = Ledger::new();
-        origin.mine_tx(&alice_pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&alice_pk, 3 * MICRO, 0.0);
         let funding_block = origin.seal_block(&alice_pk, 0.0);
         let funding_env = signed_envelope(
             &dave,
@@ -1197,7 +1197,7 @@ mod tests {
 
         // alice signs a transfer alice→bob (valid: origin funded her on-chain).
         let (xfer, _burn, _amt) = origin
-            .transfer_with_burn(&alice_pk, &bob, 10 * MICRO, &alice)
+            .transfer_with_burn(&alice_pk, &bob, 2 * MICRO, &alice)
             .expect("alice transfer builds");
         let credited = xfer.amount;
         let xfer_env = signed_envelope(
@@ -1361,7 +1361,7 @@ mod tests {
         let pk = sealer.get_identity().unwrap().public_key_hex;
 
         let mut origin = Ledger::new();
-        origin.mine_tx(&pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&pk, 3 * MICRO, 0.0);
         let block = origin.seal_block(&pk, 0.0);
         let tip_hash = block.hash.clone();
         let sealed_at = chrono::DateTime::parse_from_rfc3339(&block.timestamp)
@@ -1411,10 +1411,10 @@ mod tests {
         let bob = "b".repeat(64);
 
         let mut origin = Ledger::new();
-        origin.mine_tx(&alice_pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&alice_pk, 3 * MICRO, 0.0);
         let funding_block = origin.seal_block(&alice_pk, 0.0);
         let (xfer, _burn, _amt) = origin
-            .transfer_with_burn(&alice_pk, &bob, 10 * MICRO, &alice)
+            .transfer_with_burn(&alice_pk, &bob, 2 * MICRO, &alice)
             .expect("alice transfer builds");
         let credited = xfer.amount;
         let built_at = chrono::DateTime::parse_from_rfc3339(&xfer.timestamp)
@@ -1476,7 +1476,7 @@ mod tests {
         let pk = sealer.get_identity().unwrap().public_key_hex;
 
         let mut origin = Ledger::new();
-        origin.mine_tx(&pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&pk, 3 * MICRO, 0.0);
         let good = origin.seal_block(&pk, 0.0);
         let mut bad = good.clone();
         bad.prev_hash = "0".repeat(64); // breaks linkage → rejected by validation
@@ -1525,10 +1525,10 @@ mod tests {
         let bob = "b".repeat(64);
 
         let mut origin = Ledger::new();
-        origin.mine_tx(&alice_pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&alice_pk, 3 * MICRO, 0.0);
         let block = origin.seal_block(&alice_pk, 0.0);
         let (xfer, _burn, _amt) = origin
-            .transfer_with_burn(&alice_pk, &bob, 10 * MICRO, &alice)
+            .transfer_with_burn(&alice_pk, &bob, 2 * MICRO, &alice)
             .expect("alice transfer builds");
 
         let block_env = signed_envelope(
@@ -1576,7 +1576,7 @@ mod tests {
         let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let mut o = Ledger::new();
         o.mine_tx(&alice_pk, mint, 0.0);
-        let _ = o.transfer_with_burn(&alice_pk, recipient, 10 * MICRO, &alice);
+        let _ = o.transfer_with_burn(&alice_pk, recipient, 2 * MICRO, &alice);
         o.seal_block(&alice_pk, 0.0)
     }
 
@@ -1622,8 +1622,8 @@ mod tests {
         let now0 = 1_800_000_000_000_u64;
         let bob = "b".repeat(64);
         let carol = "c".repeat(64);
-        let block_bob = sealed_block_with_transfer(&bob, 50 * MICRO);
-        let block_carol = sealed_block_with_transfer(&carol, 50 * MICRO);
+        let block_bob = sealed_block_with_transfer(&bob, 3 * MICRO);
+        let block_carol = sealed_block_with_transfer(&carol, 3 * MICRO);
 
         // Lower hash integrated first; higher hash arrives second and wins.
         let (first, second) = if block_bob.hash < block_carol.hash {
@@ -1670,7 +1670,7 @@ mod tests {
             "the higher-hash block must win the tie-break"
         );
         // Both transfers survive — neither bob nor carol is zeroed out.
-        let net = 10 * MICRO - (10 * MICRO / 100); // amount net of the 1% burn
+        let net = 2 * MICRO - (2 * MICRO / 100); // amount net of the 1% burn
         assert_eq!(
             node.ledger().balance_of(&bob),
             net,
@@ -1761,9 +1761,9 @@ mod tests {
         let alice = seeded_identity(2);
         let alice_pk = addr_of(&alice); // PQ-MIG-3B: value identity = ML-DSA address
         let mut origin = Ledger::new();
-        origin.mine_tx(&alice_pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&alice_pk, 3 * MICRO, 0.0);
         let (xfer, _burn, _amt) = origin
-            .transfer_with_burn(&alice_pk, &"r".repeat(64), 10 * MICRO, &alice)
+            .transfer_with_burn(&alice_pk, &"r".repeat(64), 2 * MICRO, &alice)
             .expect("alice transfer builds");
 
         // A validly-signed tx mints the verification token.
@@ -1914,7 +1914,7 @@ mod tests {
         let honest_pk = honest.get_identity().unwrap().public_key_hex;
 
         let mut origin = Ledger::new();
-        origin.mine_tx(&honest_pk, 50 * MICRO, 0.0);
+        origin.mine_tx(&honest_pk, 3 * MICRO, 0.0);
         let mut block = origin.seal_block(&honest_pk, 0.0);
 
         // ATTACK: steal the reward + miner credit, keep the (now stale) hash.

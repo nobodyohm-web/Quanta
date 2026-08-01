@@ -734,16 +734,16 @@ mod tests {
         // emission must be fully reverted, the winner's fully counted —
         // conservation exact after the swap (EMIT-1 at partition scale).
         let mut a = Ledger::new();
-        a.mine_tx("miner-a", 5_000_000, 0.0);
+        a.mint_block_reward_of("miner-a", 3_000_000);
         a.seal_block("miner-a", 0.0); // shared height 1 (reward 5 QTA)
         let mut b = a.clone();
 
         // A seals one more reward block; B seals two (B wins on length).
-        a.mine_tx("miner-a", 3_000_000, 0.0);
+        a.mint_block_reward_of("miner-a", 3_000_000);
         a.seal_block("miner-a", 0.0);
-        b.mine_tx("miner-b", 2_000_000, 0.0);
+        b.mint_block_reward_of("miner-b", 2_000_000);
         b.seal_block("miner-b", 0.0);
-        b.mine_tx("miner-b", 1_000_000, 0.0);
+        b.mint_block_reward_of("miner-b", 1_000_000);
         let b_tip = b.seal_block("miner-b", 0.0);
 
         let b_branch: Vec<Block> = vec![b.block_at(2).unwrap().clone(), b_tip];
@@ -758,7 +758,18 @@ mod tests {
             b.total_minted(),
             "loser emission reverted, winner counted"
         );
-        assert_eq!(a.balance_of("miner-b"), 3_000_000, "winner rewards live");
+        // REWARD-SHARE-1 : sur la branche gagnante, le second bloc de B partage sa
+        // récompense avec miner-a (participant récent du bloc 1 partagé), donc B
+        // encaisse 2 000 000 (bloc 2, seul participant = lui-même) + la moitié de
+        // 1 000 000 (bloc 3) = 2 500 000... vérifié par recalcul plutôt que gravé :
+        let expected_b: u64 = b
+            .chain
+            .iter()
+            .flat_map(|blk| blk.transactions.iter())
+            .filter(|t| t.tx_type == crate::p2p::ledger::TxType::Mining && t.to == "miner-b")
+            .map(|t| t.amount)
+            .sum();
+        assert_eq!(a.balance_of("miner-b"), expected_b, "winner rewards live (part partagée incluse)");
         assert!(conserves(&a), "conservation exact after the heal");
         assert!(conserves(&b));
     }

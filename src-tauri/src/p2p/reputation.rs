@@ -91,6 +91,55 @@ pub fn emission_for_tick(total_mined_micro: u64) -> u64 {
     MAX_SUPPLY_MICRO.saturating_sub(total_mined_micro) / EMISSION_DIVISOR
 }
 
+/// Nombre de ticks d'émission que représente **un bloc scellé** — le rythme de
+/// production (`SEAL_EVERY_N_TICKS` dans `mining_loop`). Gravé ici, à côté de
+/// l'émission, parce que c'est la règle **monétaire** (le consensus la
+/// re-dérive), pas un réglage de la boucle de minage.
+pub const TICKS_PER_BLOCK: u64 = 2;
+
+/// MINT-EXACT-1 — la récompense **canonique** d'un bloc : une fonction PURE de
+/// la chaîne, donc identique sur chaque nœud (vivant, restauré, synchronisé).
+///
+/// C'est le cœur de la politique monétaire après l'audit d'émission. Avant,
+/// le montant était calculé **localement** par le sceleur (part Shapley dérivée
+/// de watts **auto-déclarés** par les pairs) et le réseau se contentait de le
+/// borner à `64 × emission_for_tick` — une marge de `32 × N` au-dessus du
+/// montant honnête (`≈ TICKS_PER_BLOCK × emission_for_tick / N` avec N nœuds).
+/// N'importe quel sceleur pouvait donc se minter des ordres de grandeur de trop,
+/// et l'émission réelle du réseau s'effondrait en `1/N` quand il grandissait.
+///
+/// Désormais : **un bloc vaut exactement ceci, pour tout le monde**. L'émission
+/// ne dépend plus du nombre de nœuds, l'énergie auto-déclarée ne touche plus la
+/// monnaie (elle reste un signal d'affichage), et le montant est re-calculable
+/// par n'importe qui à partir de la seule chaîne.
+pub fn emission_for_block(total_mined_micro: u64) -> u64 {
+    emission_for_tick(total_mined_micro).saturating_mul(TICKS_PER_BLOCK)
+}
+
+// ─── REWARD-SHARE-1 — la récompense se partage entre les participants récents ──
+
+/// Fenêtre (en blocs) sur laquelle la chaîne constate **qui a participé**.
+/// Un producteur de bloc entre dans le partage pour les `SHARE_WINDOW_BLOCKS`
+/// blocs suivants ; passé ce délai sans rien produire, il en sort. C'est ce qui
+/// fait du partage une récompense de **liveness** et non une rente de capital :
+/// un validateur bondé mais hors ligne cesse de sceller, donc cesse d'être payé.
+///
+/// Vaut une époque de finalité (`EPOCH_LENGTH_BLOCKS`), ce qui borne aussi le
+/// nombre de bénéficiaires par bloc — au plus `SHARE_WINDOW_BLOCKS` adresses
+/// distinctes, donc une taille de bloc bornée par construction.
+pub const SHARE_WINDOW_BLOCKS: u64 = 32;
+
+/// Part du producteur du bloc, en fraction de la récompense canonique. Le reste
+/// est réparti **à parts égales** entre les participants récents.
+///
+/// Pourquoi à parts égales et non au prorata de l'enjeu : pondérer par l'enjeu
+/// reproduirait une rente proportionnelle au capital, ce que la doctrine du
+/// projet refuse. Ici, ce qui est récompensé est d'**avoir produit un bloc
+/// récemment** — un signal de travail effectif, déjà prouvé par la chaîne
+/// (`block.miner`), et que l'enjeu ne suffit pas à obtenir.
+pub const PROPOSER_SHARE_NUM: u64 = 1;
+pub const PROPOSER_SHARE_DEN: u64 = 2;
+
 /// V2 trust score basé uniquement sur énergie + uptime + stake (pas d'actions sociales).
 /// `atn_staked` est en µQTA — converti en QUANTA pour le score.
 /// W4 (Rust rule #6) — apply a dimensionless ratio ∈ [0,1] (a physical Shapley

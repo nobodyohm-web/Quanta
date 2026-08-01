@@ -744,7 +744,7 @@ fn sim_three_nodes_converge_on_proposed_block() {
     // Give the leader something to seal (frozen mining tx → reproducible block).
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     sim.node_mut(&a).ledger_mut().replay_remote_tx(frozen);
 
@@ -782,7 +782,7 @@ fn sim_run_is_byte_deterministic() {
     // Frozen mining tx built ONCE → identical pending content in both runs.
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     let validators = vec![Validator {
         pk: a_pk,
@@ -856,7 +856,7 @@ fn sim_leader_proposes_via_consensus_timer() {
     // Give the leader something to seal, AFTER the tick so prune leaves it.
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     sim.node_mut(&a).ledger_mut().replay_remote_tx(frozen);
 
@@ -893,7 +893,7 @@ fn sim_late_joiner_syncs_via_request_chain() {
     sim.run(10_000);
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     sim.node_mut(&a).ledger_mut().replay_remote_tx(frozen);
     let validators = vec![Validator {
@@ -975,7 +975,7 @@ fn sim_partition_isolates_then_sync_recovers() {
     // A produces a block; the broadcast toward B is blocked by the partition.
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     sim.node_mut(&a).ledger_mut().replay_remote_tx(frozen);
     let validators = vec![Validator {
@@ -1022,7 +1022,7 @@ fn sim_network_faults_are_reproducible_by_seed() {
     let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     let validators = vec![Validator {
         pk: a_pk,
@@ -1065,7 +1065,7 @@ fn sim_total_drop_prevents_delivery() {
     let a_pk = addr_of(&seeded_identity(1)); // PQ-MIG-3B: value identity = ML-DSA address
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     let validators = vec![Validator {
         pk: a_pk,
@@ -1106,8 +1106,8 @@ fn equivocating_blocks(byz: &CryptoEngine, now_ms: u64) -> (String, String, Vec<
         origin.mine_tx(&pk, amount, 0.0);
         origin.seal_block(&pk, 0.0) // a block at index 1, extending genesis
     };
-    let b1 = seal_one(50 * MICRO);
-    let b2 = seal_one(40 * MICRO); // different reward ⇒ different block
+    let b1 = seal_one(3 * MICRO);
+    let b2 = seal_one(2 * MICRO); // different reward ⇒ different block
     let (h1, h2) = (b1.hash.clone(), b2.hash.clone());
     let env1 = signed_msg_bytes(
         byz,
@@ -1231,7 +1231,7 @@ fn sim_crashed_node_misses_blocks_then_recovers_on_restart() {
     sim.crash(&d); // D goes offline
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&a_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&a_pk, 3 * MICRO, 0.0)
     };
     sim.node_mut(&a).ledger_mut().replay_remote_tx(frozen);
     sim.propose(
@@ -1295,7 +1295,7 @@ fn sim_byzantine_retention_then_victim_syncs_from_honest_peer() {
 
     let frozen = {
         let mut origin = Ledger::new();
-        origin.mine_tx(&l_pk, 50 * MICRO, 0.0)
+        origin.mine_tx(&l_pk, 3 * MICRO, 0.0)
     };
     sim.node_mut(&l).ledger_mut().replay_remote_tx(frozen);
     sim.propose(
@@ -1357,7 +1357,7 @@ fn sim_invariants_hold_through_a_healthy_run() {
 
     sim.node_mut(&a)
         .ledger_mut()
-        .replay_remote_tx(frozen_mining(&a_pk, 50 * MICRO));
+        .replay_remote_tx(frozen_mining(&a_pk, 3 * MICRO));
     sim.propose(
         &a,
         &[Validator {
@@ -1418,10 +1418,10 @@ fn sim_partition_fork_breaks_safety_and_is_detected() {
     sim.run_until(now0); // arm both seal timers
     sim.node_mut(&a)
         .ledger_mut()
-        .replay_remote_tx(frozen_mining(&a_pk, 50 * MICRO));
+        .replay_remote_tx(frozen_mining(&a_pk, 3 * MICRO));
     sim.node_mut(&b)
         .ledger_mut()
-        .replay_remote_tx(frozen_mining(&b_pk, 50 * MICRO));
+        .replay_remote_tx(frozen_mining(&b_pk, 3 * MICRO));
 
     // Both sides seal at their next slot; the partition blocks reconciliation.
     let result = sim.run_checked(10_000);
@@ -1805,20 +1805,22 @@ fn onchain_stake_harness_conservation_counts_locked_stake() {
     let pk = addr_of(&crypto); // PQ-MIG-3B: value identity (stake/mine/seal) = ML-DSA address
 
     let mut node = Node::new();
-    node.ledger_mut().mine_tx(&pk, 100 * MICRO, 0.0);
+    // MINT-EXACT-1 : la récompense d'un bloc est bornée par la canonique
+    // (~4 QTA à la genèse), donc le financement du test tient dans ce barème.
+    node.ledger_mut().mine_tx(&pk, 3 * MICRO, 0.0);
     node.ledger_mut().seal_block(&pk, 0.0);
     node.ledger_mut()
-        .stake_tx(&pk, 40 * MICRO, &crypto)
+        .stake_tx(&pk, 2 * MICRO, &crypto)
         .expect("stake builds");
     node.ledger_mut().seal_block(&pk, 0.0);
     node.ledger_mut()
-        .unstake_tx(&pk, 25 * MICRO, &crypto)
+        .unstake_tx(&pk, MICRO, &crypto)
         .expect("unstake builds");
     node.ledger_mut().seal_block(&pk, 0.0);
 
     let sim = Sim::new(0x57A6E, vec![(a.clone(), node)]);
 
-    // NEW checker: the locked-stake sink (bonded 15 + unbonding 25 = 40) is
+    // NEW checker: the locked-stake sink (bonded 1 + unbonding 1 = 2) is
     // counted ⇒ conserves.
     assert_eq!(
         sim.check_invariants(),
@@ -1829,7 +1831,7 @@ fn onchain_stake_harness_conservation_counts_locked_stake() {
     // TEETH: the pre-ONCHAIN-STAKE-1 formula would have FALSELY flagged it.
     let l = sim.nodes[&a].ledger();
     let spendable: u64 = l.all_balances().values().sum();
-    assert_eq!(l.locked_stake_total(), 40 * MICRO, "40 locked (15 bonded + 25 unbonding)");
+    assert_eq!(l.locked_stake_total(), 2 * MICRO, "2 locked (1 bonded + 1 unbonding)");
     assert_ne!(
         spendable + l.total_burned(),
         l.total_minted(),
@@ -1998,7 +2000,7 @@ fn forkcap_sweep_over_emit_reorg_is_rejected() {
             Move::Run { steps: 1_000 },
             Move::OverEmitReorg {
                 byz_seed: 77,
-                legit_reward: 50 * MICRO,
+                legit_reward: 3 * MICRO,
                 evil_reward: 1_000_000 * MICRO,
                 at_ms: t0,
             },
@@ -2032,8 +2034,8 @@ fn forkcap_sweep_over_emit_reorg_is_rejected() {
         .sum();
     assert_eq!(
         tip_minted,
-        50 * MICRO,
-        "the 1M over-emitter must NOT have replaced the legit 50 QUANTA tip"
+        3 * MICRO,
+        "the 1M over-emitter must NOT have replaced the legit canonical tip"
     );
     assert!(
         node0.total_supply() <= crate::p2p::reputation::MAX_SUPPLY_MICRO,
@@ -2055,7 +2057,7 @@ fn emit_1_healthy_run_keeps_emission_safety_conservation() {
 
     sim.node_mut(&a)
         .ledger_mut()
-        .replay_remote_tx(frozen_mining(&a_pk, 50 * MICRO));
+        .replay_remote_tx(frozen_mining(&a_pk, 3 * MICRO));
     sim.propose(
         &a,
         &[Validator {
@@ -2705,7 +2707,7 @@ fn scenario_equivocation(seed: u64, r: &mut Blake3Rng) -> ScenarioPlan {
     if over_emit {
         moves.push(Move::OverEmitReorg {
             byz_seed,
-            legit_reward: 50 * MICRO,
+            legit_reward: 3 * MICRO,
             evil_reward: 1_000_000 * MICRO, // ≫ per-block bound → rejected
             at_ms: t0,
         });
@@ -2721,7 +2723,7 @@ fn scenario_equivocation(seed: u64, r: &mut Blake3Rng) -> ScenarioPlan {
         }
         moves.push(Move::Run { steps: 4_000 });
     } else {
-        let reward_a = 50 * MICRO;
+        let reward_a = 3 * MICRO;
         let reward_b = reward_a - MICRO; // distinct ⇒ the two blocks truly differ
         // Cover BOTH delivery senses across the sweep (T0.8-HARDEN §2a):
         // monotone (high-first to all) and the reorg flip (low-then-high,
@@ -2894,7 +2896,16 @@ fn run_plan(plan: &ScenarioPlan) -> (Sim, Option<Violation>, Option<u64>) {
             Move::Propose { idx, reward } => {
                 let pk = pk_of(plan.id_seeds[*idx]);
                 mint_seq += 1;
-                let reward_tx = det_mining_tx(&pk, *reward, SIM_EPOCH_MS, mint_seq);
+                // MINT-EXACT-1 — un producteur HONNÊTE frappe la récompense
+                // canonique dérivée de sa propre chaîne, jamais un montant choisi.
+                // Le plan garde son `reward` comme intention (il distingue deux
+                // blocs), mais la frappe réelle est bornée par la règle monétaire,
+                // exactement comme `Ledger::mint_block_reward` en production —
+                // sinon le harnais produirait des blocs que le réseau réel
+                // rejetterait, et les invariants seraient vérifiés sur des chaînes
+                // impossibles.
+                let canonical = sim.node_mut(&nid(*idx)).ledger().canonical_block_reward();
+                let reward_tx = det_mining_tx(&pk, (*reward).min(canonical), SIM_EPOCH_MS, mint_seq);
                 sim.node_mut(&nid(*idx)).ledger_mut().replay_remote_tx(reward_tx);
                 let validators = vec![Validator {
                     pk: pk.clone(),
@@ -3426,9 +3437,10 @@ fn pqmig5_first_block_on_pq_genesis_validates_and_conserves() {
     assert_eq!(g0, Ledger::GENESIS_ADDR_0);
 
     let mut l = Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION);
-    // Récompense de bloc déterministe + transfert signé de 10 QTA pris sur les
-    // 50 QTA de genèse de G0 (exerce émission + couverture + binding).
-    l.replay_remote_tx(det_mining_tx(&g0, 7 * MICRO, now0, 1));
+    // Récompense de bloc déterministe (≤ canonique, MINT-EXACT-1) + transfert
+    // signé de 10 QTA pris sur les 50 QTA de genèse de G0 (exerce émission +
+    // couverture + binding).
+    l.replay_remote_tx(det_mining_tx(&g0, 3 * MICRO, now0, 1));
     l.transfer_tx_at(&g0, Ledger::GENESIS_ADDR_2, 10 * MICRO, &crypto, ts.clone(), true)
         .expect("transfert signé depuis un compte de genèse");
     let block1 = l.seal_block_at(&g0, 0.0, ts.clone());
@@ -3454,7 +3466,7 @@ fn pqmig5_first_block_on_pq_genesis_validates_and_conserves() {
             led.total_minted(),
             "conservation après le premier bloc"
         );
-        assert_eq!(led.total_minted(), 107 * MICRO, "100 genèse + 7 récompense");
+        assert_eq!(led.total_minted(), 103 * MICRO, "100 genèse + 3 récompense");
     }
     assert_eq!(
         l.balance_of(Ledger::GENESIS_ADDR_2),
@@ -3536,7 +3548,7 @@ fn t0_8_single_block_reorg_lowest_hash_first_reconciles() {
     // index 1: a block crediting `pk` (so it can fund the transfer). Both nodes
     // integrate it directly (test setup; the reorg under test is delivered).
     let genesis = Ledger::new().block_at(0).unwrap().hash.clone();
-    let b1 = Ledger::forge_block_at(1, &genesis, &ts, &pk, vec![det_mining_tx(&pk, 100 * MICRO, now0, 1)]);
+    let b1 = Ledger::forge_block_at(1, &genesis, &ts, &pk, vec![det_mining_tx(&pk, 3 * MICRO, now0, 1)]);
     for node in [&n, &p] {
         assert_eq!(
             sim.node_mut(node).ledger_mut().integrate_remote_block(b1.clone()),
@@ -3548,9 +3560,9 @@ fn t0_8_single_block_reorg_lowest_hash_first_reconciles() {
     // The signed transfer (+ burn), built deterministically on a scratch ledger
     // where `pk` holds the index-1 reward.
     let mut scratch = Ledger::new();
-    scratch.replay_remote_tx(det_mining_tx(&pk, 100 * MICRO, now0, 1));
+    scratch.replay_remote_tx(det_mining_tx(&pk, 3 * MICRO, now0, 1));
     let (xfer, burn_opt, _) = scratch
-        .transfer_with_burn_at(&pk, &y, 10 * MICRO, &n_crypto, ts.clone(), true)
+        .transfer_with_burn_at(&pk, &y, 2 * MICRO, &n_crypto, ts.clone(), true)
         .expect("scratch transfer succeeds");
     let burn = burn_opt.expect("burn leg present");
 
@@ -3560,11 +3572,13 @@ fn t0_8_single_block_reorg_lowest_hash_first_reconciles() {
         &b1.hash,
         &ts,
         &pk,
-        vec![xfer.clone(), burn.clone(), det_mining_tx(&pk, 7 * MICRO, now0, 2)],
+        vec![xfer.clone(), burn.clone(), det_mining_tx(&pk, 2 * MICRO, now0, 2)],
     );
     // The WINNER (index 2): mining only, reward tuned (deterministically) so its
     // hash exceeds the loser's — so the loser is adopted first, then loses.
-    let mut reward = 8 * MICRO;
+    // MINT-EXACT-1 : la recherche part SOUS la récompense canonique et n'avance
+    // que d'un µQTA, donc le bloc gagnant reste monétairement valide.
+    let mut reward = 3 * MICRO;
     let mut winner = Ledger::forge_block_at(2, &b1.hash, &ts, &pk, vec![det_mining_tx(&pk, reward, now0, 100)]);
     while winner.hash <= loser.hash {
         reward += 1;
@@ -3682,10 +3696,10 @@ fn t0_8_multiblock_partition_reconciles_at_heal() {
             }],
         );
     };
-    propose(&mut sim, &a, &a_pk, 50 * MICRO, 1);
-    propose(&mut sim, &a, &a_pk, 49 * MICRO, 2);
-    propose(&mut sim, &b, &b_pk, 50 * MICRO, 3);
-    propose(&mut sim, &b, &b_pk, 49 * MICRO, 4);
+    propose(&mut sim, &a, &a_pk, 3 * MICRO, 1);
+    propose(&mut sim, &a, &a_pk, 2 * MICRO, 2);
+    propose(&mut sim, &b, &b_pk, 3 * MICRO, 3);
+    propose(&mut sim, &b, &b_pk, 2 * MICRO, 4);
     sim.run(10_000);
     assert_eq!(sim.heights()[&a], 3, "A advanced two blocks on its fork");
     assert_eq!(sim.heights()[&b], 3, "B advanced two blocks on its fork");
@@ -3747,19 +3761,20 @@ fn t0_8_multiblock_partition_reconciles_at_heal() {
     );
 
     // Conservation-at-heal, made surgical: exactly the winning miner is credited
-    // the single fork's emission (50+49 = 99 QTA); the LOSER miner's branch — its
-    // identical 99 QTA emission — was undone, not double-minted (a re-queue or a
-    // missing revert would leave its reward in a balance and break the equality
-    // above). Both forks mint 99, so whichever won, the total is one fork's worth.
+    // the single fork's emission (3+2 = 5 QTA — MINT-EXACT-1 borne chaque bloc à
+    // la récompense canonique) ; the LOSER miner's branch — its identical 5 QTA
+    // emission — was undone, not double-minted (a re-queue or a missing revert
+    // would leave its reward in a balance and break the equality above). Both
+    // forks mint 5, so whichever won, the total is one fork's worth.
     for (id, node) in &sim.nodes {
         let l = node.ledger();
         let won_a = l.balance_of(&a_pk);
         let won_b = l.balance_of(&b_pk);
-        assert_eq!(won_a + won_b, 99 * MICRO, "only one fork's emission survives on {id:?}");
+        assert_eq!(won_a + won_b, 5 * MICRO, "only one fork's emission survives on {id:?}");
         assert!(
             won_a == 0 || won_b == 0,
             "the losing miner's dropped-branch emission is fully reverted on {id:?}"
         );
-        assert_eq!(l.total_minted(), 99 * MICRO, "minted counts one fork only on {id:?}");
+        assert_eq!(l.total_minted(), 5 * MICRO, "minted counts one fork only on {id:?}");
     }
 }

@@ -209,6 +209,12 @@
             <div class="stat-label">{t('mine.fin.validators')}</div>
             <div class="fin-stat-v">{fin.validators}</div>
           </div>
+          <!-- Compte prouvé par la chaîne (proposeurs distincts sur la fenêtre),
+               jamais un compte de pairs ni une annonce DHT — borne basse honnête. -->
+          <div class="fin-stat" title={t('mine.fin.minersHint').replace('{n}', String(fin.miner_window_blocks))}>
+            <div class="stat-label">{t('mine.fin.miners')}</div>
+            <div class="fin-stat-v">{fin.active_miners}</div>
+          </div>
           <div class="fin-stat">
             <div class="stat-label">{t('mine.fin.staked')}</div>
             <div class="fin-stat-v">{fmtQ(fin.total_staked)} <span class="fin-stat-u">{TICKER}</span></div>

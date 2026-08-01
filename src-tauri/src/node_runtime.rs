@@ -11,7 +11,7 @@
 //! endpoint, and spawn every background task — so both entry points call it and
 //! can never drift apart.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{p2p, storage, AppState};
@@ -96,8 +96,12 @@ pub async fn open_db(state: &Arc<AppState>, data_dir: PathBuf) {
 /// dispatch, hello/ping liveness, peer cleanup, auto-reconnect, persistence, and —
 /// when `mine` is set — the mining loop). Call after [`open_db`] (and, for the
 /// daemon, after establishing an identity). Never panics.
-pub async fn start_network(state: &Arc<AppState>, mine: bool) {
-    match state.node.init_endpoint().await {
+pub async fn start_network(state: &Arc<AppState>, mine: bool, data_dir: &Path) {
+    // RDV-0 — load the persistent network identity BEFORE binding, so this node
+    // keeps the same NodeId (and therefore the same shareable ticket, the same
+    // DHT slot and the same entry in its peers' `known_peers`) across restarts.
+    let secret = p2p::willow_node::load_or_create_node_key(data_dir).ok();
+    match state.node.init_endpoint(secret).await {
         Ok(()) => log::info!("◈ [Quanta] Iroh QUIC endpoint active"),
         Err(e) => log::warn!("◈ [Quanta] P2P offline: {} (local mode)", e),
     }
@@ -107,6 +111,10 @@ pub async fn start_network(state: &Arc<AppState>, mine: bool) {
     p2p::gossip_tasks::spawn_ping_broadcast(state.clone());
     p2p::gossip_tasks::spawn_peer_cleanup(state.clone());
     p2p::gossip_tasks::spawn_auto_reconnect(state.clone());
+    // RDV-1 — serverless bootstrap. Everything above only works once we know at
+    // least one peer; this is what supplies that first peer without a human
+    // pasting a ticket.
+    p2p::rendezvous::spawn(state.clone());
     if mine {
         p2p::mining_loop::spawn(state.clone());
     }
@@ -117,8 +125,8 @@ pub async fn start_network(state: &Arc<AppState>, mine: bool) {
 /// establishes its wallet interactively via the UI, so no identity is set here —
 /// the mining loop idles until the user unlocks.) `mine` gates block production.
 pub async fn bootstrap(state: &Arc<AppState>, data_dir: PathBuf, mine: bool) {
-    open_db(state, data_dir).await;
-    start_network(state, mine).await;
+    open_db(state, data_dir.clone()).await;
+    start_network(state, mine, &data_dir).await;
 }
 
 /// Establish the node's signing identity.

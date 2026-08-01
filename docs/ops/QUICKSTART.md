@@ -66,7 +66,7 @@ RPC=http://127.0.0.1:8645
 q() { curl -s -X POST "$RPC" -H 'Content-Type: application/json' -d "$1"; echo; }
 
 q '{"method":"listmethods"}'                                   # les 17 méthodes
-q '{"method":"getinfo"}'                                       # hauteur, supply, protocole (6)
+q '{"method":"getinfo"}'                                       # hauteur, supply, protocole (6), mineurs actifs
 q '{"method":"getfinalityinfo"}'                               # finalité Casper-FFG (époque, quorum ⅔)
 q '{"method":"getvalidators"}'                                 # set de validateurs bondés
 q '{"method":"getblock","params":{"height":0}}'               # la genèse

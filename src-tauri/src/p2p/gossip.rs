@@ -75,7 +75,44 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// Genesis is untouched by these rules, but the wire and validation surfaces are
 /// incompatible, hence the bump.
-pub const TORUS_PROTOCOL_VERSION: u8 = 7;
+/// **7→8 (MINT-EXACT-1) — la récompense de bloc devient une fonction pure de la
+/// chaîne.** Une seule règle d'admission change, mais elle porte la politique
+/// monétaire, donc un nœud v7 et un nœud v8 n'acceptent pas le même ensemble de
+/// blocs :
+/// - v7 bornait l'émission d'un bloc à `64 × emission_for_tick` — une marge de
+///   `32 × N` au-dessus du montant honnête (`≈ 2 × emission_for_tick / N` avec N
+///   nœuds vivants), parce que le montant était calculé **localement** par le
+///   sceleur (part Shapley dérivée de watts auto-déclarés, invérifiables) et que
+///   le réseau ne pouvait donc que le borner. À 100 nœuds, un validateur bondé
+///   pouvait se frapper 3 200 fois sa récompense légitime à chaque bloc.
+/// - v8 **recalcule** : `block_minted ≤ emission_for_block(offre minée avant ce
+///   bloc)`, une fonction pure de la chaîne que producteur et vérificateur lisent
+///   à l'identique. L'énergie auto-déclarée quitte le chemin monétaire (elle reste
+///   un signal d'affichage) et l'émission réalisée cesse de s'effondrer en `1/N`
+///   quand le réseau grandit.
+///
+/// - **OPEN-DOOR-1** — un bloc sur `OPEN_SLOT_EVERY_BLOCKS` (16) est un **slot
+///   ouvert** que n'importe quelle adresse peut proposer, bondée ou non. v7
+///   refusait tout proposeur non bondé dès qu'un seul compte avait staké, ce qui
+///   refermait le réseau **définitivement** : sans faucet ni airdrop ni premine,
+///   un nouvel arrivant n'avait aucun chemin vers sa première pièce. v8 laisse
+///   passer ces blocs ; v7 les rejette. Capture Sybil bornée à 1/16 de l'émission.
+///
+/// **8→9 (REWARD-SHARE-1) — la récompense d'un bloc se partage.** v8 exigeait une
+/// coinbase unique créditée au mineur ; v9 en accepte **une par bénéficiaire** et
+/// impose la répartition : moitié au producteur, moitié à parts égales entre les
+/// **participants récents** (les adresses distinctes ayant produit un bloc dans
+/// les `SHARE_WINDOW_BLOCKS` précédents — une donnée que la chaîne prouve déjà via
+/// `block.miner`, lié au hash par BLK-HASH-1). Chaque nœud **recalcule** le plan
+/// (`validate_block_reward_plan`) : un producteur qui capte toute l'émission, ou
+/// qui paie un tiers hors plan, est rejeté. Le plan est **invariant d'échelle** —
+/// émettre moins reste permis, mais sans rogner la part des autres.
+/// v8 rejette les blocs multi-coinbase de v9 ; v9 rejette les blocs v8 dès qu'un
+/// participant récent existe. Aucun champ wire nouveau : le partage passe par des
+/// tx `Mining` ordinaires.
+///
+/// La genèse est intacte ; c'est la surface de validation qui diverge, d'où le bump.
+pub const TORUS_PROTOCOL_VERSION: u8 = 9;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
@@ -316,6 +353,22 @@ pub struct GossipStats {
     pub dropped_rate_limit: u64,
     /// Messages dropped due to nonce replay
     pub dropped_nonce: u64,
+    /// V2 (audit de vie) — messages dropped because their timestamp fell outside
+    /// the ±90 s freshness window.
+    ///
+    /// This one is a **node health signal, not an attack signal**: there is no
+    /// NTP anywhere in Quanta, so a machine whose clock drifts past 90 s rejects
+    /// *every* inbound envelope while still reporting itself online. Before this
+    /// counter the rejection was a `log::debug!` with no tally — invisible in a
+    /// release build — which made the failure undiagnosable from outside. A
+    /// climbing `dropped_stale` next to a flat `messages_received` means "check
+    /// this machine's clock", and nothing else produces that shape.
+    #[serde(default)]
+    pub dropped_stale: u64,
+    /// V4 (audit de vie) — envelopes dropped because the sender announced an
+    /// incompatible `TORUS_PROTOCOL_VERSION`.
+    #[serde(default)]
+    pub dropped_incompatible: u64,
 }
 
 /// MOD-2: Maximum number of message IDs retained for deduplication.
@@ -331,7 +384,29 @@ pub struct GossipRouter {
     pub stats: GossipStats,
     /// CRIT-A: Monotonic outgoing nonce — starts at 1, never 0.
     outgoing_nonce: AtomicU64,
+    /// V4 (audit de vie) — senders that announced an incompatible
+    /// `TORUS_PROTOCOL_VERSION`, keyed by BLAKE3 of the sender key.
+    ///
+    /// Hashed, not raw: an ML-DSA public key is 3904 hex chars, and H6 of the
+    /// July audit was exactly this class of bug (peer maps keyed by 3.9 KB
+    /// strings). Bounded by [`MAX_INCOMPATIBLE_SENDERS`] and cleared wholesale
+    /// when full — this is a cheap "do not bother" hint, not security state, so
+    /// losing it merely costs one more Hello before we notice again.
+    incompatible_senders: std::collections::HashSet<MsgId>,
+    /// V2 — unix second of the last stale-envelope warning. Runtime-only, never
+    /// persisted: it only paces the log, `stats.dropped_stale` stays exact.
+    last_stale_warn_unix: i64,
 }
+
+/// V4 — cap on remembered incompatible senders. Small on purpose: after a fork
+/// the set of stale peers is tiny, and this must never become a memory vector.
+const MAX_INCOMPATIBLE_SENDERS: usize = 512;
+
+/// V2 — at most one stale-envelope warning per this many seconds. Freshness is
+/// checked *before* the signature in the dispatch pipeline, so unauthenticated
+/// traffic reaches this path: an attacker replaying dated envelopes at line
+/// rate must inflate a counter, never our own log.
+const STALE_WARN_EVERY_SECS: i64 = 30;
 
 impl GossipRouter {
     pub fn new() -> Self {
@@ -340,11 +415,68 @@ impl GossipRouter {
             seen_order: std::collections::VecDeque::new(),
             stats: GossipStats::default(),
             outgoing_nonce: AtomicU64::new(1),
+            incompatible_senders: std::collections::HashSet::new(),
+            last_stale_warn_unix: 0,
+        }
+    }
+
+    /// V2 — record one stale-envelope drop and say whether this occurrence has
+    /// earned a log line (at most one per [`STALE_WARN_EVERY_SECS`]). The
+    /// counter is the diagnostic; the log line is only its narrator, and it must
+    /// stay readable under a flood the counter is precisely there to measure.
+    pub fn note_stale_drop(&mut self) -> bool {
+        self.stats.dropped_stale += 1;
+        let now = chrono::Utc::now().timestamp();
+        if now - self.last_stale_warn_unix >= STALE_WARN_EVERY_SECS {
+            self.last_stale_warn_unix = now;
+            true
+        } else {
+            false
         }
     }
 
     /// CRIT-A: Get and increment the outgoing nonce (atomic, no &mut needed).
+    ///
+    /// **V1 (audit de vie, 2026-08-01) — the counter is seeded from wall-clock
+    /// microseconds, never from 1.**
+    ///
+    /// A pure in-memory counter persisted only by the 30 s snapshot could
+    /// *regress*: peers reject any nonce ≤ the high-water mark they remember
+    /// (`dispatcher::check_and_advance`), and that memory is only pruned once
+    /// 100 000 senders are tracked — i.e. never, at real network size. A brutal
+    /// crash cost a few rejected messages; restoring a wallet on another machine
+    /// (RECOVER-1 — same ML-DSA sender key, fresh database) restarted the counter
+    /// at 1 against a peer holding a mark in the thousands, and **every message
+    /// we sent was silently dropped** until that peer itself restarted.
+    ///
+    /// Seeding from the clock removes the failure by construction: every nonce
+    /// we emit is at least the clock at emission time and overshoots it by at
+    /// most the burst width (see the exact guarantee below), so a restart —
+    /// with or without a database — resumes strictly above within microseconds.
+    /// The stored value is still honoured (`restore`), and the atomic
+    /// max-then-increment keeps nonces strictly increasing when several
+    /// messages land in the same microsecond or when the clock steps backwards.
+    ///
+    /// Wire-compatible: peers only ever compare `nonce > high_water`, so a jump
+    /// from a small counter to an epoch-micros value is accepted by existing
+    /// nodes. No protocol bump.
+    ///
+    /// **Exact guarantee, and its bound.** Each emitted nonce is ≥ the clock at
+    /// emission time. A burst still overshoots the clock by the number of nonces
+    /// handed out inside one microsecond, so a restart is only guaranteed to
+    /// resume above once that many microseconds have elapsed. Quanta emits a
+    /// handful of envelopes per minute and a restart takes seconds, so the
+    /// overshoot is nil in practice — and microsecond resolution would require
+    /// a million messages per second to make it otherwise. A restored snapshot
+    /// still raises the floor further (`restore`), so the only case relying on
+    /// the clock alone is a lost database.
     pub fn next_outgoing_nonce(&self) -> u64 {
+        let now_us = chrono::Utc::now().timestamp_micros().max(1) as u64;
+        // Raise the floor to the clock, then hand out the next value. `fetch_add`
+        // still gives every concurrent caller a distinct, strictly increasing
+        // nonce; `fetch_max` only ever moves the counter up, so a backwards clock
+        // step cannot make it regress.
+        self.outgoing_nonce.fetch_max(now_us, Ordering::Relaxed);
         self.outgoing_nonce.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -593,7 +725,30 @@ impl GossipRouter {
             seen_order: snap.seen_order,
             stats: snap.stats,
             outgoing_nonce: AtomicU64::new(snap.outgoing_nonce.max(1)),
+            // Not persisted on purpose: after an upgrade our own version has
+            // changed, so yesterday's "incompatible" verdicts are stale. Starting
+            // empty re-evaluates every peer on its next Hello.
+            incompatible_senders: std::collections::HashSet::new(),
+            last_stale_warn_unix: 0,
         }
+    }
+
+    /// V4 — remember a sender as protocol-incompatible.
+    ///
+    /// Returns `true` the first time a given sender is marked, so the caller can
+    /// log once per peer instead of once per message.
+    pub fn mark_incompatible(&mut self, sender_pk: &str) -> bool {
+        if self.incompatible_senders.len() >= MAX_INCOMPATIBLE_SENDERS {
+            self.incompatible_senders.clear();
+        }
+        let key = hex::encode(blake3::hash(sender_pk.as_bytes()).as_bytes());
+        self.incompatible_senders.insert(key)
+    }
+
+    /// V4 — has this sender already announced an incompatible protocol version?
+    pub fn is_incompatible(&self, sender_pk: &str) -> bool {
+        let key = hex::encode(blake3::hash(sender_pk.as_bytes()).as_bytes());
+        self.incompatible_senders.contains(&key)
     }
 }
 
@@ -602,6 +757,87 @@ impl GossipRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v1_nonce_is_clock_seeded_so_a_stateless_restart_resumes_above() {
+        // The failure this closes: restoring a wallet on a new machine (same
+        // ML-DSA sender key, empty database) restarted the counter at 1 while
+        // peers still remembered a high-water mark in the thousands, so every
+        // message we sent was dropped by `check_and_advance` — silently, and
+        // until that peer itself restarted.
+        //
+        // The property that actually delivers this is: **every nonce is at least
+        // the clock at emission time**. A restart therefore resumes above any
+        // nonce emitted more than a burst-width earlier — and a restart takes
+        // seconds while a burst is microseconds. Asserting the property directly
+        // (rather than restarting inside the same microsecond, which is not a
+        // real scenario) is what makes this test meaningful instead of flaky.
+        let router = GossipRouter::new();
+        for _ in 0..64 {
+            let floor = chrono::Utc::now().timestamp_micros() as u64;
+            let nonce = router.next_outgoing_nonce();
+            assert!(
+                nonce >= floor,
+                "nonce {nonce} sous l'horloge {floor} : un redémarrage sans état régresserait"
+            );
+        }
+
+        // And a stateless restart lands in the same epoch-micros range rather
+        // than back at 1 — the concrete regression that broke wallet restore.
+        let after_restart = GossipRouter::new().next_outgoing_nonce();
+        assert!(
+            after_restart > 1_700_000_000_000_000,
+            "un nœud reparti sans état doit repartir de l'horloge, pas de 1 (got {after_restart})"
+        );
+    }
+
+    #[test]
+    fn v1_nonce_is_strictly_increasing_within_one_millisecond() {
+        // Wall-clock seeding must not cost strict monotonicity: several messages
+        // in the same millisecond still need distinct, increasing nonces, or a
+        // peer would reject all but the first.
+        let router = GossipRouter::new();
+        let nonces: Vec<u64> = (0..1000).map(|_| router.next_outgoing_nonce()).collect();
+        for pair in nonces.windows(2) {
+            assert!(pair[1] > pair[0], "nonce non strictement croissant: {} → {}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn v1_nonce_survives_a_restore_from_an_old_snapshot() {
+        // Legacy snapshots carry a small counter (they predate wall-clock
+        // seeding). Restoring one must not drag us back below the clock.
+        let restored = GossipRouter::restore(GossipRouterSnapshot {
+            seen_messages: Default::default(),
+            seen_order: Default::default(),
+            stats: GossipStats::default(),
+            outgoing_nonce: 7,
+        });
+        assert!(
+            restored.next_outgoing_nonce() > 7,
+            "un vieux compteur ne doit pas rouvrir une fenêtre de nonces déjà consommés"
+        );
+    }
+
+    #[test]
+    fn v4_incompatible_sender_is_remembered_once_and_bounded() {
+        let mut router = GossipRouter::new();
+        assert!(router.mark_incompatible("peer-a"), "premier marquage → true (log une fois)");
+        assert!(!router.mark_incompatible("peer-a"), "second marquage → false (pas de spam)");
+        assert!(router.is_incompatible("peer-a"));
+        assert!(!router.is_incompatible("peer-b"), "un pair sain n'est jamais marqué");
+
+        // The set must never grow without bound, even under a flood of distinct
+        // (authenticated) senders announcing junk versions.
+        for i in 0..MAX_INCOMPATIBLE_SENDERS * 2 {
+            router.mark_incompatible(&format!("flood-{i}"));
+        }
+        assert!(
+            router.incompatible_senders.len() <= MAX_INCOMPATIBLE_SENDERS,
+            "ensemble non borné: {}",
+            router.incompatible_senders.len()
+        );
+    }
 
     #[test]
     fn h3_same_payload_from_two_senders_gets_distinct_ids() {

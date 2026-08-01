@@ -32,6 +32,8 @@
 //! each keeps a **thin adapter** that maps this shared view onto its own frozen
 //! JSON. The per-view docs below record exactly which adapter maps what.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::p2p::ledger::{Ledger, LedgerStats};
@@ -286,6 +288,62 @@ fn entry_from_tx(t: &Transaction) -> MempoolEntry {
     }
 }
 
+// ───────────────────────────── Miners ─────────────────────────────
+
+/// Sampling window for "who is mining right now", in blocks. At the ~2 min seal
+/// cadence this spans roughly four hours: long enough that a modest validator
+/// still shows up, short enough that a node which stopped mining drops out.
+pub const MINER_WINDOW_BLOCKS: u64 = 120;
+
+/// How many distinct addresses are mining, **proved by the chain**.
+///
+/// Deliberately *not* derived from peer counts or DHT records: both are local,
+/// partial and trivially forgeable. Sealed blocks carry their proposer, so this
+/// is a number anyone can recompute from the same chain and get the same answer.
+///
+/// It is a **lower bound** by construction — a node that mines but was not
+/// elected inside the window is invisible here. That is the honest figure, not a
+/// shortcoming: under EMIT-1 an unelected miner earns nothing on-chain either,
+/// so counting it as an active miner would overstate both the network and the
+/// user's prospects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MinersView {
+    /// Distinct block proposers observed in the window (genesis excluded).
+    pub active_miners: u32,
+    /// Blocks actually sampled — smaller than the window on a young chain.
+    pub sampled_blocks: u64,
+    /// The window the sample was drawn from.
+    pub window_blocks: u64,
+    /// **Index** of the newest sampled block, so a caller can tell how fresh
+    /// this is. Note `Ledger::chain_height()` is a block *count* (genesis
+    /// included), so this is that minus one.
+    pub tip_index: u64,
+}
+
+/// Build the [`MinersView`] — O(window), never O(chain).
+pub fn miners_view(ledger: &Ledger) -> MinersView {
+    let tip_index = ledger.chain_height().saturating_sub(1);
+    // Genesis (index 0) carries a synthetic proposer, never a live miner, so the
+    // window floor is 1. Inclusive on both ends → exactly `MINER_WINDOW_BLOCKS`.
+    let start = tip_index.saturating_sub(MINER_WINDOW_BLOCKS - 1).max(1);
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut sampled_blocks = 0u64;
+    for index in start..=tip_index {
+        if let Some(block) = ledger.block_at(index) {
+            sampled_blocks += 1;
+            if !block.miner.is_empty() {
+                seen.insert(block.miner.as_str());
+            }
+        }
+    }
+    MinersView {
+        active_miners: seen.len() as u32,
+        sampled_blocks,
+        window_blocks: MINER_WINDOW_BLOCKS,
+        tip_index,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,5 +430,37 @@ mod tests {
         let ledger = Ledger::new();
         assert!(validators_view(&ledger).validators.is_empty());
         assert!(mempool_view(&ledger).transactions.is_empty());
+    }
+
+    #[test]
+    fn miners_view_counts_distinct_proposers_and_excludes_genesis() {
+        let mut ledger = Ledger::new();
+        let fresh = miners_view(&ledger);
+        assert_eq!(fresh.active_miners, 0, "genèse seule : personne ne mine encore");
+        assert_eq!(fresh.sampled_blocks, 0, "le bloc 0 n'est jamais échantillonné");
+
+        ledger.seal_block("alice", 0.0);
+        ledger.seal_block("bob", 0.0);
+        ledger.seal_block("alice", 0.0);
+
+        let v = miners_view(&ledger);
+        assert_eq!(v.active_miners, 2, "alice comptée une fois, pas deux");
+        assert_eq!(v.sampled_blocks, 3);
+        // 4 blocs en chaîne (genèse + 3), donc l'index du sommet est 3.
+        assert_eq!(v.tip_index, 3);
+    }
+
+    #[test]
+    fn miners_view_only_samples_the_window() {
+        // A miner who stopped long ago must age out, otherwise the count would
+        // only ever grow and would stop meaning "mining right now".
+        let mut ledger = Ledger::new();
+        ledger.seal_block("ancient", 0.0);
+        for _ in 0..MINER_WINDOW_BLOCKS {
+            ledger.seal_block("current", 0.0);
+        }
+        let v = miners_view(&ledger);
+        assert_eq!(v.sampled_blocks, MINER_WINDOW_BLOCKS, "l'échantillon est borné à la fenêtre");
+        assert_eq!(v.active_miners, 1, "le mineur sorti de la fenêtre n'est plus compté");
     }
 }

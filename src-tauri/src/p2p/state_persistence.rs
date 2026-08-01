@@ -29,7 +29,7 @@ use std::sync::Arc;
 const PERSIST_INTERVAL_SECS: u64 = 30;
 
 /// Keys we snapshot, in stable order.
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 7] = [
     "ledger",
     "reputation",
     "consensus",
@@ -42,6 +42,10 @@ const KEYS: [&str; 6] = [
     // re-dériverait son vote et pourrait s'auto-équivoquer contre celui qu'il a
     // émis avant l'arrêt — sanction : brûlage intégral de son enjeu.
     "finality_cast_memo",
+    // RDV-2 — le carnet de reconnexion (EndpointIds). Sans lui, chaque
+    // redémarrage repartait de zéro : re-découverte DHT complète au lieu d'un
+    // re-dial immédiat des pairs qu'on connaissait déjà.
+    "known_peers",
 ];
 
 /// Spawn the periodic persistence task (every 30 seconds).
@@ -61,6 +65,7 @@ pub fn spawn_persistence(state: Arc<AppState>) {
             // ── 1. Snapshot all engines in parallel (independent read locks) ──
             let (
                 ledger_json, rep_json, cons_json, gos_json, usernames_json, memo_json,
+                known_peers_json,
             ) = tokio::join!(
                 snapshot_ledger(&state),
                 snapshot_reputation(&state),
@@ -68,9 +73,11 @@ pub fn spawn_persistence(state: Arc<AppState>) {
                 snapshot_gossip(&state),
                 snapshot_usernames(&state),
                 snapshot_cast_memo(&state),
+                snapshot_known_peers(&state),
             );
             let snapshots = [
                 ledger_json, rep_json, cons_json, gos_json, usernames_json, memo_json,
+                known_peers_json,
             ];
 
             // ── 2. Compute hashes; keep only the entries that changed ──
@@ -163,6 +170,17 @@ async fn snapshot_cast_memo(state: &AppState) -> String {
     serde_json::to_string(&votes).unwrap_or_default()
 }
 
+/// RDV-2 — the reconnect address book (EndpointId strings only; `Instant`s and
+/// backoff state are runtime-only and rebuilt on restore). Sorted so the JSON is
+/// byte-stable and the dirty-flag hash only fires on real membership changes,
+/// not on HashMap iteration order.
+async fn snapshot_known_peers(state: &AppState) -> String {
+    let kp = state.node.known_peers.read().await;
+    let mut ids: Vec<String> = kp.keys().cloned().collect();
+    ids.sort();
+    serde_json::to_string(&ids).unwrap_or_default()
+}
+
 /// Restore all engine state from the database on startup.
 pub async fn restore_state(state: &AppState, database: &Database) {
     // ── Ledger (with chain integrity verification) ────────────────
@@ -249,6 +267,21 @@ pub async fn restore_state(state: &AppState, database: &Database) {
                 "◈ [Finality] Mémo anti-slashing restauré ({} époque(s) déjà votée(s))",
                 count
             );
+        }
+    }
+
+    // ── RDV-2 — carnet de reconnexion ─────────────────────────────
+    // Restauré en « déconnecté » : la tâche NET-1 d'auto-reconnexion re-dialle
+    // ces pairs dès son premier tick — le chemin le plus court pour retrouver
+    // le maillage après un redémarrage, sans attendre un tour de DHT.
+    if let Ok(Some(json)) = database.load_state("known_peers").await {
+        if let Ok(ids) = serde_json::from_str::<Vec<String>>(&json) {
+            let accepted = state.node.restore_known_peers(ids).await;
+            if accepted > 0 {
+                log::info!(
+                    "◈ [RDV-2] Carnet de pairs restauré ({accepted} pair(s)) — reconnexion automatique lancée"
+                );
+            }
         }
     }
 }

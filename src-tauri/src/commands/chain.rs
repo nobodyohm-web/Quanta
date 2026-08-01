@@ -179,6 +179,10 @@ pub async fn get_finality_status(state: tauri::State<'_, Arc<AppState>>) -> Resu
     // `min_validator_stake_uqta`.
     let v = crate::views::finality_view(&ledger);
     let my_stake = ledger.staked_of(&addr);
+    // Chain-proved miner count (see `views::miners_view`): distinct block
+    // proposers over the sampling window — a lower bound anyone can recompute,
+    // never a peer count and never a DHT claim.
+    let miners = crate::views::miners_view(&ledger);
     Ok(serde_json::json!({
         "height": v.height,
         "finalized_floor": v.finalized_floor,
@@ -192,6 +196,8 @@ pub async fn get_finality_status(state: tauri::State<'_, Arc<AppState>>) -> Resu
         "i_am_validator": my_stake >= p2p::pos_consensus::MIN_VALIDATOR_STAKE,
         "quorum_num": v.quorum_num,
         "quorum_den": v.quorum_den,
+        "active_miners": miners.active_miners,
+        "miner_window_blocks": miners.window_blocks,
     }))
 }
 

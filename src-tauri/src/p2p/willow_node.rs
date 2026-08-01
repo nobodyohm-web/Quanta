@@ -20,6 +20,7 @@ use iroh_gossip::{
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,8 +44,79 @@ const RECONNECT_MAX_ATTEMPTS: u32 = 10;
 const MAX_KNOWN_PEERS: usize = 1024;
 
 /// QUANTA gossip topic — fixe pour tous les nœuds, dérivé d'un hash BLAKE3 stable.
+/// Source unique : `rendezvous` dérive ses slots DHT de ces mêmes octets, donc
+/// deux nœuds du même topic se retrouvent forcément au même rendez-vous.
+pub fn quanta_topic_bytes() -> [u8; 32] {
+    *blake3::hash(b"quanta-network-v1").as_bytes()
+}
+
+/// QUANTA gossip topic — fixe pour tous les nœuds, dérivé d'un hash BLAKE3 stable.
 pub fn quanta_topic_id() -> TopicId {
-    TopicId::from_bytes(*blake3::hash(b"quanta-network-v1").as_bytes())
+    TopicId::from_bytes(quanta_topic_bytes())
+}
+
+/// RDV-0 — load (or mint once) this node's **persistent network identity**.
+///
+/// `Endpoint::builder(..).bind()` without a secret key mints a fresh Ed25519
+/// keypair at every launch, so the NodeId — and therefore the ticket a user
+/// shares — changed on every restart. Peers that had saved us could no longer
+/// reach us, `known_peers` was worthless across a reboot, and any DHT record we
+/// published died with the process. Rendezvous means nothing without a stable
+/// identity, so this is the root fix that RDV-1 stands on.
+///
+/// The key is deliberately **not** derived from the wallet seed. It is transport
+/// identity, not money: keeping them disjoint means a NodeId reveals nothing
+/// about an account, two machines restoring the same wallet are not linkable by
+/// their NodeId, and the endpoint can bind at boot without waiting for an unlock.
+/// Losing the file costs only a new NodeId — peers rediscover us via the DHT.
+pub fn load_or_create_node_key(data_dir: &Path) -> Result<iroh::SecretKey, String> {
+    use zeroize::Zeroize;
+
+    let path = data_dir.join("node_key");
+    match std::fs::read(&path) {
+        Ok(mut bytes) if bytes.len() == 32 => {
+            let mut raw = [0u8; 32];
+            raw.copy_from_slice(&bytes);
+            bytes.zeroize();
+            let key = iroh::SecretKey::from_bytes(&raw);
+            raw.zeroize();
+            return Ok(key);
+        }
+        Ok(mut bytes) => {
+            // Truncated or corrupt: mint a new one rather than refusing to boot —
+            // a broken network identity must never take the node offline.
+            log::warn!("◈ [RDV-0] node_key illisible ({} o) — régénération", bytes.len());
+            bytes.zeroize();
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("◈ [RDV-0] node_key non lu: {e} — régénération"),
+    }
+
+    let key = iroh::SecretKey::generate();
+    let mut raw = key.to_bytes();
+    let write = write_secret_file(&path, &raw);
+    raw.zeroize();
+    match write {
+        Ok(()) => log::info!("◈ [RDV-0] Identité réseau persistée — NodeId stable: {}", key.public()),
+        // Still usable this session; it just will not survive a restart.
+        Err(e) => log::warn!("◈ [RDV-0] node_key non écrit: {e} — identité éphémère cette session"),
+    }
+    Ok(key)
+}
+
+/// Write 32 secret bytes owner-readable only (0600 on Unix).
+fn write_secret_file(path: &Path, bytes: &[u8; 32]) -> Result<(), String> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path).map_err(|e| e.to_string())?;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
 }
 
 // ─── NET-1: Known Peer Registry ─────────────────────────────────────────────
@@ -345,6 +417,26 @@ impl WillowNode {
         Ok(())
     }
 
+    /// RDV-2 — re-seed the reconnect table from a persisted snapshot (startup).
+    ///
+    /// Entries come back **disconnected** with a fresh backoff, so the NET-1
+    /// auto-reconnect task re-dials them immediately — the fastest path back
+    /// into the mesh after a restart, with no DHT round trip and no human.
+    /// Returns how many entries the bounded table actually accepted.
+    pub async fn restore_known_peers(&self, ids: Vec<String>) -> usize {
+        let mut kp = self.known_peers.write().await;
+        let mut accepted = 0usize;
+        for id in ids {
+            if register_known_peer(&mut kp, &id, MAX_KNOWN_PEERS) {
+                if let Some(p) = kp.get_mut(&id) {
+                    p.mark_disconnected();
+                }
+                accepted += 1;
+            }
+        }
+        accepted
+    }
+
     /// NET-1: Mark a peer as disconnected (NeighborDown). Starts backoff cycle.
     pub async fn mark_peer_down(&self, endpoint_id: &str) {
         let mut kp = self.known_peers.write().await;
@@ -432,17 +524,43 @@ impl WillowNode {
     }
 
     /// Initialize the real Iroh QUIC endpoint + iroh-gossip topic.
-    pub async fn init_endpoint(&self) -> Result<(), String> {
+    ///
+    /// `secret` is the **persistent** network identity (RDV-0). Passing `None`
+    /// falls back to a fresh random keypair — acceptable only for tests and for
+    /// a node whose data dir is unwritable, since an ephemeral NodeId makes both
+    /// saved peers and DHT records worthless on the next boot.
+    pub async fn init_endpoint(&self, secret: Option<iroh::SecretKey>) -> Result<(), String> {
         let active = self.endpoint_active.clone();
         let addr = self.node_addr.clone();
 
+        // RDV-1 — publish this endpoint's address on the mainline BitTorrent DHT
+        // (pkarr record under our own EndpointId). Combined with the persistent
+        // key above, a ticket becomes **permanent**: it keeps resolving across
+        // NAT changes, IP changes and restarts, with no server of ours involved.
+        // The default address filter publishes the home relay only — enough to be
+        // dialable (iroh hole-punches to a direct path afterwards) while keeping
+        // our local addresses off a public DHT.
+        let address_lookup = iroh::address_lookup::DhtAddressLookup::builder();
+
+        let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .address_lookup(address_lookup);
+        if let Some(sk) = secret {
+            builder = builder.secret_key(sk);
+        }
+
         // Try to create a real Iroh endpoint
-        match iroh::Endpoint::builder(iroh::endpoint::presets::N0).bind().await {
+        match builder.bind().await {
             Ok(endpoint) => {
                 let nid = endpoint.id();
                 *addr.write().await = Some(nid.to_string());
-                *active.write().await = true;
                 log::info!("◈ [Iroh] QUIC endpoint bound — NodeId: {}", nid);
+                // V3 (audit de vie) — `endpoint_active` (which drives the app's
+                // "en ligne" badge) is deliberately NOT set here. A bound QUIC
+                // endpoint is necessary but not sufficient: without a successful
+                // topic subscription the node can neither send nor receive a
+                // single gossip message. It used to be set right after `bind()`,
+                // so a failed `subscribe` left the user looking at an online node
+                // that was in fact mute. It is now set only on the Ok branch below.
 
                 // Phase 4 — Spawn iroh-gossip et l'enregistrer sur un Router
                 // pour que les connexions GOSSIP_ALPN soient routées automatiquement.
@@ -460,12 +578,19 @@ impl WillowNode {
                         *self.gossip_topic_sender.write().await = Some(sender);
                         *self.gossip_topic_rx.write().await = Some(receiver);
                         *self._router.write().await = Some(router);
+                        // V3 — only now is the node genuinely reachable.
+                        *active.write().await = true;
                         log::info!("◈ [Gossip] Subscribed to QUANTA topic {}", topic.fmt_short());
                     }
                     Err(e) => {
-                        log::warn!("◈ [Gossip] subscribe failed: {} — broadcast desactivé", e);
+                        log::error!(
+                            "◈ [Gossip] abonnement au topic ÉCHOUÉ: {e} — le nœud est MUET \
+                             (ni émission ni réception) et se déclare hors ligne"
+                        );
                         // Router quand même conservé pour les futures resouscriptions.
                         *self._router.write().await = Some(router);
+                        *active.write().await = false;
+                        return Err(format!("gossip subscribe failed: {e}"));
                     }
                 }
 

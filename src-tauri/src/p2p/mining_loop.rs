@@ -92,46 +92,27 @@ async fn mine_tick(state: &Arc<AppState>, tick: &mut u32) -> Result<(), Box<dyn 
     // les nœuds calculent la même émission pour ce tick.
     let total_mined = state.node.ledger.read().await.stats().total_mined;
     let emission_this_tick = p2p::reputation::emission_for_tick(total_mined);
-    // Garde-fou : ne jamais dépasser l'émission décroissante de ce tick.
+    // MINT-EXACT-1 — ce tick ne crée PLUS de monnaie. Il n'entretient que les
+    // compteurs d'affichage (uptime, énergie mesurée localement, part Shapley),
+    // qui sont désormais **hors du chemin monétaire** : la récompense est frappée
+    // au scellement, pour un montant dérivé de la seule chaîne.
+    //
+    // Avant, ce tick appelait `mine_tx` chaque minute avec un montant calculé
+    // localement à partir de watts **auto-déclarés par les pairs** — invérifiable
+    // par construction. Trois conséquences, toutes fermées ici : le nœud
+    // s'affichait un solde que le réseau ne reconnaissait pas (seul le sceleur du
+    // bloc survivant est payé, le reste expirait au TTL) ; il diffusait une tx
+    // `Mining` que chaque pair rejetait (MINT-GUARD-1), donc du trafic mort ; et
+    // l'émission réellement réalisée s'effondrait en `1/N` quand le réseau
+    // grandissait, puisque les parts Shapley somment à 1.
+    //
     // REPUT-ID-1: the local reputation actor is keyed by the ML-DSA **address**
     // (the economic actor), not the transport key. `peer_contribs` stays
     // transport-keyed — peers are network entities identified by their transport
     // pubkey (`peer_info`); Shapley sums their contribution *values*, so mixing
     // the local address into that map is harmless (keys only need to be distinct).
-    let (raw_uqta, kwh) = state.node.reputation.write().await
+    let _ = state.node.reputation.write().await
         .uptime_tick(&addr, blocks_verified, emission_this_tick, &peer_contribs);
-    let uqta_mined = raw_uqta.min(emission_this_tick);
-
-    // ── 3. Apply to ledger AND capture the freshly-built tx in one scope ──
-    // PQ-MIG-3B: the reward credits the ML-DSA **address** (`tx.to = addr`).
-    let mining_tx = state.node.ledger.write().await.mine_tx(&addr, uqta_mined, kwh);
-
-    // ── 4. Mirror into CRDT dual-ledger (only if non-zero) ──────
-    if uqta_mined > 0 {
-        state.node.consensus.write().await
-            .ledger.credit("network", &addr, uqta_mined);
-        // Live UX: tell the frontend a reward just landed (toast + 3D surge).
-        // Best-effort — nobody listening is fine.
-        if let Some(handle) = state.app_handle.read().await.as_ref() {
-            use tauri::Emitter;
-            let _ = handle.emit(
-                "quanta://mined",
-                serde_json::json!({
-                    "amount": uqta_mined as f64 / p2p::ledger::MICRO as f64,
-                    "kwh": kwh,
-                    // Matière unique pour le terminal : le montant EXACT en µQTA
-                    // et le hash BLAKE3 réel de la tx de récompense.
-                    "amount_micro": uqta_mined,
-                    "tx_hash": mining_tx.hash.clone(),
-                }),
-            );
-        }
-    }
-
-    // ── 5. Broadcast mining TX (uses captured tx, no ledger re-read) ──
-    // The envelope is signed by the Ed25519 transport key (`pk`); the tx inside
-    // already credits `addr`.
-    broadcast_mining_tx(state, &pk, &mining_tx).await;
 
     *tick = tick.wrapping_add(1);
 
@@ -182,23 +163,6 @@ async fn collect_peer_contributions(
             })
         })
         .collect()
-}
-
-/// Broadcast a mining TX captured directly from `mine_tx`.
-async fn broadcast_mining_tx(
-    state: &AppState,
-    pk: &str,
-    tx: &p2p::ledger::Transaction,
-) {
-    let tx_json = match serde_json::to_string(tx) {
-        Ok(j) => j,
-        Err(_) => return,
-    };
-    let msg = p2p::gossip::GossipMessage::BroadcastTx { tx_json };
-    if let Some(env) = sign_and_wrap(state, pk, msg).await {
-        state.node.gossip.write().await.mark_seen(&env.id);
-        let _ = state.node.gossip_tx.send(env);
-    }
 }
 
 /// Seal a block and broadcast it to peers.
@@ -276,10 +240,52 @@ async fn cast_finality_vote_if_validator(state: &AppState, pk: &str) {
 
 async fn seal_and_broadcast(state: &AppState, addr: &str, pk: &str) {
     let seal_t = std::time::Instant::now();
-    let sealed = state.node.ledger.write().await.seal_if_pending(addr, 0.0);
+    // MINT-EXACT-1 — le proposeur élu frappe la récompense canonique de son slot
+    // PUIS scelle, toujours : même sans transaction en attente, c'est le bloc
+    // lui-même qui porte l'émission et fait avancer les époques de finalité.
+    // Avant, le scellement était conditionné à un mempool non vide alimenté par le
+    // `mine_tx` de chaque tick ; sans ce robinet, un réseau au repos ne produirait
+    // plus aucun bloc — donc ni émission ni finalité.
+    let sealed = {
+        let mut ledger = state.node.ledger.write().await;
+        ledger.mint_block_reward(addr);
+        Some(ledger.seal_block(addr, 0.0))
+    };
     let seal_us = seal_t.elapsed().as_micros() as u64;
     if let Some(b) = sealed {
         log::info!("◈ [Ledger] Block #{} sealed ({} tx)", b.index, b.transactions.len());
+        // MINT-EXACT-1 — la récompense de CE bloc, lue sur le bloc lui-même (donc
+        // exactement ce que le réseau va valider), et non plus un montant calculé
+        // localement une minute plus tôt. C'est le seul « gagné » honnête.
+        let reward: u64 = b
+            .transactions
+            .iter()
+            .filter(|t| t.tx_type == p2p::ledger_types::TxType::Mining && t.from == "NETWORK")
+            .map(|t| t.amount)
+            .sum();
+        if reward > 0 {
+            // Miroir CRDT (double-registre de convergence).
+            state.node.consensus.write().await
+                .ledger.credit("network", addr, reward);
+            if let Some(handle) = state.app_handle.read().await.as_ref() {
+                use tauri::Emitter;
+                let reward_hash = b
+                    .transactions
+                    .iter()
+                    .find(|t| t.tx_type == p2p::ledger_types::TxType::Mining && t.from == "NETWORK")
+                    .map(|t| t.hash.clone())
+                    .unwrap_or_default();
+                let _ = handle.emit(
+                    "quanta://mined",
+                    serde_json::json!({
+                        "amount": reward as f64 / p2p::ledger::MICRO as f64,
+                        "kwh": b.energy_kwh,
+                        "amount_micro": reward,
+                        "tx_hash": reward_hash,
+                    }),
+                );
+            }
+        }
         // Live UX: block-seal pulse for the 3D scenes + toast.
         if let Some(handle) = state.app_handle.read().await.as_ref() {
             use tauri::Emitter;
@@ -392,6 +398,36 @@ async fn pos_seal_if_leader(state: &AppState, addr: &str, pk: &str) {
         .unwrap_or_default()
         .as_secs();
     let elapsed = now.saturating_sub(tip_time);
+
+    // OPEN-DOOR-1 — slot ouvert : ce bloc peut être proposé par n'importe qui.
+    // Un nœud SANS enjeu y va tout de suite (c'est sa seule voie vers sa première
+    // pièce — sans quoi le réseau lui est fermé à jamais) ; un validateur bondé
+    // n'y va qu'après le délai de garde, en repli, pour ne pas confisquer la
+    // fenêtre tout en garantissant qu'elle soit toujours scellée (sinon la chaîne
+    // se figerait à cette hauteur si aucun nouvel arrivant n'était en ligne).
+    // Les deux branches sont des sous-ensembles de la règle de réception (qui
+    // accepte tout proposeur sur un slot ouvert) — produire et vérifier ne
+    // divergent donc jamais.
+    if p2p::pos_consensus::is_open_slot(slot) {
+        let my_stake = {
+            let ledger = state.node.ledger.read().await;
+            ledger.staked_of(addr)
+        };
+        let unbonded = my_stake < p2p::pos_consensus::MIN_VALIDATOR_STAKE;
+        if unbonded || elapsed >= p2p::pos_consensus::LEADER_TIMEOUT_SECS {
+            log::info!(
+                "◈ [PoS] Slot OUVERT {} — scellement permis sans enjeu (unbonded={}, elapsed={}s)",
+                slot, unbonded, elapsed
+            );
+            emit_engine(state, serde_json::json!({
+                "kind": "elect", "slot": slot, "verdict": "open", "validators": validators.len(),
+            })).await;
+            seal_and_broadcast(state, addr, pk).await;
+        } else {
+            log::debug!("◈ [PoS] Slot ouvert {} — on laisse la fenêtre aux nouveaux arrivants", slot);
+        }
+        return;
+    }
 
     // PQ-MIG-3B: the proposer identity matched against the address-keyed
     // validator set is this node's ML-DSA **address**, not its transport key.

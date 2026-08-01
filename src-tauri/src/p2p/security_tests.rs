@@ -885,7 +885,7 @@ mod property_tests {
     /// Helper: build a fresh ledger that has mined one tx (pending, not yet sealed).
     fn ledger_with_pending(pk: &str) -> Ledger {
         let mut l = Ledger::new();
-        l.mine_tx(pk, 50 * MICRO, 0.0);
+        l.mine_tx(pk, 3 * MICRO, 0.0);
         l
     }
 

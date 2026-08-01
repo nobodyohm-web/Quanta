@@ -10,7 +10,7 @@
 
 use crate::security::CryptoEngine;
 use chrono::Utc;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 // Re-export all types from ledger_types so external code keeps working
 pub use super::ledger_types::*;
@@ -778,16 +778,218 @@ impl Ledger {
         tx
     }
 
-    /// Create a mining transaction (network-issued, no signature). Amount in
-    /// µQTA.
-    pub fn mine_tx(&mut self, miner_pk: &str, amount: u64, kwh: f64) -> Transaction {
+    /// **Robinet de test uniquement** — crée une tx de minage (émise par le
+    /// réseau, sans signature) et la pose dans le mempool. Montant en µQTA.
+    ///
+    /// MINT-EXACT-1 : ce n'était PAS un robinet de test, c'était le chemin de
+    /// création monétaire de production (`mining_loop` l'appelait chaque tick avec
+    /// un montant calculé **localement**). Deux défauts en découlaient :
+    ///
+    /// 1. **Fork privé silencieux.** À `pending.len() >= 10`, cette fonction
+    ///    appelait `seal_block` — sans contrôle de proposeur PoS et **sans jamais
+    ///    diffuser** le bloc. Un nœud non éligible accumulait exactement une tx par
+    ///    minute, donc au bout de 10 minutes il se scellait une chaîne privée et
+    ///    affichait à son porteur un solde qui n'existait pour personne d'autre.
+    /// 2. **Solde fantôme.** Même sans auto-scellement, le crédit était appliqué au
+    ///    cache dès l'admission alors que seul le sceleur du bloc survivant est
+    ///    réellement payé — le reste expirait au TTL du mempool (10 min).
+    ///
+    /// La production ne passe plus par ici : la récompense est frappée **au
+    /// scellement**, pour un montant canonique dérivé de la chaîne
+    /// (`reputation::emission_for_block`). Le mempool ne peut donc plus contenir
+    /// de `Mining` en release — `MINT-GUARD-1` rejette déjà celles reçues par
+    /// `BroadcastTx` —, ce qui rend le chemin de coalescence de `seal_block_at`
+    /// atteignable **uniquement** par ce robinet de test.
+    #[cfg(test)]
+    pub(crate) fn mine_tx(&mut self, miner_pk: &str, amount: u64, _kwh: f64) -> Transaction {
         let tx = self.build_unsigned_tx("NETWORK", miner_pk, amount, TxType::Mining);
         self.cache_apply_tx(&tx);
         self.pending.push(tx.clone());
-        if self.pending.len() >= 10 {
-            self.seal_block(miner_pk, kwh);
-        }
         tx
+    }
+
+    /// MINT-EXACT-1 — la récompense canonique du **prochain** bloc de cette
+    /// chaîne : `emission_for_block(offre minée jusqu'ici)`. Fonction pure de la
+    /// chaîne, donc le producteur et chaque vérificateur obtiennent le même
+    /// nombre — c'est ce qui permet à `validate_block_emission_against` de
+    /// *recalculer* au lieu de *borner*.
+    pub fn canonical_block_reward(&self) -> u64 {
+        crate::p2p::reputation::emission_for_block(self.stats().total_mined)
+    }
+
+    /// MINT-EXACT-1 — frappe la récompense **canonique** du bloc que ce nœud
+    /// s'apprête à sceller, et la pose dans le mempool. À appeler exactement une
+    /// fois par bloc produit, juste avant `seal_block` (voir
+    /// `mining_loop::seal_and_broadcast`).
+    ///
+    /// C'est le SEUL chemin de création monétaire en release. Le montant n'est pas
+    /// choisi : il est dérivé de la chaîne par [`Self::canonical_block_reward`],
+    /// exactement comme `validate_block_emission_against` le re-dérive à la
+    /// réception — produire et vérifier lisent la même fonction pure, donc un bloc
+    /// honnête est valide par construction (symétrie COVER-2) et un producteur ne
+    /// peut pas s'écarter du barème.
+    ///
+    /// Frapper deux fois ne rapporte rien : `coalesce_block_rewards` somme, et la
+    /// somme dépasse alors la canonique — le bloc est rejeté par tout le réseau.
+    ///
+    /// Renvoie `None` au plafond d'offre (émission nulle) : le bloc est alors scellé
+    /// sans récompense, ce qui reste valide (strictement non-inflationnaire).
+    pub fn mint_block_reward(&mut self, miner: &str) -> Vec<Transaction> {
+        // Une frappe antérieure NON scellée est **périmée** : elle a été calculée
+        // pour une autre hauteur, donc pour un autre ensemble de participants. La
+        // garder ferait un bloc dont la répartition ne correspond à aucun plan —
+        // rejeté par tout le réseau. Cela arrive en vrai dès qu'un bloc distant
+        // s'intercale entre notre frappe et notre scellement. On la révoque donc
+        // avant d'en frapper une neuve (discipline COVER-2 « valide par
+        // construction »).
+        self.drop_pending_rewards();
+        let index = self.chain_height();
+        let plan = self.expected_block_rewards(index, miner, self.canonical_block_reward());
+        let mut out = Vec::with_capacity(plan.len());
+        for (payee, amount) in plan {
+            if amount == 0 {
+                continue;
+            }
+            let tx = self.build_unsigned_tx("NETWORK", &payee, amount, TxType::Mining);
+            self.cache_apply_tx(&tx);
+            self.pending.push(tx.clone());
+            out.push(tx);
+        }
+        out
+    }
+
+    /// **Test only** — frappe le plan de récompense pour un total CHOISI plutôt
+    /// que la canonique. Sert aux tests qui veulent des montants lisibles tout en
+    /// produisant un bloc **conforme au partage** (donc acceptable par un pair).
+    /// La production passe toujours par [`Self::mint_block_reward`].
+    #[cfg(test)]
+    pub(crate) fn mint_block_reward_of(&mut self, miner: &str, total: u64) -> Vec<Transaction> {
+        self.drop_pending_rewards(); // même discipline que la production
+        let index = self.chain_height();
+        let plan = self.expected_block_rewards(index, miner, total);
+        let mut out = Vec::with_capacity(plan.len());
+        for (payee, amount) in plan {
+            if amount == 0 {
+                continue;
+            }
+            let tx = self.build_unsigned_tx("NETWORK", &payee, amount, TxType::Mining);
+            self.cache_apply_tx(&tx);
+            self.pending.push(tx.clone());
+            out.push(tx);
+        }
+        out
+    }
+
+    /// Révoque toute récompense de minage encore en attente (et annule son effet
+    /// sur le cache de soldes, pour garder l'invariant `cache == chaîne + pending`).
+    fn drop_pending_rewards(&mut self) {
+        let stale: Vec<Transaction> = self
+            .pending
+            .iter()
+            .filter(|t| t.tx_type == TxType::Mining && t.from == "NETWORK")
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        self.pending
+            .retain(|t| !(t.tx_type == TxType::Mining && t.from == "NETWORK"));
+        for tx in &stale {
+            self.cache_revert_tx(tx);
+        }
+    }
+
+    /// **Test only** — les tx de récompense conformes au plan, SANS passer par le
+    /// mempool : de quoi forger un bloc adverse qui respecte quand même le
+    /// partage (les tests de fork/floor veulent éprouver *autre chose* que la
+    /// répartition).
+    #[cfg(test)]
+    pub(crate) fn planned_reward_txs(&mut self, index: u64, miner: &str, total: u64) -> Vec<Transaction> {
+        let plan = self.expected_block_rewards(index, miner, total);
+        let mut out = Vec::with_capacity(plan.len());
+        for (to, amount) in plan {
+            if amount > 0 {
+                out.push(self.build_unsigned_tx("NETWORK", &to, amount, TxType::Mining));
+            }
+        }
+        out
+    }
+
+    /// REWARD-SHARE-1 — les **participants récents** constatés par la chaîne :
+    /// les adresses distinctes ayant produit un bloc dans la fenêtre
+    /// `[index − SHARE_WINDOW_BLOCKS, index)`. La genèse est exclue (elle n'est
+    /// proposée par personne).
+    ///
+    /// Fonction pure de la chaîne — `block.miner` est déjà lié au hash du bloc
+    /// (BLK-HASH-1), donc la participation est **prouvée**, pas déclarée. C'est
+    /// précisément ce qui permet de partager sans changer le format wire : nul
+    /// besoin d'embarquer les votes de finalité dans les blocs pour savoir qui
+    /// travaillait.
+    pub(crate) fn recent_participants(&self, index: u64) -> BTreeSet<String> {
+        let start = index.saturating_sub(crate::p2p::reputation::SHARE_WINDOW_BLOCKS).max(1);
+        self.chain
+            .iter()
+            .filter(|b| b.index >= start && b.index < index && b.index > 0)
+            .map(|b| b.miner.clone())
+            .filter(|m| !m.is_empty())
+            .collect()
+    }
+
+    /// REWARD-SHARE-1 — le **plan de récompense** d'un bloc d'index `index`
+    /// produit par `proposer` sur une chaîne dont le parent est `index − 1`.
+    /// Renvoie les paires `(bénéficiaire, µQTA)` **triées par adresse**.
+    ///
+    /// SOURCE UNIQUE produire/vérifier (même patron que `expected_slash_consumption`) :
+    /// le producteur frappe exactement ce plan, chaque récepteur le recalcule et
+    /// compare. Le partage est donc aussi infalsifiable que le montant total.
+    ///
+    /// Répartition : `PROPOSER_SHARE_NUM/DEN` au producteur, le reste à parts
+    /// égales entre les participants récents. Le **reste de division entière**
+    /// revient au producteur — aucun µQTA ne se perd, et le total vaut exactement
+    /// la récompense canonique (la conservation reste vraie au µQTA près).
+    ///
+    /// **Invariant d'échelle** : le plan est calculé sur le total `reward` qu'on
+    /// lui passe, pas sur la canonique. Un bloc peut donc émettre MOINS que son
+    /// dû (le producteur y renonce, strictement non-inflationnaire) — mais la
+    /// **forme** du partage reste imposée. La validation recalcule le plan avec le
+    /// total réellement présent dans le bloc : un producteur ne peut pas baisser
+    /// la part des autres sans baisser la sienne dans la même proportion.
+    ///
+    /// Sans participant récent (chaîne neuve), le producteur prend tout : le
+    /// comportement d'avant REWARD-SHARE-1, donc la genèse et les premiers blocs
+    /// sont inchangés.
+    pub(crate) fn expected_block_rewards(
+        &self,
+        index: u64,
+        proposer: &str,
+        reward: u64,
+    ) -> Vec<(String, u64)> {
+        if reward == 0 || proposer.is_empty() {
+            return Vec::new();
+        }
+        let participants: Vec<String> = self
+            .recent_participants(index)
+            .into_iter()
+            .filter(|p| p != proposer)
+            .collect();
+        if participants.is_empty() {
+            return vec![(proposer.to_string(), reward)];
+        }
+        let proposer_cut = reward
+            .saturating_mul(crate::p2p::reputation::PROPOSER_SHARE_NUM)
+            / crate::p2p::reputation::PROPOSER_SHARE_DEN;
+        let pot = reward - proposer_cut;
+        let each = pot / participants.len() as u64;
+        let dust = pot - each * participants.len() as u64;
+        let mut plan: Vec<(String, u64)> = Vec::with_capacity(participants.len() + 1);
+        plan.push((proposer.to_string(), proposer_cut + dust));
+        for p in participants {
+            if each > 0 {
+                plan.push((p, each));
+            }
+        }
+        plan.sort_by(|a, b| a.0.cmp(&b.0));
+        plan
     }
 
     /// Create a transfer transaction signed by the active identity (amount in

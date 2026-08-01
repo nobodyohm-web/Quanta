@@ -45,12 +45,13 @@ impl Ledger {
 
         // EMIT-1 (Option A — one reward per block): fold the pending mining
         // rewards into a SINGLE coalesced `NETWORK→miner` tx before sealing.
-        // Production mines once per tick but seals every `SEAL_EVERY_N_TICKS`
-        // ticks, so a leader's pending can hold several of its own rewards;
-        // bundling them keeps the chain at exactly one reward per block (the
-        // §4.2 rule peers enforce + the §4.3 emission invariant). A block with
-        // ≤1 mining tx is returned byte-identical to the pre-EMIT-1 seal.
-        let candidate = Self::coalesce_block_rewards(std::mem::take(&mut self.pending), miner, index, &ts);
+        // MINT-EXACT-1 : la récompense a été posée dans le mempool par
+        // `mint_block_reward` (production) — un montant CANONIQUE dérivé de la
+        // chaîne, que `validate_block_emission_against` recalcule à la réception.
+        // Le scellement ne fait donc que coalescer, sans jamais créer de monnaie
+        // de sa propre initiative : le cœur déterministe (`sm/`) garde exactement
+        // la sémantique qu'il avait.
+        let candidate = Self::coalesce_block_rewards(std::mem::take(&mut self.pending), index, &ts);
 
         // COVER-2 §2: build a VALID-BY-CONSTRUCTION block — EXCLUDE any uncovered
         // tx (the SAME sequential rule validation uses) rather than refusing to
@@ -154,19 +155,20 @@ impl Ledger {
     /// preserving every non-mining tx in its original order (the coalesced
     /// reward leads). A block with ≤1 mining tx is returned **unchanged** —
     /// byte-identical to the pre-EMIT-1 seal — so only the genuinely
-    /// multi-reward case (a leader bundling several ticks) is rewritten.
+    /// multi-reward case is rewritten.
+    ///
+    /// MINT-EXACT-1 : la somme n'est plus un montant *choisi* — en production le
+    /// seul contributeur du mempool est [`Ledger::mint_block_reward`], qui pose la
+    /// récompense **canonique** dérivée de la chaîne. Coalescer reste utile comme
+    /// défense en profondeur (un mempool corrompu, ou un producteur qui frappe
+    /// deux fois, produit une somme unique que `validate_block_emission_against`
+    /// compare ensuite à la canonique et rejette).
     ///
     /// The merged tx is fully deterministic: its id derives from the block
     /// `index`, its timestamp is the **injected** block `ts` (no wall-clock
-    /// read), and its content/hash follow the same scheme as `next_tx`. All
-    /// pending mining rewards are `NETWORK→self` and `miner == self` on every
-    /// real path (mining-loop and core seal with the node's own key; remote
-    /// mining txs are no-ops on admission), so crediting `miner` matches the
-    /// per-tick cache effect already summed to Σ — the block stays consistent
-    /// with the balance cache without re-touching it.
+    /// read), and its content/hash follow the same scheme as `next_tx`.
     pub(super) fn coalesce_block_rewards(
         txs: Vec<Transaction>,
-        miner: &str,
         index: u64,
         ts: &str,
     ) -> Vec<Transaction> {
@@ -175,58 +177,71 @@ impl Ledger {
         // from any other sender is a forgery (MINT-GUARD-1 already rejects it at
         // admission — this ensures a corrupted mempool could never mint either) and
         // is DROPPED here, never summed into the reward.
-        let network_rewards = txs
-            .iter()
-            .filter(|t| t.tx_type == TxType::Mining && t.from == "NETWORK")
-            .count();
         let has_forged = txs
             .iter()
             .any(|t| t.tx_type == TxType::Mining && t.from != "NETWORK");
-        // ≤1 genuine reward and no forgery → byte-identical to the pre-EMIT-1 seal.
-        if network_rewards <= 1 && !has_forged {
-            return txs;
-        }
-        let mut total: u64 = 0;
-        let mut rest: Vec<Transaction> = Vec::with_capacity(txs.len());
-        for tx in txs {
-            if tx.tx_type == TxType::Mining {
-                if tx.from == "NETWORK" {
-                    total = total.saturating_add(tx.amount);
+        // REWARD-SHARE-1 : un bloc porte désormais UNE récompense PAR bénéficiaire
+        // (producteur + participants récents). La coalescence se fait donc **par
+        // destinataire**, pas vers le mineur : fusionner tout vers lui écraserait
+        // le partage que `validate_block_reward_plan` va recalculer.
+        let mut per_payee: BTreeMap<String, u64> = BTreeMap::new();
+        let mut duplicated = false;
+        for tx in txs.iter() {
+            if tx.tx_type == TxType::Mining && tx.from == "NETWORK" {
+                let slot = per_payee.entry(tx.to.clone()).or_insert(0);
+                if *slot > 0 {
+                    duplicated = true;
                 }
-                // else: forged Mining tx — dropped, never minted.
-            } else {
-                rest.push(tx);
+                *slot = slot.saturating_add(tx.amount);
             }
         }
-        if total == 0 {
-            return rest; // no genuine reward to emit; any forgeries were dropped
+        // Cas de production : au plus une récompense par bénéficiaire et aucune
+        // forgerie ⇒ on rend le vecteur **inchangé**, byte-identique.
+        if !duplicated && !has_forged {
+            return txs;
         }
-        let id = format!("tx_mint_b{index}");
-        // TX-AUTH-NONCE-1: one canonical pre-image everywhere. Synthetic NETWORK
-        // reward → nonce 0 (it is unsigned and `verify_tx`-exempt; block-bound
-        // via the Merkle root over `tx_content_bytes`).
-        let payload = Self::tx_signing_preimage(&id, "NETWORK", miner, total, ts, &TxType::Mining, 0, "");
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
-        let reward = Transaction {
-            id,
-            from: "NETWORK".into(),
-            to: miner.into(),
-            amount: total,
-            tx_type: TxType::Mining,
-            timestamp: ts.into(),
-            signature: String::new(),
-            hash,
-            nonce: 0,
-            pq_signature: None,
-            pq_public_key: None,
-            fault_proof: None,
-            slash_unbonding: None,
-        };
-        let mut out = Vec::with_capacity(rest.len() + 1);
-        out.push(reward);
+        let mut rest: Vec<Transaction> = Vec::with_capacity(txs.len());
+        for tx in txs {
+            if tx.tx_type != TxType::Mining {
+                rest.push(tx);
+            }
+            // sinon : récompense NETWORK déjà sommée ci-dessus, ou forgerie —
+            // une `Mining` d'un autre expéditeur n'est JAMAIS frappée (MINT-GUARD-2).
+        }
+        let payees: Vec<(String, u64)> =
+            per_payee.into_iter().filter(|(_, amount)| *amount > 0).collect();
+        if payees.is_empty() {
+            return rest; // rien à émettre ; les forgeries ont été écartées
+        }
+        let mut out = Vec::with_capacity(rest.len() + payees.len());
+        for (k, (to, total)) in payees.into_iter().enumerate() {
+            let id = if k == 0 {
+                format!("tx_mint_b{index}")
+            } else {
+                format!("tx_mint_b{index}_{k}")
+            };
+            let payload = Self::tx_signing_preimage(&id, "NETWORK", &to, total, ts, &TxType::Mining, 0, "");
+            let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+            out.push(Transaction {
+                id,
+                from: "NETWORK".into(),
+                to,
+                amount: total,
+                tx_type: TxType::Mining,
+                timestamp: ts.into(),
+                signature: String::new(),
+                hash,
+                nonce: 0,
+                pq_signature: None,
+                pq_public_key: None,
+                fault_proof: None,
+                slash_unbonding: None,
+            });
+        }
         out.extend(rest);
         out
     }
+
 
     /// Seal only if there are pending transactions. Returns the block if one
     /// was sealed.
@@ -446,6 +461,12 @@ impl Ledger {
                     .sum();
                 let prior_mined = self.stats().total_mined.saturating_sub(our_tip_mining);
                 Self::validate_block_emission_against(&block, prior_mined)?;
+                // REWARD-SHARE-1 : la répartition passe par le même chemin que le
+                // total. `self` est encore au tip que ce bloc remplace, et
+                // `expected_block_rewards` ne regarde que les blocs d'index
+                // STRICTEMENT inférieur — la fenêtre de participation exclut donc
+                // bien le tip abandonné.
+                self.validate_block_reward_plan(&block, prior_mined)?;
 
                 // Now it's safe to mutate state.
                 let our_tip = self.chain.pop().ok_or("chain unexpectedly empty")?;
