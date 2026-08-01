@@ -70,6 +70,18 @@ pub fn spawn_incoming_dispatch(state: Arc<AppState>) {
                     log::info!("◈ [Gossip] NeighborUp {}", &id_str[..id_str.len().min(16)]);
                     // NET-1: Mark peer as connected (resets backoff)
                     state.node.mark_peer_up(&id_str).await;
+                    // HELLO-NEIGHBOR-1 — se présenter DÈS que le voisin existe.
+                    //
+                    // Sans ça, personne n'annonce rien avant le Hello périodique
+                    // suivant : jusqu'à 120 s pendant lesquelles les deux nœuds sont
+                    // mutuellement **invisibles** — `peer_info` vide (donc « 0 pair »
+                    // affiché alors que le lien est établi), aucune comparaison de
+                    // `chain_height`, donc aucune synchronisation déclenchée. Le
+                    // Hello lancé juste après un dial ne comble pas le trou : il part
+                    // AVANT que le voisin gossip ne soit prêt et se perd. Constaté en
+                    // vivant — `NeighborUp` une seconde après le Hello, puis deux
+                    // minutes de silence.
+                    crate::p2p::gossip_tasks::trigger_hello_now(&state).await;
                 }
                 Ok(iroh_gossip::api::Event::NeighborDown(id)) => {
                     let id_str = id.to_string();
@@ -230,16 +242,31 @@ async fn broadcast_hello_once(state: &AppState) -> Result<(), String> {
     let country = p2p::energy::EnergyOracle::detect_country().to_string();
     let watts = p2p::energy::estimate_watts();
 
-    // Update peer_info with liveness data
-    {
-        let mut info = state.node.peer_info.write().await;
-        let entry = info.entry(pk.to_string()).or_insert_with(|| {
-            p2p::PeerInfo::new(watts, country.to_string())
-        });
-        entry.watts = watts;
-        entry.country = country.to_string();
-        entry.touch();
-    }
+    // PEER-SELF-1 — le nœud ne s'inscrit **PAS** dans `peer_info`.
+    //
+    // Il le faisait, et `peer_info` est la carte des PAIRS : sa taille est lue
+    // comme « nombre de pairs » à quatre endroits, qui mentaient tous d'un
+    // cran — mais surtout, deux d'entre eux en tiraient des conséquences :
+    //
+    //  • `willow_node::status` → `getinfo.peers` et `get_node_status` : un nœud
+    //    totalement seul affichait **« 1 pair »**, donc « connecté au réseau »
+    //    alors qu'il ne parlait à personne. Le même compteur alimente l'écran
+    //    Réseau (`get_peer_metrics`), qui listait donc l'utilisateur lui-même.
+    //  • `rendezvous.rs` → la **cadence d'amorçage adaptative** : `live_peers`
+    //    n'était jamais nul, donc le nœud passait immédiatement en croisière
+    //    25 min au lieu de réessayer toutes les 30 s tant qu'il est seul. Une
+    //    seule fenêtre de découverte manquée (typiquement la première, avant
+    //    d'avoir publié son propre carnet) devenait une panne de 25 minutes —
+    //    exactement l'angle mort que RDV-1 était censé fermer. Constaté en
+    //    vivant : deux nœuds frais sur la même DHT ne se sont jamais trouvés.
+    //  • `dispatcher.rs` → le plafond de débit adaptatif (NET-13), décalé d'un.
+    //  • `mining_loop::collect_peer_contributions` → Shapley comptait le nœud
+    //    **deux fois** (ici sous sa clé de transport, et via `my_contrib` sous
+    //    son adresse). Sans conséquence monétaire depuis MINT-EXACT-1, mais
+    //    c'était une dilution réelle du partage avant.
+    //
+    // Le pays est enregistré séparément juste en dessous (`peer_country_reports`),
+    // donc l'oracle énergie ne perd rien.
 
     // Register country for energy oracle
     *state.node.peer_country_reports.write().await
