@@ -5,11 +5,11 @@
 
 <p>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.13.1-informational">
-  <img alt="Protocole" src="https://img.shields.io/badge/protocole-TORUS%20v7-lightgrey">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.15.0-informational">
+  <img alt="Protocole" src="https://img.shields.io/badge/protocole-TORUS%20v9-lightgrey">
   <img alt="Backend" src="https://img.shields.io/badge/backend-Rust%20%2B%20Tauri%202-orange">
   <img alt="Frontend" src="https://img.shields.io/badge/frontend-Svelte%205-ff3e00">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-477%20%2B%201-success">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-508%20%2B%201-success">
   <img alt="Status" src="https://img.shields.io/badge/status-alpha%20non%20audit%C3%A9-yellow">
 </p>
 
@@ -18,6 +18,11 @@
 **QUANTA** (plus petite unité : **µQTA**, 1 QUANTA = 1 000 000 µQTA) — **rare** (plafond dur
 100M, émission décroissante) et **post-quantique**. Identité, wallet et clés restent locaux et
 chiffrés. Le réseau remplace la banque.
+
+> 📖 **Pour comprendre le système en profondeur** — conception, invariants, et les bugs qui ont
+> façonné le design — lisez [**`docs/ARCHITECTURE.md`**](docs/ARCHITECTURE.md) *(en anglais,
+> écrit pour être lu d'un bout à l'autre)*. C'est le point d'entrée recommandé pour un auditeur
+> comme pour un ingénieur.
 
 ---
 
@@ -30,18 +35,24 @@ vérifiable dans le code et dans la suite de tests.
 |---|---|---|
 | Ledger µQTA déterministe : burn-and-mint, reorg, plafond 100M vérifié au consensus | Convergence multi-nœuds (simulation déterministe seedée, fautes réseau + byzantines) | **Audit de sécurité indépendant** |
 | Identité = adresse ML-DSA + vault Argon2id / AES-256-GCM + phrase BIP39 24 mots | NAT traversal et découverte de pairs à grande échelle | **Testnet public** (aucun pair d'amorçage public, aucun réseau ouvert) |
-| Autorité de transaction **ML-DSA-65 pur** (FIPS 204) | Oracle d'énergie (estimation de watts) | **Notarisation / signature OS** des binaires |
+| Autorité de transaction **ML-DSA-65 pur** (FIPS 204) | Oracle d'énergie — signal d'**affichage** seulement, hors du chemin monétaire depuis v8 | **Notarisation / signature OS** des binaires |
 | Enveloppes gossip signées **ML-DSA-65** + KEX de transport **X25519MLKEM768** | Anti-sybil (PoC : réputation + poids de stake) | **Release binaire à jour** (la dernière release GitHub date de mai 2026 et ne correspond plus au code) |
 | Gadget de finalité Casper-FFG **câblé en vivant** : votes, certificat ⅔, plancher irréversible, slashing STAKE→BURN, réconciliation de fork | Multisig M-of-N ML-DSA (on-chain, sans UX multi-partie ni test d'intégration) | **Valeur de marché** — QUANTA n'est coté nulle part, l'app n'affiche aucun prix |
-| Nœud headless + JSON-RPC (17 méthodes, authentifié) + explorateur web | | Vrai VRF cryptographique + VDF (ADR-004 ouverte) |
-| 477 tests + 1 test d'intégration, `clippy -D warnings` propre, svelte-check 0/0 | | |
+| Récompense de bloc **recalculée** par chaque nœud et **partagée** avec les participants récents (v9) | | Vrai VRF cryptographique + VDF (ADR-004 ouverte) |
+| Nœud headless + JSON-RPC (17 méthodes, authentifié) + explorateur web | | |
+| 508 tests + 1 test d'intégration, `clippy -D warnings` propre, svelte-check 0/0 | | |
 
 Les points durs, dits franchement :
 
-- **Le réseau n'a jamais tourné au-delà de deux machines physiques** (mai 2026). Un test
-  d'intégration deux nœuds (`p2p_two_nodes_exchange_gossip`) tourne à chaque suite, mais
-  l'échelle réelle reste non éprouvée.
-- **Le protocole a rompu sept fois** (`TORUS_PROTOCOL_VERSION = 7`). Tout binaire, snapshot ou
+- **Le réseau n'a jamais tourné au-delà de deux nœuds.** Pire : entre le fork v4 (18/07) et le
+  01/08/2026, le nœud était **muet sur tout réseau réel** — `iroh-gossip` plafonne un message à
+  4 096 octets alors qu'une enveloppe signée ML-DSA en pèse ~15 000, et l'émission échouait en
+  silence. La suite était verte, le test d'intégration deux nœuds passait, et le jalon « vérifié
+  entre deux machines » datait de *deux mois avant* la régression. Corrigé et vérifié en vivant ;
+  l'histoire complète est dans [`docs/ARCHITECTURE.md` §7](docs/ARCHITECTURE.md#7-three-bugs-that-shaped-the-design).
+  **L'échelle réelle reste non éprouvée** — deux daemons sur une même machine ne prouvent pas la
+  traversée de NAT.
+- **Le protocole a rompu neuf fois** (`TORUS_PROTOCOL_VERSION = 9`). Tout binaire, snapshot ou
   chaîne antérieurs sont incompatibles ; la dernière genèse a été rejouée le 18/07/2026.
 - **Aucun audit externe.** Un [audit interne adversarial](docs/audit/AUDIT-INTERNE-2026-07-25.md)
   du 25/07/2026 a ouvert 4 critiques, 8 hauts et 4 moyens — tous corrigés derrière le fork v7 —
@@ -55,10 +66,11 @@ Les points durs, dits franchement :
 
 ## Trois capacités
 
-1. **Miner** — Gardez un nœud en ligne et gagnez des QUANTA selon votre contribution mesurée
-   (énergie, travail, validation, uptime — pondération *inspirée* de Shapley, pas un calcul
-   exact). Émission décroissante vers un plafond dur de 100M (~120 QUANTA/h à la genèse),
-   **zéro premine, zéro autorité d'émission**.
+1. **Miner** — Gardez un nœud en ligne : produisez un bloc et vous touchez la moitié de sa
+   récompense, l'autre moitié étant partagée entre les nœuds ayant produit récemment. Le montant
+   est une **fonction pure de la chaîne** que chaque nœud recalcule — aucune mesure locale
+   (watts déclarés, réputation) ne touche la monnaie. Émission décroissante vers un plafond dur
+   de 100M (~120 QUANTA/h à la genèse), **zéro premine, zéro autorité d'émission**.
 2. **Garder** — Votre identité est une paire de clés ; on vous joint par un court **`@pseudo`**
    ou par une adresse **`qta1…`** (Bech32m à checksum). La clé privée ne quitte jamais
    l'appareil (vault Argon2id + AES-256-GCM) ; une **phrase de récupération de 24 mots (BIP39)**
@@ -87,6 +99,15 @@ seed % stake total pondéré → leader déterministe
 Le poids est **l'enjeu inscrit sur la chaîne** (tx `Stake`/`Unstake` scellées), donc une
 fonction pure de la chaîne : identique sur un nœud vivant, restauré ou synchronisé. Minimum
 1 QUANTA, fallback 30 s vers le suivant, bootstrap permissionless tant que personne n'a staké.
+
+**Un bloc sur 16 est un slot ouvert**, proposable par n'importe quelle adresse, bondée ou non.
+Sans lui le réseau se refermerait définitivement au premier staker : sans faucet, airdrop ni
+premine, un nouvel arrivant a besoin d'un enjeu pour proposer et de proposer pour gagner. Le
+prix est nommé et borné — le *trilemme de vulnérabilité Sybil* ([Platt, Platt & McBurney,
+2024](https://doi.org/10.1080/17445760.2024.2352740)) démontre
+qu'on ne peut être à la fois sans-permission, résistant aux Sybils et gratuit ; on relâche
+« gratuit » d'exactement un seizième, et comme les slots sont cadencés **par la hauteur**, une
+ferme d'un million de fausses identités n'en capte pas davantage qu'une seule.
 
 Au-dessus, un **gadget de finalité de type Casper-FFG** rend l'histoire irréversible :
 checkpoints par époque (E = 32 blocs), votes signés ML-DSA-65, certificat à **⅔ du stake**
@@ -152,9 +173,10 @@ Protocole gossip : 11 messages (`Hello`, `RequestChain`, `ChainSegment`, `NewBlo
 |---|---|
 | Plafond | **100 000 000 QUANTA**, dur, vérifié au consensus |
 | Émission | décroissante : `(plafond − miné) / 50 000 000` µQTA par minute (~120 QUANTA/h à la genèse) |
+| Récompense d'un bloc | `emission_for_block(offre minée avant ce bloc)` — **fonction pure de la chaîne**, frappée par le producteur et **recalculée par chaque récepteur** |
+| Partage | **moitié au producteur, moitié à parts égales** entre les adresses ayant produit un bloc dans les 32 derniers — recalculé et **imposé** par chaque nœud, pas suggéré |
 | Premine / autorité d'émission | **aucun** |
 | Unité | 1 QUANTA = 1 000 000 µQTA — arithmétique entière, zéro flottant sur les soldes |
-| Distribution | énergie 30 · travail 30 · validation 25 · uptime 15 |
 | Burn | **1 % détruit par transfert** (arithmétique entière, `amount / 100`) |
 | Conservation | `Σ(dépensable + staké + en déverrouillage) + brûlé == miné`, vérifiée à chaque pas de simulation |
 | Déverrouillage du stake | 10 080 blocs (~2 semaines), ≥ fenêtre de slashing (contrainte gravée) |
@@ -193,7 +215,7 @@ Prérequis : Node 18+, Rust stable, toolchain Tauri 2.
 npm install
 npm run tauri dev                                      # app de bureau, hot-reload
 
-cargo test --manifest-path src-tauri/Cargo.toml        # 477 tests + 1 intégration
+cargo test --manifest-path src-tauri/Cargo.toml        # 508 tests + 1 intégration
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 npm run check                                          # svelte-check (0 erreur / 0 warning)
 
@@ -236,24 +258,35 @@ src/                    ← frontend Svelte 5 (Wallet, Réseau, Minage, Contacts
 
 Par ordre de ce qui bloque réellement :
 
-1. **Audit de sécurité indépendant** — dossier prêt ([`docs/audit/`](docs/audit/)), pas encore commandé.
-2. **Testnet multi-nœuds durable** sur la genèse actuelle — l'échelle réelle n'est pas éprouvée.
-3. **Notarisation macOS** + pipeline de release signé, et une release à jour.
-4. **Aléa d'élection** — vrai VRF + VDF (ADR-004).
-5. **Multisig** — UX multi-partie et test d'intégration.
-6. **Vision** — finalité BFT sous-seconde ([design DAG-BFT](docs/DESIGN-CONSENSUS-DAG-BFT.md)),
+1. **Deux machines physiques derrière deux NAT** — la seule épreuve qui décide de la traversée
+   de NAT ; deux daemons sur un même hôte partagent une IP publique et ne percent rien.
+   Procédure scriptée : [`docs/ops/two-machines.sh`](docs/ops/two-machines.sh).
+2. **Audit de sécurité indépendant** — dossier prêt ([`docs/audit/`](docs/audit/)), pas encore commandé.
+3. **Testnet multi-nœuds durable** sur la genèse actuelle — l'échelle réelle n'est pas éprouvée.
+4. **Notarisation macOS** + pipeline de release signé, et une release à jour.
+5. **Aléa d'élection** — vrai VRF + VDF (ADR-004).
+6. **Multisig** — UX multi-partie et test d'intégration.
+7. **Vision** — finalité BFT sous-seconde ([design DAG-BFT](docs/DESIGN-CONSENSUS-DAG-BFT.md)),
    identité de nœud post-quantique le jour où Iroh la livre.
 
 ---
 
 ## 📄 Documents
 
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — **commencez par là** : la visite guidée du
+  protocole, la table des invariants avec leur lieu d'application, et les bugs qui ont façonné
+  le design *(anglais)*.
 - [`WHITEPAPER.md`](WHITEPAPER.md) · [`WHITEPAPER_FR.md`](WHITEPAPER_FR.md) — whitepaper.
-- [`CLAUDE.md`](CLAUDE.md) — référence technique interne (architecture, invariants, historique).
+- [`docs/ops/QUICKSTART.md`](docs/ops/QUICKSTART.md) — lancer l'app, le nœud headless, le RPC,
+  et le test scripté à deux machines.
 - [`docs/audit/`](docs/audit/) — audit interne du 25/07/2026, threat model, périmètre, RFQ.
 - [`docs/decisions/`](docs/decisions/) — registre des ADR (validator set, fork-choice, slashing,
-  gouvernance, portée du post-quantique…).
+  gouvernance, portée du post-quantique…) : chaque décision avec l'alternative écartée.
+- [`docs/economy/DOCTRINE.md`](docs/economy/DOCTRINE.md) — la doctrine économique, y compris les
+  mécanismes envisagés puis refusés.
 - [`SECURITY.md`](SECURITY.md) — divulgation de vulnérabilités.
+- [`CLAUDE.md`](CLAUDE.md) — référence technique interne (architecture, invariants, historique
+  détaillé de chaque fork).
 
 ---
 

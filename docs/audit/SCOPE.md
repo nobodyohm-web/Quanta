@@ -1,7 +1,7 @@
 # Quanta — Audit Scope
 
 Prioritized scope for an external review of the Quanta protocol. Line counts were
-measured on the review baseline (`97123d3a4ac6cfae2f2fd76456d1bc173027b4fa`, v3.10.0)
+measured on `main` at v3.15.0 (`TORUS_PROTOCOL_VERSION = 9`)
 and **include inline `#[cfg(test)]` tests**, which live in the same files. See
 [`THREAT-MODEL.md`](THREAT-MODEL.md) for the assets, properties, and adversary model
 that motivate this ordering; the out-of-scope UI is noted at the end.
@@ -10,15 +10,15 @@ that motivate this ordering; the out-of-scope UI is noted at the end.
 
 | Priority | Area | LOC (incl. inline tests) | Why |
 |---|---|---|---|
-| P0 | `src-tauri/src/sm/` | 8_492 | Pure IO-free consensus core + DST harness |
-| P0 | `src-tauri/src/p2p/ledger/` | 6_369 | Conservation, coverage, stake, slash, reorg |
-| P0 | `src-tauri/src/security/` | 2_142 | Vault + CryptoEngine + ML-DSA (`hybrid_crypto`) |
-| P1 | Network pipeline (7 files) | 6_315 | Gossip ingestion, PoS election, live finality, fork heal |
+| P0 | `src-tauri/src/sm/` | 8_507 | Pure IO-free consensus core + DST harness |
+| P0 | `src-tauri/src/p2p/ledger/` | 7_545 | Conservation, coverage, stake, slash, reorg, **reward plan (v8/v9)** |
+| P0 | `src-tauri/src/security/` | 2_081 | Vault + CryptoEngine + ML-DSA |
+| P1 | Network pipeline (8 files) | 8_105 | Gossip ingestion, PoS election, live finality, fork heal, DHT bootstrap |
 | P2 | Persistence / RPC / commands | — | State snapshot, identity registry, JSON-RPC, node runtime, Tauri IPC |
 
 ## P0 — Consensus core, ledger, cryptography
 
-### `src-tauri/src/sm/` — pure deterministic consensus core (8_492 LOC)
+### `src-tauri/src/sm/` — pure deterministic consensus core (8_507 LOC)
 The IO-free, deterministic finality gadget (Phase 0, C1) with an injected clock and RNG,
 plus the seeded DST simulation harness.
 
@@ -36,7 +36,7 @@ plus the seeded DST simulation harness.
   - The core contains no classical primitive on the irreversibility path (votes are
     ML-DSA-65 only, ADR-005).
 
-### `src-tauri/src/p2p/ledger/` — blockchain state (6_369 LOC incl. `tests.rs`)
+### `src-tauri/src/p2p/ledger/` — blockchain state (7_545 LOC incl. `tests.rs`)
 Module-folder: accounting/types/O(1) cache/PQ genesis (`mod`), plus validation (COVER),
 stake, slash, reorg, tests. External surface `p2p::ledger::` is unchanged.
 
@@ -52,10 +52,21 @@ stake, slash, reorg, tests. External surface `p2p::ledger::` is unchanged.
     (`slash_unbonding`), bound to hash + Merkle, re-verifiable per node
     (`expected_slash_consumption`), and a reorg restores exactly the consumed entries (LIVE-3B).
   - PROPOSER-1: non-genesis blocks whose proposer is not a bonded (stake ≥ MIN)
-    validator as-of-parent are rejected.
+    validator as-of-parent are rejected — **except** on an OPEN-DOOR-1 open slot
+    (one block in 16, a pure function of height).
+  - **MINT-EXACT-1 (v8, new):** the block reward equals `emission_for_block(prior mined)`
+    and is *recomputed* by every receiver, never merely bounded. Verify that no path
+    reintroduces a slack bound, and that `mine_tx` remains unreachable in release builds.
+  - **REWARD-SHARE-1 (v9, new):** the proposer/participants split is recomputed by every
+    node (`validate_block_reward_plan`) from the same function the producer used
+    (`expected_block_rewards`); it is exact to the µQTA and scale-invariant (minting *less*
+    is legal, shrinking another payee's share is not). Verify the recent-participants window
+    is derived only from `block.miner` over `SHARE_WINDOW_BLOCKS`, and that a pending mint is
+    revoked before a new one is struck (a stale mint computed for another height would make
+    the next block rejected network-wide).
   - Merkle root correctness; anti-replay via `seen_tx_hashes` + monotonic per-account nonce.
 
-### `src-tauri/src/security/` — cryptography (2_142 LOC)
+### `src-tauri/src/security/` — cryptography (2_081 LOC)
 - **Entry points:** `mod.rs` (`CryptoEngine`: Ed25519 transport + ML-DSA address,
   `ADDR_DOMAIN`), `hybrid_crypto.rs` (ML-DSA-65 / FIPS 204 account authority — the pure PQ
   path), `pq_vault.rs` (Argon2id + AES-256-GCM identity vault), `cipher.rs` /
@@ -69,23 +80,24 @@ stake, slash, reorg, tests. External surface `p2p::ledger::` is unchanged.
     plaintext password persisted; biometric KEK handling.
   - No `unwrap()` on the crypto path; secrets are zeroized (Rust rules #2, #3).
 
-## P1 — Network pipeline (6_315 LOC across 7 files)
+## P1 — Network pipeline (8_105 LOC across 8 files)
 
 | File | LOC | Role |
 |---|---|---|
-| `p2p/dispatcher.rs` | 1_998 | `dispatch_incoming` — the 9-step ingestion pipeline |
-| `p2p/finality_live.rs` | 1_362 | LIVE-1→3B wiring of the gadget's IO; pubkey↔address bridge |
-| `p2p/gossip.rs` | 729 | Gossip protocol variants + envelope signing |
-| `p2p/fork_heal.rs` | 672 | LIVE-4 deep fork reconciliation (`ForkReconciler`) |
-| `p2p/pos_consensus.rs` | 633 | PoS leader election (buried beacon) |
-| `p2p/willow_node.rs` | 565 | Iroh endpoint + stores + gossip topic |
-| `p2p/gossip_tasks.rs` | 356 | Background Hello/Ping broadcast tasks |
+| `p2p/dispatcher.rs` | 2_209 | `dispatch_incoming` — the 10-step ingestion pipeline |
+| `p2p/finality_live.rs` | 1_718 | LIVE-1→3B wiring of the gadget's IO; pubkey↔address bridge |
+| `p2p/gossip.rs` | 1_051 | Gossip protocol variants + envelope signing |
+| `p2p/fork_heal.rs` | 776 | LIVE-4 deep fork reconciliation (`ForkReconciler`) |
+| `p2p/willow_node.rs` | 711 | Iroh endpoint + stores + gossip topic (incl. the message-size cap) |
+| `p2p/pos_consensus.rs` | 664 | PoS leader election (buried beacon) + open slots |
+| `p2p/rendezvous.rs` | 593 | RDV-1 serverless bootstrap — **parses attacker-writable DHT content** |
+| `p2p/gossip_tasks.rs` | 383 | Background Hello/Ping broadcast tasks |
 
 - **Entry points:** `dispatch_incoming` (untrusted-bytes boundary), envelope
   sign/verify path (ML-DSA-65 since v4), `FinalityTracker` and the
   `validator_stakes_by_pubkey` bridge, `ForkReconciler` (bounded 1024-block buffer).
 - **Invariants to verify:**
-  - The 9-step pipeline order is enforced and each step is effective (size cap, dedup LRU,
+  - The 10-step pipeline order is enforced and each step is effective (size cap, dedup LRU,
     ±90s freshness, adaptive rate limit clamp [15,120], monotonic nonce, ML-DSA envelope
     auth). No path skips signature verification.
   - Live finality votes gossiped by the tracker map correctly to on-chain stake weight
@@ -115,7 +127,7 @@ Offered as ways to slice the work; no pricing is implied.
 |---|---|---|
 | (a) Crypto-focused review | `src-tauri/src/security/` + `fips204` usage | ML-DSA-65 correctness, multisig, vault, KEK/biometric, domain separation |
 | (b) Consensus review | `src-tauri/src/sm/` + `src-tauri/src/p2p/ledger/` | Finality soundness, conservation, coverage, slashing, reorg, determinism |
-| (c) Network review | P1 pipeline (7 files) | Ingestion hardening, DoS/replay/partition, envelope auth, fork reconciliation |
+| (c) Network review | P1 pipeline (8 files) | Ingestion hardening, DoS/replay/partition, envelope auth, fork reconciliation |
 
 A combined (a)+(b)+(c) engagement covers all of P0 and P1. P2 can be added as a stretch
 scope or folded into (c).

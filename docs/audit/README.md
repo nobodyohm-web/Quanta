@@ -11,17 +11,44 @@ without reverse-engineering the repository.
 | License | Apache-2.0 |
 | Repository | <https://github.com/nobodyohm-web/Quanta> |
 | Language | Rust (protocol/backend, Tauri 2.0) + Svelte 5 (desktop UI, out of scope) |
-| Review baseline | commit `97123d3a4ac6cfae2f2fd76456d1bc173027b4fa` (v3.10.0) — a dedicated `audit-baseline` tag will be frozen at engagement start |
+| Review baseline | `main` at v3.15.0, `TORUS_PROTOCOL_VERSION = 9` — a dedicated `audit-baseline` tag will be frozen at engagement start |
 | Status | ⚠️ Alpha. **No third-party audit has been performed yet.** That is precisely what this package is for. |
 
 ## Contents
 
+- [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — **read this first.** A guided tour of the
+  protocol ending in a table of every claimed invariant, the single place it is
+  enforced, and the test that proves it. Written to be read start to finish.
 - [`THREAT-MODEL.md`](THREAT-MODEL.md) — what the system protects, against whom, the
   claimed security properties, trust boundaries, and the known accepted risks
   (stated honestly, including what is *not* yet defended).
 - [`SCOPE.md`](SCOPE.md) — prioritized audit scope with real line counts, the key
   invariants per area, and suggested engagement shapes.
 - [`RFQ.md`](RFQ.md) — request-for-quote template and OSTIF application notes.
+- [`AUDIT-INTERNE-2026-07-25.md`](AUDIT-INTERNE-2026-07-25.md) — the internal adversarial
+  audit, findings included, with the three that were refuted on re-verification.
+- [`archive/`](archive/) — superseded reports kept for history. The 2026-06-10 report
+  predates the crypto-only refactor that removed the web/social modules, so it audits a
+  codebase that no longer exists; it is **not** a current document.
+
+## Consensus changes since the internal audit (please review these first)
+
+Three consensus rules changed after the 2026-07-25 internal audit. They are the newest,
+least-reviewed code in the repository and deserve the sharpest attention:
+
+| Fork | Rule | What it replaced |
+|---|---|---|
+| v8 | **MINT-EXACT-1** — the block reward is `emission_for_block(prior mined supply)`, a pure function of the chain, recomputed by every receiver | A loose upper bound of `64 × emission_for_tick` against an honest amount of `2 × emission_for_tick / N` — a `32 × N` margin, i.e. 3 200× the legitimate reward on a 100-node network |
+| v8 | **OPEN-DOOR-1** — one block in 16 is proposable by any address | `PROPOSER-1` closed the network permanently at the first staker; no faucet, airdrop or premine exists to break the cycle |
+| v9 | **REWARD-SHARE-1** — the reward is split between the producer and recent participants, recomputed and imposed by every node | Only the sealer was paid; finality voters, whose ML-DSA broadcasts cost the most bandwidth on the network, earned nothing |
+
+A fourth change is not a consensus rule but is the most consequential defect found to date:
+between fork v4 (2026-07-18) and 2026-08-01 the node was **mute on any real network**.
+`iroh-gossip` caps a message at 4 096 B while an ML-DSA-signed envelope is ~15 KB; the send
+failed silently and was still counted in `stats.messages_sent`. Every test was green
+throughout. This is documented in
+[`../ARCHITECTURE.md` §7](../ARCHITECTURE.md#7-three-bugs-that-shaped-the-design) and is the
+reason the project now treats in-process tests as insufficient evidence for any P2P claim.
 
 ## What Quanta is, in three sentences
 
@@ -38,7 +65,7 @@ limitation, documented in the threat model).
 ## Building and verifying the claims
 
 ```bash
-# Full test suite — 449 library tests + 1 integration test, 0 failures at baseline.
+# Full test suite — 508 library tests + 1 integration test, 0 failures at baseline.
 # Includes a deterministic simulation harness (multi-seed DST) and a 128-run
 # determinism check (C1) of the consensus core.
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -52,6 +79,10 @@ Rust, constant-time, no `unsafe`), `ed25519-dalek` 2.2, `blake3` 1.8, `aes-gcm` 
 `argon2` 0.5, `zeroize` 1.8, `iroh` 0.98 (QUIC, `default-features = false` +
 aws-lc-rs TLS provider), `iroh-gossip` 0.98, `rustls` 0.23 (`prefer-post-quantum`),
 `libsql` 0.9, `crdts` 7.
+
+Supply-chain checking is enforced continuously, not only at baseline: every pull request
+runs `cargo-deny check` (advisories · licenses · sources · bans) as a required CI job, with
+the ignore list documented in [`deny.toml`](../../deny.toml).
 
 ## Baseline tooling results (2026-07-20)
 

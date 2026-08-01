@@ -66,7 +66,7 @@ RPC=http://127.0.0.1:8645
 q() { curl -s -X POST "$RPC" -H 'Content-Type: application/json' -d "$1"; echo; }
 
 q '{"method":"listmethods"}'                                   # les 17 méthodes
-q '{"method":"getinfo"}'                                       # hauteur, supply, protocole (6), mineurs actifs
+q '{"method":"getinfo"}'                                       # hauteur, supply, protocole (9), pairs, mineurs actifs
 q '{"method":"getfinalityinfo"}'                               # finalité Casper-FFG (époque, quorum ⅔)
 q '{"method":"getvalidators"}'                                 # set de validateurs bondés
 q '{"method":"getblock","params":{"height":0}}'               # la genèse
@@ -110,24 +110,63 @@ même adresse) et qu'une politique invalide (seuil > nombre de clés) est refus�
 > Le **flux de signature multi-parties** côté wallet (chaque détenteur signe
 > hors-ligne, signatures combinées) arrive ensuite. La **vérification d'autorité**
 > on-chain (quorum de N clés ML-DSA indépendantes) est déjà vivante et testée — voir
-> `src-tauri/src/p2p/ledger.rs::verify_multisig`.
+> `src-tauri/src/p2p/ledger/validation.rs::verify_multisig`.
 
 ---
 
 ## 5. La boucle complète des tests
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml          # 437 tests + 1 intégration
+cargo test --manifest-path src-tauri/Cargo.toml          # 508 tests + 1 intégration
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 npm run check                                            # svelte-check (0/0)
 npm run build
 ```
 
+Ces tests tournent **dans un seul processus**. Ils ne peuvent pas voir un bug qui
+n'existe qu'entre deux processus sur un vrai réseau — c'est exactement ce qui a
+laissé le nœud muet pendant deux mois (§6). Une suite verte n'est pas une preuve
+que le P2P fonctionne.
+
 ---
 
 ## 6. Deux nœuds qui se parlent (P2P)
 
-Lance deux daemons sur des data-dirs et ports différents ; l'un affiche son ticket
-au démarrage (`RUST_LOG=info`), et `connect_peer` (ou l'auto-discovery) les relie.
-Ils convergent sur la même chaîne. *(Le bootstrap par seed-nodes/mDNS est un
-chantier à venir ; pour l'instant on relie via ticket.)*
+### Sur une seule machine (utile, mais limité)
+
+Deux daemons avec des data-dirs, des mots de passe et des ports **distincts** :
+
+```bash
+QUANTA_WALLET_PASSWORD='pass-node-A' $BIN --data-dir ./A --rpc-addr 127.0.0.1:8651 --mine &
+QUANTA_WALLET_PASSWORD='pass-node-B' $BIN --data-dir ./B --rpc-addr 127.0.0.1:8652 --mine &
+```
+
+Ils se découvrent seuls par la **DHT mainline publique** (RDV-1, ~10 s en pratique) —
+aucun serveur, aucun ticket à coller. Le repli manuel `connect_peer(ticket)` reste
+disponible.
+
+Vérifie par **RPC**, pas par les logs : `getinfo` doit afficher `peers > 0` des deux
+côtés, puis les hauteurs convergent. Une ligne « connecté au pair » ne prouve qu'un
+dial QUIC ; seul un `Hello` **dispatché** prouve que le protocole passe.
+
+### Sur deux machines physiques (la seule épreuve qui décide)
+
+Deux daemons sur un même hôte partagent une IP publique : le hole punching n'a rien
+à percer. Pour éprouver la traversée de NAT il faut **deux machines sur deux réseaux
+différents** (idéalement l'une en Wi-Fi, l'autre en partage 4G).
+
+```bash
+./docs/ops/two-machines.sh A     # sur la machine 1
+./docs/ops/two-machines.sh B     # sur la machine 2
+```
+
+Le script enchaîne les quatre épreuves — découverte DHT sans serveur, traversée de
+NAT, convergence + partage de récompense, survie au redémarrage — et affiche une
+ligne `TIP@<hauteur> = <hash>` à comparer entre les deux machines. Identique des deux
+côtés = convergence prouvée.
+
+> Ce test a déjà servi : il a révélé que le nœud était **muet sur tout réseau réel**
+> depuis le fork v4 (`iroh-gossip` plafonne un message à 4 096 o, une enveloppe signée
+> ML-DSA en pèse ~15 000, et l'émission échouait en silence tout en étant comptée
+> comme réussie). Détail dans
+> [`docs/ARCHITECTURE.md` §7](../ARCHITECTURE.md#7-three-bugs-that-shaped-the-design).
