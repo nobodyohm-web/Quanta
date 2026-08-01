@@ -498,14 +498,3 @@ pub fn validate_address(address: String) -> bool {
     crate::security::address::is_valid(&address)
 }
 
-/// Normalize any accepted address form — `qta1…` Bech32m **or** canonical 64-hex —
-/// into both representations, or an opaque error. Lets a UI accept either and always
-/// display the checksummed public form.
-#[tauri::command]
-pub fn resolve_address(address: String) -> Result<serde_json::Value, String> {
-    let bytes = crate::security::address::parse(&address)?;
-    Ok(serde_json::json!({
-        "bech32": crate::security::address::encode(&bytes),
-        "hex": hex::encode(bytes),
-    }))
-}

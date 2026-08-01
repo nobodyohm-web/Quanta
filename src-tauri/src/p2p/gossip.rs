@@ -307,7 +307,6 @@ pub enum ReportReason {
 pub struct GossipStats {
     pub messages_sent: u64,
     pub messages_received: u64,
-    pub nodes_synced: u64,
     pub peers_reported: u64,
     pub bytes_sent: u64,
     pub bytes_received: u64,

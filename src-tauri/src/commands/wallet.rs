@@ -59,14 +59,6 @@ fn quanta_to_uqta(amount: f64) -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub async fn get_balance(state: tauri::State<'_, Arc<AppState>>, pk: String) -> Result<f64, String> {
-    let ledger = state.node.ledger.read().await;
-    // Shared balance math (see `crate::views`). This surface returns only the
-    // spendable compartment; STRUCT-2: u64 µQTA → QUANTA (f64) for the frontend.
-    Ok(crate::views::balance_view(&ledger, &pk).spendable_uqta as f64 / p2p::ledger::MICRO as f64)
-}
-
-#[tauri::command]
 pub async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String, amount: f64) -> Result<serde_json::Value, String> {
     // V7: Input validation. Accept EITHER the public `qta1…` (Bech32m, checksummed)
     // form OR the canonical 64-hex form, and normalize to the on-chain hex the

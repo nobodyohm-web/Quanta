@@ -184,7 +184,6 @@ pub fn run() {
     let app_state = Arc::new(AppState::new());
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(app_state.clone())
@@ -216,7 +215,6 @@ pub fn run() {
             commands::identity::restore_from_phrase,
             commands::identity::get_receive_address,
             commands::identity::validate_address,
-            commands::identity::resolve_address,
             commands::identity::biometric_status,
             commands::identity::enable_biometric_unlock,
             commands::identity::disable_biometric_unlock,
@@ -227,10 +225,8 @@ pub fn run() {
             commands::network::set_display_name,
             commands::network::get_display_name,
             commands::network::get_security_audit,
-            commands::network::get_node_ticket,
             commands::network::connect_peer,
             commands::wallet::get_my_reputation,
-            commands::wallet::get_balance,
             commands::wallet::ledger_transfer,
             commands::wallet::ledger_stake,
             commands::wallet::ledger_unstake,
@@ -245,7 +241,6 @@ pub fn run() {
             commands_v3::resolve_username,
             commands_v3::is_username_available,
             commands_v3::get_my_username,
-            commands_v3::username_of_pk,
             commands_v3::get_my_connection_code,
             commands_v3::verify_connection,
         ])

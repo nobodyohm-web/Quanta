@@ -30,10 +30,6 @@ use tokio_util::sync::CancellationToken;
 /// Conservative 5-minute TTL. Solana uses 15s; we use 5m for our scale.
 const PEER_TTL: Duration = Duration::from_secs(300);
 
-/// B3: How often to run the dead-peer cleanup task.
-#[allow(dead_code)] // Documented constant; cleanup interval is hardcoded in lib.rs spawn
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
-
 /// NET-1: Auto-reconnection constants.
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);

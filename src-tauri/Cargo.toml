@@ -23,7 +23,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # ─── Tauri ───
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
 
 # ─── Serialization ───
 serde = { version = "1", features = ["derive"] }
@@ -52,7 +51,6 @@ iroh = { version = "0.98", default-features = false, features = [
     "portmapper",
     "tls-aws-lc-rs",
 ] }
-iroh-blobs = "0.100"
 iroh-gossip = "0.98"
 
 # PQ-TRANSPORT-1 — rustls en dépendance **directe** uniquement pour activer la
@@ -96,7 +94,6 @@ rand = "0.8"
 
 # ─── Encoding ───
 hex = "0.4"
-base64 = "0.22"
 # BIP39 mnemonic (RECOVER-1): the 32-byte ML-DSA fund seed ⇄ a 24-word recovery
 # phrase — the industry-standard wallet backup, far more robust to transcribe than
 # 64 hex chars. `default-features = false` + `std` keeps only the English wordlist.
@@ -115,9 +112,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # ─── Logging ───
 log = "0.4"
 env_logger = "0.11"
-
-# ─── Error Handling ───
-anyhow = "1"
 
 # ─── Platform Dirs ───
 dirs = "6"

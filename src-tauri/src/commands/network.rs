@@ -114,11 +114,6 @@ pub async fn get_security_audit(state: tauri::State<'_, Arc<AppState>>) -> Resul
     }))
 }
 
-#[tauri::command]
-pub async fn get_node_ticket(state: tauri::State<'_, Arc<AppState>>) -> Result<String, String> {
-    state.node.get_ticket().await.ok_or_else(|| "No ticket available (offline)".into())
-}
-
 /// Phase 4 — connecte ce nœud à un peer via son EndpointId Iroh.
 /// Le peer doit aussi être abonné au topic QUANTA pour que le sync démarre.
 /// After successful connection, immediately broadcasts a Hello so chain sync begins.

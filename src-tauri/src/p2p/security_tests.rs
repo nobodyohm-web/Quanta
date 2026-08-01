@@ -755,7 +755,7 @@ mod property_tests {
 
     #[test]
     fn p4_emission_distribution_conserves_total() {
-        // Genesis-tick emission (µQTA); shapley::distribute_emission uses f64.
+        // Genesis-tick emission (µQTA); the Shapley share math is f64.
         let emission_per_tick_f = crate::p2p::reputation::emission_for_tick(0) as f64;
 
         for n in 1..=10 {
@@ -770,8 +770,8 @@ mod property_tests {
                 });
             }
 
-            let dist = shapley::distribute_emission(&contribs, emission_per_tick_f);
-            let total: f64 = dist.values().sum();
+            let shares = shapley::compute_all_shares(&contribs);
+            let total: f64 = shares.values().map(|s| s * emission_per_tick_f).sum();
             assert!((total - emission_per_tick_f).abs() < 1e-3,
                 "Total distributed ({}) must equal emission_per_tick ({}) for {} nodes",
                 total, emission_per_tick_f, n);

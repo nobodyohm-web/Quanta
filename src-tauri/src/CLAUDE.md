@@ -30,7 +30,7 @@ toutes les 2 ticks (seal):
 - `emission_for_tick(total_mined) = (MAX_SUPPLY_MICRO − total_mined) / EMISSION_DIVISOR`
   → ≈2 QUANTA/tick à la genèse (~120 QUANTA/h), décroît vers le plafond
 - Solo : 100% du tick ; Multi : part proportionnelle à la contribution mesurée
-  (Shapley) distribuée par `uptime_tick` / `shapley::distribute_emission`
+  (Shapley) — `uptime_tick` crédite selon `shapley::compute_all_shares` (parts qui somment à 1)
 - Zéro premine, zéro autorité d'émission ; le minage en direct (`mining_loop`)
   appelle `emission_for_tick(total_mined)`
 

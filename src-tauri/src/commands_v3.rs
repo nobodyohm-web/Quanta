@@ -146,15 +146,6 @@ pub async fn get_my_username(
     Ok(state.node.usernames.read().await.username_of(&addr))
 }
 
-/// Pseudo détenu par une clé publique donnée (résolution inverse pour l'UI).
-#[tauri::command]
-pub async fn username_of_pk(
-    state: tauri::State<'_, Arc<AppState>>,
-    pk: String,
-) -> Result<Option<String>, String> {
-    Ok(state.node.usernames.read().await.username_of(&pk))
-}
-
 /// Code de connexion de l'identité courante (à dicter à un proche pour qu'il
 /// vous ajoute en toute sécurité).
 #[tauri::command]

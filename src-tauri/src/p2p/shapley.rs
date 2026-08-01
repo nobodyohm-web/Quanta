@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Module Phase 3 — pas encore intégré
 //! Module Contribution Scoring — Distribution équitable des récompenses QUANTA
 //!
 //! ## Algorithme
@@ -192,21 +191,6 @@ pub fn compute_all_shares(
     raw_scores
 }
 
-/// Distribue l'émission d'un tick entre les nœuds selon leur Shapley score.
-///
-/// `emission_per_tick` = 100 QUANTA/h / 60 = 1.6667 QUANTA/min
-///
-/// Retourne : node_id → QUANTA à créditer
-pub fn distribute_emission(
-    contribs: &HashMap<String, NodeContribution>,
-    emission_per_tick: f64,
-) -> HashMap<String, f64> {
-    let shares = compute_all_shares(contribs);
-    shares.into_iter()
-        .map(|(id, share)| (id, share * emission_per_tick))
-        .collect()
-}
-
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -298,8 +282,10 @@ mod tests {
         contribs.insert("A".into(), make_node("A", 100.0, 10, 5, 60));
         contribs.insert("B".into(), make_node("B", 100.0, 10, 5, 60));
         let emission = 100.0 / 60.0; // 1.6667 QUANTA/min
-        let dist = distribute_emission(&contribs, emission);
-        let total: f64 = dist.values().sum();
+        // Les parts somment à 1 ⇒ l'émission distribuée est exactement l'émission
+        // du tick (c'est la propriété que le crédit réel, dans `uptime_tick`, exploite).
+        let shares = compute_all_shares(&contribs);
+        let total: f64 = shares.values().map(|s| s * emission).sum();
         assert!((total - emission).abs() < 1e-6);
     }
 

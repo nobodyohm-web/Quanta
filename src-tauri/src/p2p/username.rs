@@ -1,4 +1,3 @@
-#![allow(dead_code)] // câblage gossip/commandes à l'itération suivante
 //! Quanta — Registre P2P de **pseudos uniques** (`@handle`).
 //!
 //! Un pseudo est l'**adresse de wallet lisible** : on envoie des QUANTA à
