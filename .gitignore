@@ -18,7 +18,6 @@ src-tauri/gen/
 *.dmg
 *.msi
 *.AppImage
-.agent/github_skills/
 
 # Obsidian (vault config — personal, local only)
 .obsidian/
