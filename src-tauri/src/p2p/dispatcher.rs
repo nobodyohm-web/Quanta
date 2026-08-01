@@ -502,8 +502,34 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
     }
 
     // Fenêtre temporelle ±90s.
+    //
+    // V2 (audit de vie) — this used to be a bare `log::debug!` with no counter,
+    // so a node whose clock had drifted rejected 100 % of inbound gossip while
+    // reporting itself online, and nothing anywhere said so. There is no NTP in
+    // Quanta: the clock is an unchecked assumption, which makes this the single
+    // most likely cause of "my two machines will not talk". Count it and say it
+    // out loud, with the measured drift so the diagnosis is immediate.
     if !GossipRouter::is_fresh(&env.timestamp) {
-        log::debug!("◈ [Dispatch] enveloppe trop ancienne, drop");
+        let drift_secs = chrono::DateTime::parse_from_rfc3339(&env.timestamp)
+            .map(|ts| chrono::Utc::now().timestamp() - ts.timestamp())
+            .unwrap_or(0);
+        // The counter is exact; the warning is throttled (this path runs BEFORE
+        // the signature check, so unauthenticated floods reach it).
+        let (should_warn, total) = {
+            let mut gossip = state.node.gossip.write().await;
+            let warn = gossip.note_stale_drop();
+            (warn, gossip.stats.dropped_stale)
+        };
+        if should_warn {
+            log::warn!(
+                "◈ [Dispatch] ⚠ enveloppe hors fenêtre de fraîcheur (±90 s) de {} — décalage \
+                 {} s ({} droppée(s) au total). Si ce compteur monte alors que rien n'est reçu, \
+                 l'horloge d'une des deux machines est désynchronisée.",
+                short(&env.sender, 12),
+                drift_secs,
+                total
+            );
+        }
         return;
     }
 
@@ -618,6 +644,24 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
         }
     }
 
+    // V4 (audit de vie) — a sender that already announced an incompatible
+    // protocol version is dropped here, before any handler runs. Its Hello was
+    // refused above, so it is not in `peer_info`; without this gate its blocks
+    // and transactions would still reach the ledger and be rejected one by one,
+    // which is exactly the loop we are closing. Cheap check, after
+    // authentication, so it can never be triggered by a spoofed sender.
+    {
+        // Read-lock on the hot path: virtually every message comes from a
+        // compatible sender, and this gate runs for all of them. The write lock
+        // is only taken on the rare drop. (A sender marked between the two locks
+        // just has this one message counted on its next arrival — harmless.)
+        let flagged = state.node.gossip.read().await.is_incompatible(&env.sender);
+        if flagged {
+            state.node.gossip.write().await.stats.dropped_incompatible += 1;
+            return;
+        }
+    }
+
     match env.payload {
         GossipMessage::Hello {
             heads,
@@ -632,25 +676,43 @@ pub async fn dispatch_incoming(state: &Arc<AppState>, raw: &[u8]) {
             known_peer_ids,
             display_name,
         } => {
-            // NET-5: Protocol version compatibility check. We never reject —
-            // unknown fields already default thanks to #[serde(default)] — but
-            // a mismatch is worth surfacing in logs so operators notice.
+            // NET-5 / V4 (audit de vie) — protocol version gate.
+            //
+            // This used to log and carry on ("we never reject"). That was wrong:
+            // `TORUS_PROTOCOL_VERSION` is bumped precisely when *validation rules*
+            // change — v7 alone moved synthetic-sender confinement (C2), unstake
+            // bounding (C3), vote-epoch bounding (H2) and envelope identity
+            // (H1/H3). Two nodes on different versions therefore disagree about
+            // which blocks and transactions are valid: they connect, exchange,
+            // reject each other's work in a loop, pollute each other's mempool and
+            // never converge — while each shows the other as a healthy peer.
+            //
+            // Ruling: an incompatible peer is **not** a peer. We drop its Hello
+            // (so it never enters `peer_info`, never triggers a chain sync) and
+            // remember the sender so its later traffic is dropped cheaply. This is
+            // not a ban: it is not misbehaviour, it is a different network. The
+            // count is surfaced in `GossipStats` so the UI can say "3 pairs sur
+            // une autre version" instead of silently doing nothing.
             use crate::p2p::gossip::TORUS_PROTOCOL_VERSION;
-            if version > TORUS_PROTOCOL_VERSION {
-                log::warn!(
-                    "◈ [NET-5] peer {} runs newer protocol v{} (we are v{}) — processing what we \
-                     can; consider upgrading",
-                    short(&env.sender, 12),
-                    version,
-                    TORUS_PROTOCOL_VERSION
-                );
-            } else if version < TORUS_PROTOCOL_VERSION {
-                log::debug!(
-                    "◈ [NET-5] peer {} runs legacy protocol v{} (we are v{})",
-                    short(&env.sender, 12),
-                    version,
-                    TORUS_PROTOCOL_VERSION
-                );
+            if version != TORUS_PROTOCOL_VERSION {
+                let mut gossip = state.node.gossip.write().await;
+                if gossip.mark_incompatible(&env.sender) {
+                    log::warn!(
+                        "◈ [NET-5] pair {} en protocole v{} (nous sommes en v{}) — IGNORÉ : \
+                         les règles de validation diffèrent, converger est impossible. \
+                         {}",
+                        short(&env.sender, 12),
+                        version,
+                        TORUS_PROTOCOL_VERSION,
+                        if version > TORUS_PROTOCOL_VERSION {
+                            "Mets Quanta à jour."
+                        } else {
+                            "Ce pair doit mettre Quanta à jour."
+                        }
+                    );
+                }
+                gossip.stats.dropped_incompatible += 1;
+                return;
             }
             handle_hello(
                 state,

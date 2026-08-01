@@ -50,8 +50,20 @@ iroh = { version = "0.98", default-features = false, features = [
     "fast-apple-datapath",
     "portmapper",
     "tls-aws-lc-rs",
+    # RDV-1 — address lookup over the mainline BitTorrent DHT (pkarr records).
+    # Publishes this endpoint's address under its own EndpointId, so a ticket
+    # stays reachable across NAT/IP changes without depending on the n0 relays,
+    # and resolves a known EndpointId without any server we own.
+    "address-lookup-pkarr-dht",
 ] }
 iroh-gossip = "0.98"
+
+# RDV-1 — the same mainline DHT, used directly for the piece iroh does NOT
+# provide: **rendezvous by topic**. `DhtAddressLookup` resolves an EndpointId we
+# already know; it cannot answer "who else runs Quanta?". We publish/read that
+# on BEP-44 mutable slots derived from the gossip topic (see `p2p/rendezvous.rs`).
+# Version pinned to what iroh 0.98 itself depends on — one DHT crate in the tree.
+mainline = "6"
 
 # PQ-TRANSPORT-1 — rustls en dépendance **directe** uniquement pour activer la
 # feature `prefer-post-quantum`, qui fait préférer `X25519MLKEM768` dans la

@@ -439,6 +439,11 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             // Provable-supply transparency (a listing requirement): total minted so
             // far vs the hard cap, from the shared supply math (see `crate::views`).
             let supply = crate::views::supply_view(&ledger, &stats);
+            // RDV-1 — how many distinct addresses actually sealed a block recently.
+            // Chain-proved, unlike `peers` (which is this node's local view only);
+            // the window ships alongside it because the count is meaningless
+            // without knowing what it was sampled over.
+            let miners = crate::views::miners_view(&ledger);
             Ok(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol_version": crate::p2p::gossip::TORUS_PROTOCOL_VERSION,
@@ -452,6 +457,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 "total_txs": stats.total_txs,
                 "holders": stats.holders,
                 "peers": status.peer_count,
+                "active_miners": miners.active_miners,
+                "miner_window_blocks": miners.window_blocks,
                 "online": status.is_online,
                 "node_id": status.node_id,
                 "address": address,

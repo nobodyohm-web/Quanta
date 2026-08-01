@@ -55,6 +55,10 @@ export interface FinalityStatus {
   total_staked: number;
   my_stake: number;
   i_am_validator: boolean;
+  /** Mineurs distincts prouvés par la chaîne (proposeurs de blocs) — borne basse. */
+  active_miners: number;
+  /** Fenêtre d'échantillonnage du compte de mineurs, en blocs. */
+  miner_window_blocks: number;
 }
 
 /** Une entrée de déverrouillage (unbonding) du portefeuille. */

@@ -78,7 +78,8 @@ src-tauri/src/
 │   ├── mining_loop.rs     ← Mine tick 60s + PoS leader seal + cast des votes de finalité (LIVE-1)
 │   ├── finality_live.rs   ← ⭐ LIVE-1 : FinalityTracker (câblage IO du gadget) + bridge pubkey↔adresse
 │   ├── fork_heal.rs       ← ⭐ LIVE-4 : ForkReconciler (réconciliation de fork profonde — l'appelant réseau de reorg_to_fork)
-│   ├── willow_node.rs     ← ⭐ Iroh endpoint + stores + gossip topic
+│   ├── willow_node.rs     ← ⭐ Iroh endpoint + stores + gossip topic ; RDV-0 `load_or_create_node_key` (identité réseau PERSISTÉE — le NodeId était régénéré à chaque lancement, donc tout ticket périmait au redémarrage)
+│   ├── rendezvous.rs      ← ⭐ RDV-1 : amorçage sans serveur — slots BEP-44 dérivés du topic sur la DHT mainline (publish read-merge-write + harvest parallèle + dial borné)
 │   ├── state_persistence.rs ← SQLite snapshot every 30s
 │   ├── username.rs        ← Registre d'identité @pseudo
 │   ├── energy.rs          ← Oracle énergie (33 pays)
@@ -134,11 +135,17 @@ Raw bytes
   │ ③ Ban check (per-peer)
   │ ④ Envelope-id canonique — id == BLAKE3(pré-image signée), sinon drop (H1)
   │ ⑤ Sonde dedup EN LECTURE (seen_messages LRU 100K) — n'insère rien
-  │ ⑥ Timestamp freshness (±90s)
+  │ ⑥ Timestamp freshness (±90s) — compté (`dropped_stale`) + `warn` avec le
+  │    décalage mesuré (V2 : sans NTP, une horloge dérivante rendait le nœud
+  │    sourd à 100 % en `log::debug!`, donc invisible)
   │ ⑦ Signature ML-DSA-65 (PQ-ENVELOPE-1, STRUCT-1 canonical)
   │ ⑧ Insertion dedup — APRÈS authentification (H1)
   │ ⑨ Rate limit adaptatif + nonce anti-replay (per-sender monotonic)
-  │ ⑩ Payload dispatch → handler
+  │ ⑩ Version de protocole (V4) : un pair dont `TORUS_PROTOCOL_VERSION` diffère
+  │    est **ignoré**, pas seulement loggué — les règles de validation changent à
+  │    chaque fork, donc converger est impossible ; son sender est mémorisé
+  │    (ensemble borné, clés hachées) et son trafic suivant tombe ici
+  │ ⑪ Payload dispatch → handler
   ▼
 Processed
 ```
@@ -254,6 +261,33 @@ sans-IO, C1), **prouvé en simulation DST**, et depuis **LIVE-1** ses votes circ
 ---
 
 ## P2P — Iroh QUIC + Gossip
+
+### Amorçage (RDV-0 / RDV-1) — comment un nœud trouve le réseau
+
+```
+Démarrage
+│
+├─ RDV-0 : node_key (32 o, 0600) chargé ou créé → NodeId STABLE
+│           (sans lui, ticket + known_peers + record DHT meurent au reboot)
+├─ pkarr DhtAddressLookup : notre adresse publiée sur la DHT mainline
+│           → un NodeId connu reste joignable sans relais, NAT/IP changeants
+├─ RDV-1 : 32 slots BEP-44 dérivés du topic ; on lit tous les slots (pairs
+│           inconnus découverts), on dial ≤8, puis on republie son carnet
+│           (self + pairs connus) — cadence adaptative : 30 s doublés à chaque
+│           cycle sans pair vivant (deux machines lancées ensemble se voient
+│           en ~1 min), croisière 25 min dès qu'un pair est là ; seq BEP-44 =
+│           max(horloge, seq_slot+1) (colocataires même-seconde + surenchère
+│           anti-gel) ; init DHT réessayée toutes les 5 min si UDP indisponible
+└─ NET-2 : chaque Hello porte les pairs connus → le maillage se propage seul
+
+Repli manuel : `connect_peer(ticket)` (l'utilisateur colle un code) reste actif.
+```
+
+> **Le contenu DHT est HOSTILE** : les clés de slot sont dérivées d'un topic
+> public, donc n'importe qui peut y écrire. Une entrée n'est jamais qu'une
+> *adresse à essayer* — l'authentification reste ML-DSA (PQ-ENVELOPE-1), les
+> dials sont plafonnés, `known_peers` est borné. Coût assumé : le réseau devient
+> **énumérable publiquement** (le compromis BitTorrent).
 
 ### Flux de connexion
 ```
