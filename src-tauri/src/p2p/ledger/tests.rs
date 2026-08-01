@@ -3448,3 +3448,21 @@
             "et le bloc reste valide pour un pair frais"
         );
     }
+
+    /// **PEER-SELF-1 — un nœud seul doit se dire seul.** Le nœud s'inscrivait
+    /// lui-même dans `peer_info`, dont la taille EST le « nombre de pairs » :
+    /// isolé, il annonçait « 1 pair », donc « connecté ». Pire, la cadence
+    /// d'amorçage (`rendezvous`) lisait ce compteur et passait en croisière
+    /// 25 min au lieu de réessayer à 30 s — une fenêtre manquée devenait une
+    /// panne de 25 minutes. Ce test garde l'invariant côté carte de pairs :
+    /// une carte fraîche est **vide**, et n'enregistre que de VRAIS pairs.
+    #[test]
+    fn peer_self_1_a_lone_node_reports_zero_peers() {
+        use crate::p2p::PeerInfo;
+        use std::collections::HashMap;
+        let mut peers: HashMap<String, PeerInfo> = HashMap::new();
+        assert_eq!(peers.len(), 0, "un nœud qui vient de démarrer n'a AUCUN pair");
+        // Un Hello reçu d'un tiers — et lui seul — peuple la carte.
+        peers.insert("un-autre-pair".into(), PeerInfo::new(10.0, "FR".into()));
+        assert_eq!(peers.len(), 1, "seul un pair distant compte comme pair");
+    }

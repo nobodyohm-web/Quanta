@@ -564,7 +564,32 @@ impl WillowNode {
 
                 // Phase 4 — Spawn iroh-gossip et l'enregistrer sur un Router
                 // pour que les connexions GOSSIP_ALPN soient routées automatiquement.
-                let gossip = Gossip::builder().spawn(endpoint.clone());
+                // GOSSIP-MTU-1 — **le nœud était muet sur le vrai réseau.**
+                //
+                // `iroh-gossip` plafonne un message à `DEFAULT_MAX_MESSAGE_SIZE`
+                // = 4096 octets, et rien ne le relevait ici. Or depuis
+                // PQ-ENVELOPE-1 (hard-fork v4) une enveloppe porte une signature
+                // ML-DSA-65 (3 309 o) ET la clé publique de l'émetteur (1 952 o),
+                // toutes deux **en hexadécimal** dans du JSON — soit ~10,5 Ko de
+                // seule authentification. Un simple `Hello` pèse ~15 Ko, près de
+                // QUATRE FOIS le plafond.
+                //
+                // Conséquence, constatée en vivant entre deux daemons sur la vraie
+                // DHT : ils se découvrent (RDV-1), établissent QUIC, se déclarent
+                // voisins (`NeighborUp`)… et **plus rien ne passe**. Ni Hello, ni
+                // bloc, ni transaction, ni vote de finalité. L'émission est même
+                // comptée comme réussie côté `stats.messages_sent`, donc rien ne
+                // le signale. Le « P2P vérifié entre 2 machines » du journal date
+                // du 06/05/2026 — soit AVANT PQ-ENVELOPE-1 (18/07) : la régression
+                // n'avait jamais été éprouvée en vrai.
+                //
+                // On aligne donc le plafond du transport sur celui du protocole
+                // (`MAX_RAW_ENVELOPE_BYTES`, la garde anti-DoS déjà appliquée à
+                // l'étape ① du dispatcher) : une seule limite, gravée au même
+                // endroit, que le réseau ne peut pas contredire en silence.
+                let gossip = Gossip::builder()
+                    .max_message_size(crate::p2p::dispatcher::MAX_RAW_ENVELOPE_BYTES)
+                    .spawn(endpoint.clone());
                 let router = Router::builder(endpoint.clone())
                     .accept(GOSSIP_ALPN, gossip.clone())
                     .spawn();
