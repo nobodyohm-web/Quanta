@@ -19,8 +19,8 @@ qu'un correctif soit disponible. Réponse visée sous 7 jours.
 
 | Version | Protocole | Supportée |
 |---------|-----------|-----------|
-| 3.13.x  | TORUS v7  | ✅        |
-| < 3.13  | v1 → v6   | ❌ — le protocole a rompu sept fois ; les versions antérieures ne parlent plus au réseau |
+| 3.15.x  | TORUS v9  | ✅        |
+| < 3.15  | v1 → v8   | ❌ — le protocole a rompu neuf fois ; les versions antérieures ne parlent plus au réseau |
 
 ## Posture cryptographique
 
