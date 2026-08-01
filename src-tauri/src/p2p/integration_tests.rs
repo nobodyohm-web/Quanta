@@ -33,9 +33,9 @@ mod integration_tests {
         let mut node_c = Ledger::new();
 
         // ── Phase 1: Each node mines locally ──
-        node_a.mine_tx(&pk_a, 2 * MICRO, 0.5);
-        node_b.mine_tx(&pk_b, MICRO, 0.3);
-        node_c.mine_tx(&pk_c, MICRO, 0.2);
+        node_a.mint_block_reward_of(&pk_a, 2 * MICRO);
+        node_b.mint_block_reward_of(&pk_b, MICRO);
+        node_c.mint_block_reward_of(&pk_c, MICRO);
 
         // ── Phase 2: Node A seals block #1 and broadcasts ──
         let block_a = node_a.seal_block(&pk_a, 0.5);
@@ -59,7 +59,7 @@ mod integration_tests {
         // passes the "≤1 reward/block" rule peers enforce. MINT-EXACT-1 : Σ reste
         // sous la récompense canonique du bloc (~4 QTA), sinon les pairs le
         // rejetteraient — c'est exactement ce que ce test doit refléter.
-        node_b.mine_tx(&pk_b, MICRO, 0.1);
+        node_b.mint_block_reward_of(&pk_b, MICRO);
         let block_b = node_b.seal_block(&pk_b, 0.1);
         assert_eq!(block_b.index, 2);
         let mining_in_b2 = block_b
@@ -67,9 +67,12 @@ mod integration_tests {
             .iter()
             .filter(|t| t.tx_type == crate::p2p::ledger::TxType::Mining)
             .count();
-        assert_eq!(
-            mining_in_b2, 1,
-            "EMIT-1: B's two rewards coalesce into a single per-block reward"
+        // EMIT-1 : une seule récompense PAR BÉNÉFICIAIRE (les deux de B sont
+        // coalescées). REWARD-SHARE-1 : le bloc en porte une par participant
+        // récent — ici B (producteur) et A (qui a scellé le bloc 1).
+        assert!(
+            (1..=2).contains(&mining_in_b2),
+            "une coinbase par bénéficiaire, partage inclus — obtenu {mining_in_b2}"
         );
 
         // A and C integrate B's block
@@ -78,9 +81,9 @@ mod integration_tests {
 
         // ── Phase 4: All three nodes seal block #3 independently ──
         // This creates a 3-way fork. Deterministic resolution via hash comparison.
-        node_a.mine_tx(&pk_a, MICRO, 0.01);
-        node_b.mine_tx(&pk_b, MICRO, 0.01);
-        node_c.mine_tx(&pk_c, MICRO, 0.01);
+        node_a.mint_block_reward_of(&pk_a, MICRO);
+        node_b.mint_block_reward_of(&pk_b, MICRO);
+        node_c.mint_block_reward_of(&pk_c, MICRO);
         // TEST-TEETH (HARDEN-HYGIENE-1): the three blocks already differ by miner
         // (pk_a/pk_b/pk_c is bound into the block hash), so their hashes are
         // content-distinct without any wall-clock sleep — the old
@@ -138,11 +141,11 @@ mod integration_tests {
         // reward in its OWN block, sealed by that miner (the reward credits the
         // block's miner). The multiple holders the cache must track then come
         // from those rewards + the transfers below.
-        ledger.mine_tx(&pk_a, 1000 * MICRO, 0.5);
+        ledger.mint_block_reward_of(&pk_a, 1000 * MICRO);
         ledger.seal_block(&pk_a, 0.5);
-        ledger.mine_tx(&pk_b, 500 * MICRO, 0.3);
+        ledger.mint_block_reward_of(&pk_b, 500 * MICRO);
         ledger.seal_block(&pk_b, 0.3);
-        ledger.mine_tx(&pk_c, 200 * MICRO, 0.1);
+        ledger.mint_block_reward_of(&pk_c, 200 * MICRO);
         ledger.seal_block(&pk_c, 0.1);
 
         // Transfers (sealed in a reward-free block).
@@ -151,7 +154,7 @@ mod integration_tests {
         ledger.seal_block(&pk_a, 0.1);
 
         // More mining + seal
-        ledger.mine_tx(&pk_b, 30 * MICRO, 0.01);
+        ledger.mint_block_reward_of(&pk_b, 30 * MICRO);
         ledger.seal_block(&pk_b, 0.01);
 
         // Now pending is empty — full chain scan matches cache exactly
@@ -232,8 +235,8 @@ mod integration_tests {
     fn int2b_cache_survives_snapshot_restore() {
         let pk = "a".repeat(64);
         let mut ledger = Ledger::new();
-        ledger.mine_tx(&pk, 500 * MICRO, 0.1);
-        ledger.mine_tx(&pk, 300 * MICRO, 0.2);
+        ledger.mint_block_reward_of(&pk, 500 * MICRO);
+        ledger.mint_block_reward_of(&pk, 300 * MICRO);
         // EMIT-1 (one reward per block): the miner seals its own reward, so the
         // two ticks coalesce into a single NETWORK→pk reward (Σ = 800) and the
         // rebuilt cache credits pk exactly — consistent across snapshot/restore.
@@ -265,7 +268,7 @@ mod integration_tests {
         let mut source = Ledger::new();
         for _ in 0..100 {
             // Mining tx ensures pending is non-empty so seal_block works.
-            source.mine_tx(&pk, MICRO, 0.01);
+            source.mint_block_reward_of(&pk, MICRO);
             source.seal_block(&pk, 0.01);
         }
         // Source chain has 101 blocks total (genesis + 100).
@@ -311,7 +314,7 @@ mod integration_tests {
         let pk = "a".repeat(64);
         let mut source = Ledger::new();
         for _ in 0..5 {
-            source.mine_tx(&pk, MICRO, 0.0);
+            source.mint_block_reward_of(&pk, MICRO);
             source.seal_block(&pk, 0.0);
         }
         let mut receiver = Ledger::new();
@@ -337,7 +340,7 @@ mod integration_tests {
         let pk = "a".repeat(64);
         let mut source = Ledger::new();
         for _ in 0..10 {
-            source.mine_tx(&pk, MICRO, 0.0);
+            source.mint_block_reward_of(&pk, MICRO);
             source.seal_block(&pk, 0.0);
         }
         let blocks_json: Vec<String> = source

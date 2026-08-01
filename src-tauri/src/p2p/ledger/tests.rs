@@ -811,8 +811,10 @@
 
         // A valid competing block at index 2, rooted at b1 — it would REPLACE b2.
         let rival = "e".repeat(64);
-        let reward = ledger.build_unsigned_tx("NETWORK", &rival, 2 * MICRO, TxType::Mining);
-        let winner = Ledger::forge_block_at(2, &b1.hash, "fork-ts", &rival, vec![reward]);
+        // REWARD-SHARE-1 : le bloc rival respecte le plan de partage — ce test
+        // éprouve le PLANCHER de finalité, pas la répartition.
+        let rewards = ledger.planned_reward_txs(2, &rival, 2 * MICRO);
+        let winner = Ledger::forge_block_at(2, &b1.hash, "fork-ts", &rival, rewards);
 
         // Floor at index 2 (b2 finalized): the fork roots BELOW the floor (at b1=1),
         // so adopting it would undo finalized b2 → REFUSED, chain untouched.
@@ -2990,7 +2992,7 @@
         // MINT-EXACT-1 : la canonique est ignorée quand le mempool porte déjà des
         // récompenses (chemin du robinet de test) — ce test vise MINT-GUARD-2, la
         // règle « une `Mining` d'un expéditeur non-NETWORK est une forgerie ».
-        let out = Ledger::coalesce_block_rewards(txs, "miner", 1, "ts");
+        let out = Ledger::coalesce_block_rewards(txs, 1, "ts");
         let rewards: Vec<&Transaction> = out.iter().filter(|t| t.tx_type == TxType::Mining).collect();
         assert_eq!(rewards.len(), 1, "exactly one coalesced reward");
         assert_eq!(rewards[0].from, "NETWORK");
@@ -3087,8 +3089,9 @@
         let miner = "f".repeat(64);
         let expected = producer.canonical_block_reward();
 
-        let minted = producer.mint_block_reward(&miner).expect("émission non nulle");
-        assert_eq!(minted.amount, expected, "le producteur frappe EXACTEMENT la canonique");
+        let minted = producer.mint_block_reward(&miner);
+        assert_eq!(minted.len(), 1, "chaîne neuve : aucun participant récent, le producteur seul");
+        assert_eq!(minted[0].amount, expected, "le producteur frappe EXACTEMENT la canonique");
         let block = producer.seal_block(&miner, 0.0);
 
         let mut receiver = Ledger::new();
@@ -3107,20 +3110,33 @@
     fn mint_exact_double_mint_is_rejected() {
         let mut producer = Ledger::new();
         let miner = "0".repeat(64);
-        producer.mint_block_reward(&miner);
-        producer.mint_block_reward(&miner); // le producteur triche
-        let block = producer.seal_block(&miner, 0.0);
 
-        let rewards = block
+        // (a) La production s'auto-nettoie : frapper deux fois n'accumule pas —
+        //     la frappe périmée est révoquée (elle vaudrait pour une autre hauteur).
+        producer.mint_block_reward(&miner);
+        producer.mint_block_reward(&miner);
+        let block = producer.seal_block(&miner, 0.0);
+        let minted: u64 = block
             .transactions
             .iter()
             .filter(|t| t.tx_type == TxType::Mining)
-            .count();
-        assert_eq!(rewards, 1, "EMIT-1 : une seule récompense, mais de montant doublé");
+            .map(|t| t.amount)
+            .sum();
+        let mut fresh = Ledger::new();
+        assert_eq!(minted, fresh.canonical_block_reward(), "une seule récompense canonique");
 
-        let mut receiver = Ledger::new();
+        // (b) Et un bloc FORGÉ qui double la frappe est rejeté par la validation.
+        let genesis = fresh.block_at(0).unwrap().hash.clone();
+        let doubled = fresh.canonical_block_reward() * 2;
+        let forged = Ledger::forge_block_at(
+            1,
+            &genesis,
+            "2026-08-01T00:00:00+00:00",
+            &miner,
+            vec![fresh.build_unsigned_tx("NETWORK", &miner, doubled, TxType::Mining)],
+        );
         assert!(
-            receiver.integrate_remote_block(block).is_err(),
+            fresh.integrate_remote_block(forged).is_err(),
             "le double-mint dépasse la canonique ⇒ rejeté"
         );
     }
@@ -3194,12 +3210,18 @@
         // (b) Sur le slot OUVERT, son bloc est accepté par le réseau.
         let tip = l.chain.last().unwrap().hash.clone();
         let reward = l.canonical_block_reward();
+        let rewards = l.planned_reward_txs(open_index, &newcomer, reward);
+        let newcomer_cut = rewards
+            .iter()
+            .find(|t| t.to == newcomer)
+            .map(|t| t.amount)
+            .expect("le nouvel arrivant est payé");
         let open_block = Ledger::forge_block_at(
             open_index,
             &tip,
             "2026-08-01T00:00:00+00:00",
             &newcomer,
-            vec![l.build_unsigned_tx("NETWORK", &newcomer, reward, TxType::Mining)],
+            rewards,
         );
         assert_eq!(
             l.integrate_remote_block(open_block),
@@ -3208,12 +3230,12 @@
         );
         assert_eq!(
             l.balance_of(&newcomer),
-            reward,
+            newcomer_cut,
             "il tient sa première pièce — la boucle œuf-poule est rompue"
         );
         assert!(
-            reward >= MIN_VALIDATOR_STAKE,
-            "et un seul slot ouvert suffit à financer son enjeu minimum"
+            newcomer_cut >= MIN_VALIDATOR_STAKE,
+            "et un seul slot ouvert suffit à financer son enjeu minimum, partage compris"
         );
 
         // (c) Le slot suivant lui est de nouveau fermé : la fenêtre est bornée.
@@ -3244,4 +3266,185 @@
         for i in 1..=window * 4 {
             assert_eq!(is_open_slot(i), i.is_multiple_of(window), "cadence déterministe à la hauteur {i}");
         }
+    }
+
+    // ─── REWARD-SHARE-1 : la récompense se partage, et le partage est vérifié ──
+    //
+    // Avant, tout le bloc allait au seul sceleur : on n'était payé qu'en gagnant
+    // un slot, donc la quasi-totalité des participants ne touchait jamais rien.
+    // Désormais la moitié va au producteur et l'autre aux **participants récents**
+    // constatés par la chaîne — et la répartition est recalculée par chaque nœud,
+    // exactement comme le montant total.
+
+    /// Le partage est une fonction pure de la chaîne, et il rémunère la
+    /// **liveness** : on y entre en produisant un bloc, on en sort en cessant.
+    #[test]
+    fn reward_share_participants_come_from_the_chain_itself() {
+        use crate::p2p::reputation::SHARE_WINDOW_BLOCKS;
+        let mut l = Ledger::new();
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+
+        assert!(
+            l.recent_participants(l.chain_height()).is_empty(),
+            "chaîne neuve : aucun participant, le producteur prendra tout"
+        );
+        l.mint_block_reward(&a);
+        l.seal_block(&a, 0.0);
+        l.mint_block_reward(&b);
+        l.seal_block(&b, 0.0);
+
+        let now = l.chain_height();
+        let seen = l.recent_participants(now);
+        assert!(seen.contains(&a) && seen.contains(&b), "les deux producteurs sont vus");
+
+        // Hors fenêtre, un producteur inactif sort du partage — c'est ce qui fait
+        // du partage une prime de présence et non une rente.
+        let far = now + SHARE_WINDOW_BLOCKS + 1;
+        assert!(
+            l.recent_participants(far).is_empty(),
+            "passé {SHARE_WINDOW_BLOCKS} blocs sans rien produire, on sort du partage"
+        );
+    }
+
+    /// Le producteur ne rafle plus tout : sa part est celle du barème, le reste
+    /// va aux participants, et la somme vaut exactement la récompense canonique
+    /// (aucun µQTA ne se perd — la conservation reste vraie au µQTA près).
+    #[test]
+    fn reward_share_splits_and_conserves_to_the_microqta() {
+        use crate::p2p::reputation::{PROPOSER_SHARE_DEN, PROPOSER_SHARE_NUM};
+        let mut l = Ledger::new();
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        l.mint_block_reward(&a);
+        l.seal_block(&a, 0.0); // A devient participant récent
+
+        let reward = l.canonical_block_reward();
+        let plan = l.expected_block_rewards(l.chain_height(), &b, reward);
+        let total: u64 = plan.iter().map(|(_, v)| *v).sum();
+        assert_eq!(total, reward, "le plan distribue EXACTEMENT la récompense, sans perte");
+        assert_eq!(plan.len(), 2, "le producteur B + le participant A");
+
+        let got_b = plan.iter().find(|(k, _)| *k == b).unwrap().1;
+        let got_a = plan.iter().find(|(k, _)| *k == a).unwrap().1;
+        assert!(got_a > 0, "le participant récent est réellement payé");
+        // Barème : part du producteur, plus le reste de division entière (le
+        // « dust ») pour que la somme retombe au µQTA près sur la canonique.
+        let cut = reward * PROPOSER_SHARE_NUM / PROPOSER_SHARE_DEN;
+        let pot = reward - cut;
+        assert_eq!(got_a, pot, "l'unique participant reçoit tout le pot partagé");
+        assert_eq!(got_b, cut, "et le producteur exactement sa part de barème");
+        assert!(got_b >= got_a, "le producteur garde au moins sa part");
+    }
+
+    /// **Le partage est imposé, pas suggéré.** Un producteur qui garde tout pour
+    /// lui — le comportement qu'un nœud modifié adopterait naturellement — voit
+    /// son bloc rejeté par le réseau. Sans ce test, le partage ne serait qu'une
+    /// politesse du logiciel de référence.
+    #[test]
+    fn reward_share_greedy_proposer_is_rejected() {
+        let mut l = Ledger::new();
+        let a = "a".repeat(64);
+        let greedy = "b".repeat(64);
+        l.mint_block_reward(&a);
+        l.seal_block(&a, 0.0);
+
+        let tip = l.chain.last().unwrap().hash.clone();
+        let index = l.chain_height();
+        let reward = l.canonical_block_reward();
+        let all_for_me = Ledger::forge_block_at(
+            index,
+            &tip,
+            "2026-08-01T00:00:00+00:00",
+            &greedy,
+            vec![l.build_unsigned_tx("NETWORK", &greedy, reward, TxType::Mining)],
+        );
+        assert!(
+            l.integrate_remote_block(all_for_me).is_err(),
+            "un producteur qui capte toute l'émission doit être rejeté"
+        );
+
+        // Et payer un tiers qui n'a rien produit ne passe pas davantage.
+        let stranger = "c".repeat(64);
+        let bribe = Ledger::forge_block_at(
+            index,
+            &tip,
+            "2026-08-01T00:00:01+00:00",
+            &greedy,
+            vec![l.build_unsigned_tx("NETWORK", &stranger, reward, TxType::Mining)],
+        );
+        assert!(
+            l.integrate_remote_block(bribe).is_err(),
+            "un bénéficiaire hors plan est rejeté"
+        );
+
+        // Le bloc CONFORME, lui, passe — le contrôle vise la triche, pas la vie.
+        let honest = Ledger::forge_block_at(
+            index,
+            &tip,
+            "2026-08-01T00:00:02+00:00",
+            &greedy,
+            l.planned_reward_txs(index, &greedy, reward),
+        );
+        assert_eq!(
+            l.integrate_remote_block(honest),
+            Ok(true),
+            "le bloc qui respecte le plan est accepté"
+        );
+        assert!(l.balance_of(&a) > 0, "le participant récent a bien été payé par un tiers");
+    }
+
+    /// Émettre MOINS reste permis (non-inflationnaire), mais la **forme** du
+    /// partage tient : un producteur ne peut pas rogner la part des autres sans
+    /// rogner la sienne dans la même proportion.
+    #[test]
+    fn reward_share_is_scale_invariant() {
+        let mut l = Ledger::new();
+        let a = "a".repeat(64);
+        let p = "b".repeat(64);
+        l.mint_block_reward(&a);
+        l.seal_block(&a, 0.0);
+
+        let index = l.chain_height();
+        let tip = l.chain.last().unwrap().hash.clone();
+        let half = l.canonical_block_reward() / 2;
+        let modest = Ledger::forge_block_at(
+            index,
+            &tip,
+            "2026-08-01T00:00:00+00:00",
+            &p,
+            l.planned_reward_txs(index, &p, half),
+        );
+        assert_eq!(
+            l.integrate_remote_block(modest),
+            Ok(true),
+            "émettre moins que la canonique est permis, tant que la forme tient"
+        );
+        assert!(l.balance_of(&a) > 0, "le participant garde sa fraction du total réduit");
+    }
+
+    /// Une frappe restée en attente est **périmée** : elle valait pour une autre
+    /// hauteur, donc pour un autre ensemble de participants. Ça arrive en vrai
+    /// dès qu'un bloc distant s'intercale entre notre frappe et notre scellement
+    /// — et sans la révocation, le bloc suivant serait rejeté par tout le réseau.
+    #[test]
+    fn reward_share_stale_mint_is_revoked_before_the_next_one() {
+        let mut l = Ledger::new();
+        let me = "a".repeat(64);
+        l.mint_block_reward(&me); // frappe #1, jamais scellée
+        l.mint_block_reward(&me); // un bloc distant est passé entre-temps
+        let sealed = l.seal_block(&me, 0.0);
+        let minted: u64 = sealed
+            .transactions
+            .iter()
+            .filter(|t| t.tx_type == TxType::Mining)
+            .map(|t| t.amount)
+            .sum();
+        let mut fresh = Ledger::new();
+        assert_eq!(minted, fresh.canonical_block_reward(), "une seule récompense survit");
+        assert_eq!(
+            fresh.integrate_remote_block(sealed),
+            Ok(true),
+            "et le bloc reste valide pour un pair frais"
+        );
     }

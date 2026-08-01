@@ -98,8 +98,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///   un nouvel arrivant n'avait aucun chemin vers sa première pièce. v8 laisse
 ///   passer ces blocs ; v7 les rejette. Capture Sybil bornée à 1/16 de l'émission.
 ///
+/// **8→9 (REWARD-SHARE-1) — la récompense d'un bloc se partage.** v8 exigeait une
+/// coinbase unique créditée au mineur ; v9 en accepte **une par bénéficiaire** et
+/// impose la répartition : moitié au producteur, moitié à parts égales entre les
+/// **participants récents** (les adresses distinctes ayant produit un bloc dans
+/// les `SHARE_WINDOW_BLOCKS` précédents — une donnée que la chaîne prouve déjà via
+/// `block.miner`, lié au hash par BLK-HASH-1). Chaque nœud **recalcule** le plan
+/// (`validate_block_reward_plan`) : un producteur qui capte toute l'émission, ou
+/// qui paie un tiers hors plan, est rejeté. Le plan est **invariant d'échelle** —
+/// émettre moins reste permis, mais sans rogner la part des autres.
+/// v8 rejette les blocs multi-coinbase de v9 ; v9 rejette les blocs v8 dès qu'un
+/// participant récent existe. Aucun champ wire nouveau : le partage passe par des
+/// tx `Mining` ordinaires.
+///
 /// La genèse est intacte ; c'est la surface de validation qui diverge, d'où le bump.
-pub const TORUS_PROTOCOL_VERSION: u8 = 8;
+pub const TORUS_PROTOCOL_VERSION: u8 = 9;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 

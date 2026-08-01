@@ -257,7 +257,10 @@ impl Ledger {
         // set as of the parent — O(1), no replay needed.
         let bonded_before = self.validator_stakes();
         Self::validate_block_against_prev(block, tip, &onchain_before, &bindings_before, &bonded_before)?;
-        self.validate_block_emission(block)
+        self.validate_block_emission(block)?;
+        // REWARD-SHARE-1 : la RÉPARTITION est vérifiée comme le total — en la
+        // recalculant depuis la chaîne, jamais en faisant confiance au bloc.
+        self.validate_block_reward_plan(block, self.stats().total_mined)
     }
 
     /// TOKENOMICS v2 — garde-fou de consensus : la somme minée d'un bloc ne
@@ -326,6 +329,52 @@ impl Ledger {
                  (offre minée avant ce bloc : {}) — la récompense est une fonction \
                  pure de la chaîne, pas un montant choisi par le sceleur",
                 block_minted, expected, current
+            ));
+        }
+        Ok(())
+    }
+
+    /// REWARD-SHARE-1 — la **répartition** d'un bloc est vérifiée exactement comme
+    /// son total : en la **recalculant** depuis la chaîne (`expected_block_rewards`),
+    /// jamais en faisant confiance au contenu du bloc.
+    ///
+    /// Ce que ça ferme : sans ce contrôle, un producteur pouvait garder pour lui la
+    /// totalité de l'émission alors que le protocole la destine aux participants
+    /// récents — le partage n'aurait été qu'une politesse du logiciel de référence,
+    /// contournable par n'importe quel nœud modifié, ce qui est exactement la
+    /// faiblesse que MINT-EXACT-1 vient de fermer sur le montant.
+    ///
+    /// Un bloc **sans aucune** récompense reste valide (strictement
+    /// non-inflationnaire : le producteur y renonce, pour lui comme pour les
+    /// autres). Dès qu'il en porte une, l'ensemble doit correspondre au plan.
+    pub(crate) fn validate_block_reward_plan(
+        &self,
+        block: &Block,
+        prior_mined: u64,
+    ) -> Result<(), String> {
+        let _ = prior_mined; // le PLAFOND du total est vérifié par `validate_block_emission*`
+        let mut actual: BTreeMap<String, u64> = BTreeMap::new();
+        for tx in block.transactions.iter().filter(|t| t.tx_type == TxType::Mining) {
+            *actual.entry(tx.to.clone()).or_insert(0) += tx.amount;
+        }
+        if actual.is_empty() {
+            return Ok(());
+        }
+        // Invariant d'échelle : on recalcule le plan sur le total RÉELLEMENT émis
+        // par le bloc. Émettre moins reste permis (non-inflationnaire), mais la
+        // répartition doit suivre — un producteur ne peut pas rogner la part des
+        // autres sans rogner la sienne dans la même proportion.
+        let total: u64 = actual.values().copied().sum();
+        let expected: BTreeMap<String, u64> = self
+            .expected_block_rewards(block.index, &block.miner, total)
+            .into_iter()
+            .collect();
+        if actual != expected {
+            return Err(format!(
+                "bloc rejeté : répartition de la récompense non conforme — {} bénéficiaire(s) \
+                 déclaré(s), {} attendu(s) par le plan recalculé depuis la chaîne (REWARD-SHARE-1)",
+                actual.len(),
+                expected.len()
             ));
         }
         Ok(())
@@ -614,36 +663,34 @@ impl Ledger {
                 }
             }
         }
-        // EMIT-1 §4.2 (Option A — one reward per block): at most ONE `Mining`
-        // tx, and if present it must be the coinbase `NETWORK → block.miner`.
-        // Stateless, so it guards BOTH the happy path and the fork-reorg path —
-        // a malicious node forging two mining txs (whose sum could slip under
-        // the per-block emission bound, which only checks the total) or
-        // crediting someone other than the sealer is rejected here. Belt-and-
-        // suspenders with BLK-HASH-1, which already binds `miner` into the hash.
+        // EMIT-1 §4.2 — toute récompense de minage est émise par `NETWORK`, et
+        // **au plus une par bénéficiaire** (deux lignes pour la même adresse
+        // seraient un double-mint que la somme seule ne verrait pas).
+        //
+        // REWARD-SHARE-1 : un bloc porte désormais PLUSIEURS coinbases — le
+        // producteur et les participants récents. La règle « une seule, créditée
+        // au mineur » a donc cédé la place à quelque chose de plus fort : le
+        // **plan de récompense** (`validate_block_reward_plan`) épingle exactement
+        // qui est payé et combien, en re-dérivant la répartition depuis la chaîne.
+        // Un bénéficiaire hors plan, ou un montant qui s'en écarte, est rejeté.
         let mining: Vec<&Transaction> = block
             .transactions
             .iter()
             .filter(|t| t.tx_type == TxType::Mining)
             .collect();
-        if mining.len() > 1 {
-            return Err(format!(
-                "bloc rejeté : {} récompenses de minage — au plus une par bloc (EMIT-1)",
-                mining.len()
-            ));
-        }
-        if let Some(reward) = mining.first() {
+        let mut payees: HashSet<&str> = HashSet::new();
+        for reward in &mining {
             if reward.from != "NETWORK" {
                 return Err(format!(
                     "bloc rejeté : récompense de minage émise par {} (NETWORK attendu)",
                     reward.from
                 ));
             }
-            if reward.to != block.miner {
-                return Err(
-                    "bloc rejeté : récompense de minage créditée à un autre que le mineur du bloc"
-                        .into(),
-                );
+            if !payees.insert(reward.to.as_str()) {
+                return Err(format!(
+                    "bloc rejeté : deux récompenses de minage pour {} — une seule par bénéficiaire (EMIT-1)",
+                    short(&reward.to, 12)
+                ));
             }
         }
         // C2 (AUDIT-2026-07-25): a synthetic sender skips both signature AND
@@ -834,8 +881,14 @@ impl Ledger {
             if !Self::is_synthetic_sender(&tx.from) {
                 continue;
             }
-            let legal_coinbase =
-                tx.tx_type == TxType::Mining && tx.from == "NETWORK" && tx.to == miner;
+            // REWARD-SHARE-1 : une coinbase peut créditer un participant récent
+            // plutôt que le seul mineur, donc `to` n'est plus contraint ICI — il
+            // l'est plus fortement par le plan de récompense
+            // (`validate_block_reward_plan`), qui fixe l'ensemble EXACT des
+            // bénéficiaires et leurs montants. C2 garde son objet : un expéditeur
+            // synthétique ne peut rien émettre HORS d'une coinbase.
+            let _ = miner;
+            let legal_coinbase = tx.tx_type == TxType::Mining && tx.from == "NETWORK";
             if !legal_coinbase {
                 bad.push(i);
             }

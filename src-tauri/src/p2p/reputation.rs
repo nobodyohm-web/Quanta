@@ -116,6 +116,30 @@ pub fn emission_for_block(total_mined_micro: u64) -> u64 {
     emission_for_tick(total_mined_micro).saturating_mul(TICKS_PER_BLOCK)
 }
 
+// ─── REWARD-SHARE-1 — la récompense se partage entre les participants récents ──
+
+/// Fenêtre (en blocs) sur laquelle la chaîne constate **qui a participé**.
+/// Un producteur de bloc entre dans le partage pour les `SHARE_WINDOW_BLOCKS`
+/// blocs suivants ; passé ce délai sans rien produire, il en sort. C'est ce qui
+/// fait du partage une récompense de **liveness** et non une rente de capital :
+/// un validateur bondé mais hors ligne cesse de sceller, donc cesse d'être payé.
+///
+/// Vaut une époque de finalité (`EPOCH_LENGTH_BLOCKS`), ce qui borne aussi le
+/// nombre de bénéficiaires par bloc — au plus `SHARE_WINDOW_BLOCKS` adresses
+/// distinctes, donc une taille de bloc bornée par construction.
+pub const SHARE_WINDOW_BLOCKS: u64 = 32;
+
+/// Part du producteur du bloc, en fraction de la récompense canonique. Le reste
+/// est réparti **à parts égales** entre les participants récents.
+///
+/// Pourquoi à parts égales et non au prorata de l'enjeu : pondérer par l'enjeu
+/// reproduirait une rente proportionnelle au capital, ce que la doctrine du
+/// projet refuse. Ici, ce qui est récompensé est d'**avoir produit un bloc
+/// récemment** — un signal de travail effectif, déjà prouvé par la chaîne
+/// (`block.miner`), et que l'enjeu ne suffit pas à obtenir.
+pub const PROPOSER_SHARE_NUM: u64 = 1;
+pub const PROPOSER_SHARE_DEN: u64 = 2;
+
 /// V2 trust score basé uniquement sur énergie + uptime + stake (pas d'actions sociales).
 /// `atn_staked` est en µQTA — converti en QUANTA pour le score.
 /// W4 (Rust rule #6) — apply a dimensionless ratio ∈ [0,1] (a physical Shapley

@@ -24,8 +24,13 @@ paths: ["src-tauri/src/**/*.rs"]
    laissait `32 × N` fois le montant honnête à n'importe quel sceleur. Aucun montant
    calculé localement (Shapley, watts auto-déclarés) ne doit toucher la monnaie.
    NE PAS revenir à un modèle « non plafonné / fixe » : la rareté est le cœur du projet.
-10. **Entrée libre (OPEN-DOOR-1)** : un bloc sur `OPEN_SLOT_EVERY_BLOCKS` est un slot
+10. **Partage imposé (REWARD-SHARE-1)** : la récompense se répartit entre le
+    producteur et les participants récents (`expected_block_rewards`), et chaque
+    nœud **recalcule** ce plan (`validate_block_reward_plan`). Ne jamais rendre la
+    répartition optionnelle : un partage seulement appliqué par le logiciel de
+    référence n'est pas une règle, c'est une politesse contournable.
+11. **Entrée libre (OPEN-DOOR-1)** : un bloc sur `OPEN_SLOT_EVERY_BLOCKS` est un slot
     ouvert à toute adresse, bondée ou non. Ne pas le supprimer sans le remplacer :
     sans lui, `PROPOSER-1` referme le réseau définitivement au premier staker (aucun
     faucet, airdrop ni premine n'existe pour rompre la boucle œuf-poule).
-11. **Tests** : `cargo test` doit passer avant tout commit
+12. **Tests** : `cargo test` doit passer avant tout commit

@@ -223,8 +223,8 @@ mod multi_node_simulation {
         println!("\n  ── Phase 1: A mine → B reçoit ──");
 
         // Node A crée des transactions mining et scelle un bloc
-        node_a.mine_tx(pk_a, MICRO, 0.015); // 1 QUANTA
-        node_a.mine_tx(pk_a, MICRO, 0.015); // 1 QUANTA
+        node_a.mint_block_reward_of(pk_a, MICRO); // 1 QUANTA
+        node_a.mint_block_reward_of(pk_a, MICRO); // 1 QUANTA
         let block_a1 = node_a.seal_block(pk_a, 0.03);
 
         println!("  A sealed block #{} ({} txs, hash={}...)",
@@ -255,7 +255,7 @@ mod multi_node_simulation {
         // ── Phase 2: Node B mine et Node A reçoit ──
         println!("\n  ── Phase 2: B mine → A reçoit ──");
 
-        node_b.mine_tx(pk_b, 500_000, 0.02); // 0.5 QUANTA
+        node_b.mint_block_reward_of(pk_b, 500_000); // 0.5 QUANTA
         let block_b2 = node_b.seal_block(pk_b, 0.02);
 
         println!("  B sealed block #{} ({} txs, hash={}...)",
@@ -290,12 +290,12 @@ mod multi_node_simulation {
         println!("\n  ── Phase 4: Fork — 2 blocs au même height ──");
 
         // A et B minent en même temps (pas encore synchronisés)
-        node_a.mine_tx(pk_a, 200_000, 0.01);
+        node_a.mint_block_reward_of(pk_a, 200_000);
         let fork_a = node_a.seal_block(pk_a, 0.01);
         println!("  A sealed block #{} (hash={}...)", fork_a.index, &fork_a.hash[..12]);
 
         // Reset B au même état (avant le fork de A) en utilisant un bloc différent
-        node_b.mine_tx(pk_b, 300_000, 0.02);
+        node_b.mint_block_reward_of(pk_b, 300_000);
         let fork_b = node_b.seal_block(pk_b, 0.02);
         println!("  B sealed block #{} (hash={}...)", fork_b.index, &fork_b.hash[..12]);
 
@@ -462,10 +462,10 @@ mod late_joiner_simulation {
             let (miner_pk, miner_id) = miners[(tick as usize) % 4];
 
             let block = match miner_id {
-                "A" => { a.mine_tx(miner_pk, MICRO, 0.005); a.seal_block(miner_pk, 0.005) }
-                "B" => { b.mine_tx(miner_pk, MICRO, 0.010); b.seal_block(miner_pk, 0.010) }
-                "C" => { c.mine_tx(miner_pk, MICRO, 0.015); c.seal_block(miner_pk, 0.015) }
-                "D" => { d.mine_tx(miner_pk, MICRO, 0.030); d.seal_block(miner_pk, 0.030) }
+                "A" => { a.mint_block_reward_of(miner_pk, MICRO); a.seal_block(miner_pk, 0.005) }
+                "B" => { b.mint_block_reward_of(miner_pk, MICRO); b.seal_block(miner_pk, 0.010) }
+                "C" => { c.mint_block_reward_of(miner_pk, MICRO); c.seal_block(miner_pk, 0.015) }
+                "D" => { d.mint_block_reward_of(miner_pk, MICRO); d.seal_block(miner_pk, 0.030) }
                 _ => unreachable!(),
             };
             println!("  Tick {}: {} sealed block #{} (hash={}…)",
@@ -525,7 +525,7 @@ mod late_joiner_simulation {
 
         // ── Phase 3 : E participe maintenant — il mine un bloc et A l'accepte ──
         println!("\n  ── Phase 3 : E mine et propage à son tour ──");
-        e.mine_tx(&pk_e, MICRO, 0.050);
+        e.mint_block_reward_of(&pk_e, MICRO);
         let block_e = e.seal_block(&pk_e, 0.050);
         println!("  E sealed block #{} (hash={}…)",
             block_e.index, &block_e.hash[..12]);
@@ -606,7 +606,7 @@ mod late_joiner_simulation {
 
         // 50 more mining ops (refill)
         for _ in 0..50 {
-            ledger.mine_tx(&pk, 2 * MICRO, 0.1);
+            ledger.mint_block_reward_of(&pk, 2 * MICRO);
         }
 
         // Seal everything

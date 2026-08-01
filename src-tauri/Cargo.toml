@@ -1,6 +1,6 @@
 [package]
 name = "quanta-protocol"
-version = "3.14.0"
+version = "3.15.0"
 # Two binaries live in this package: the Tauri desktop app (`quanta-protocol`,
 # from src/main.rs) and the headless daemon (`quanta-node`, src/bin/quanta-node.rs).
 # `default-run` tells a bare `cargo run` (used by `tauri dev`) which one to launch,
