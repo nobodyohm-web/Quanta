@@ -1,8 +1,10 @@
 # Politique de sécurité — Quanta Protocol
 
-> Statut : **alpha, non audité par un tiers.** Le réseau n'a jamais tourné au-delà
-> de deux machines physiques. N'engagez pas de valeur réelle que vous ne pouvez
-> pas perdre.
+> Statut : **alpha, non audité par un tiers.** Le code actuel n'a **jamais** été
+> éprouvé entre deux machines physiques derrière deux NAT distincts : le jalon de
+> mai 2026 précède deux ruptures de protocole et une régression qui a rendu le nœud
+> muet sur tout réseau réel pendant deux mois sans qu'aucun compteur ne le signale.
+> N'engagez pas de valeur réelle que vous ne pouvez pas perdre.
 
 ## Signaler une vulnérabilité
 

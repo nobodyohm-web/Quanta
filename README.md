@@ -225,6 +225,21 @@ npx tauri build                                        # bundle de production
 Sur macOS le binaire **n'est pas notarisé** : `xattr -cr /Applications/Quanta.app`, puis clic
 droit → Ouvrir. La notarisation est au roadmap.
 
+### Juste faire tourner un nœud (sans l'app)
+
+Le nœud est *headless* et se compile avec **Rust seul** — ni Node, ni npm, ni toolchain
+Tauri :
+
+```bash
+git clone https://github.com/nobodyohm-web/Quanta.git && cd Quanta
+./docs/ops/peer.sh start     # compile, lance, et attend d'avoir une identité réseau
+./docs/ops/peer.sh status    # peers, hauteur, solde, et la ligne TIP@ à comparer
+./docs/ops/peer.sh update    # affiche les commits entrants, puis recompile et relance
+```
+
+Guide pas à pas pour quelqu'un qui découvre le dépôt, avec la lecture du `status` et le
+tableau des pannes courantes : [`docs/ops/RUN-WITH-A-FRIEND.md`](docs/ops/RUN-WITH-A-FRIEND.md).
+
 ---
 
 ## 🗂️ Structure
@@ -279,6 +294,9 @@ Par ordre de ce qui bloque réellement :
 - [`WHITEPAPER.md`](WHITEPAPER.md) · [`WHITEPAPER_FR.md`](WHITEPAPER_FR.md) — whitepaper.
 - [`docs/ops/QUICKSTART.md`](docs/ops/QUICKSTART.md) — lancer l'app, le nœud headless, le RPC,
   et le test scripté à deux machines.
+- [`docs/ops/RUN-WITH-A-FRIEND.md`](docs/ops/RUN-WITH-A-FRIEND.md) — faire tourner un nœud
+  quand on n'a pas écrit ce code : installation, lecture du `status`, réception d'un correctif,
+  et le tableau des pannes courantes.
 - [`docs/audit/`](docs/audit/) — audit interne du 25/07/2026, threat model, périmètre, RFQ.
 - [`docs/decisions/`](docs/decisions/) — registre des ADR (validator set, fork-choice, slashing,
   gouvernance, portée du post-quantique…) : chaque décision avec l'alternative écartée.

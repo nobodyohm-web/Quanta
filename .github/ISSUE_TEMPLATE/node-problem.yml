@@ -1,0 +1,48 @@
+name: Node problem (running a peer)
+description: Your node will not start, finds no peer, or disagrees with another machine.
+labels: ["node", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: run `./docs/ops/peer.sh report` and attach the file it writes.
+        It carries the node state, the chain as your machine sees it, and the last
+        300 log lines — with the vault password and the RPC cookie stripped out.
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What is happening
+      options:
+        - "peers stays 0 — no peer is ever found"
+        - "the node exits shortly after start"
+        - "peers > 0 but the two machines report different TIP@ lines"
+        - "the chain height stops advancing"
+        - "something else"
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `./docs/ops/peer.sh status`
+      description: From BOTH machines if you have both. The `build` and `TIP@` lines are what settle most questions.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: network
+    attributes:
+      label: Network on each side
+      description: "e.g. home Wi-Fi / 4G hotspot / corporate LAN / VPN on. Blocked outbound UDP is the most common cause of no discovery, and it is not a code problem."
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Report file
+      description: Drag the file written by `./docs/ops/peer.sh report` into this box.
+    validations:
+      required: false
