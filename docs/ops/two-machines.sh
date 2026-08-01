@@ -139,7 +139,15 @@ echo "  Expected: identical height and tip on both sides (convergence),"
 echo "            and >= 2 distinct payees (REWARD-SHARE-1 in the wild)."
 
 # --- (4) survive a restart (RDV-0) ---------------------------------------
+# The network identity is the 32-byte `node_key` file, NOT `getinfo.node_id` —
+# that RPC field is BLAKE3 of a fresh UUID minted in `WillowNode::new()`, so it
+# changes on every boot by design and says nothing about the Iroh endpoint.
+# Comparing the key file tests what RDV-0 actually promises: lose it and every
+# ticket ever handed out goes stale.
 say "Restart test — stopping the node, then bringing it back…"
+KEYCOPY="$DIR/node_key.before-restart"
+cp "$DIR/node_key" "$KEYCOPY" 2>/dev/null || fail "no node_key to compare — RDV-0 never persisted one"
+
 kill $NODE_PID 2>/dev/null; wait $NODE_PID 2>/dev/null
 sleep 3
 RUST_LOG=info "$BIN" --data-dir "$DIR" --rpc-addr "$RPC" --mine >> "$LOG" 2>&1 &
@@ -151,15 +159,22 @@ for _ in $(seq 1 90); do
   if [ "${P:-0}" -gt 0 ] 2>/dev/null; then BACK=$(( $(date +%s) - T0 )); break; fi
   sleep 2
 done
-NODEID2=$(field node_id "$(rpc getinfo)")
 
-if [ -n "$BACK" ] && [ "$NODEID2" = "$NODEID" ]; then
-  ok "(4) RESTART — peer refound in ${BACK}s, NodeId unchanged"
-elif [ "$NODEID2" != "$NODEID" ]; then
-  fail "(4) FAILED — NodeId changed across restart: $NODEID -> $NODEID2"
-  echo "  RDV-0 is broken: every previously issued ticket is now stale."
+if cmp -s "$KEYCOPY" "$DIR/node_key"; then
+  KEYMSG="network identity preserved"
 else
-  fail "(4) FAILED — peer not refound within 3 min (NodeId is stable)"
+  fail "(4) FAILED — node_key changed across restart"
+  echo "  RDV-0 is broken: every previously issued ticket is now stale."
+  KEYMSG="IDENTITY LOST"
+fi
+rm -f "$KEYCOPY"
+
+if [ -n "$BACK" ]; then
+  ok "(4) RESTART — peer refound in ${BACK}s, $KEYMSG"
+else
+  fail "(4) peer not refound within 3 min ($KEYMSG)"
+  echo "  Note: if BOTH machines restart at the same moment, each is waiting on the"
+  echo "  other's next DHT republish — stagger the restarts and re-run this step."
 fi
 
 say "Done. Full log: $LOG"
