@@ -115,9 +115,13 @@ INFO=$(rpc getinfo)
 H=$(field height "$INFO")
 PEERS=$(field peers "$INFO")
 FINAL=$(field finalized_height "$INFO")
-# The block's own `hash` is serialized after `transactions` and `prev_hash`
-# (see ledger_types::Block), so the last match is the block hash, not a tx hash.
-TIP=$(rpc getblock "{\"height\":$((H - 1))}" | grep -o '"hash":"[0-9a-f]*"' | tail -1 | cut -d'"' -f4)
+# `head -1`, not `tail -1`: the RPC emits JSON objects with keys in alphabetical
+# order, so the block's own "hash" comes before "transactions" — and every tx
+# carries a "hash" of its own. Taking the last match compares the tip's last
+# transaction instead of the tip, which happens to agree most of the time and is
+# wrong exactly when it matters (an empty tip block falls back to the real hash,
+# so the two machines would then be comparing two different things).
+TIP=$(rpc getblock "{\"height\":$((H - 1))}" | grep -o '"hash":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
 
 # Distinct reward recipients over the last five blocks — REWARD-SHARE-1 live.
 FROM=$((H > 5 ? H - 5 : 0))

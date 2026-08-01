@@ -132,6 +132,22 @@ que le P2P fonctionne.
 
 ## 6. Deux nœuds qui se parlent (P2P)
 
+### Le chemin le plus court : `peer.sh`
+
+Pour quelqu'un qui découvre le dépôt — un ami à qui tu demandes de lancer un nœud —
+tout est dans un seul script, et il ne demande **que Rust** (pas de Node, pas de
+toolchain Tauri) :
+
+```bash
+./docs/ops/peer.sh start     # compile, lance en tâche de fond, attend l'identité réseau
+./docs/ops/peer.sh status    # peers, hauteur, solde, et la ligne TIP@ à comparer
+./docs/ops/peer.sh update    # affiche les commits entrants, recompile, relance
+./docs/ops/peer.sh report    # diagnostic partageable, secrets retirés
+```
+
+Guide pas à pas côté invité : [`RUN-WITH-A-FRIEND.md`](RUN-WITH-A-FRIEND.md). La suite
+de cette section est la version manuelle, utile pour comprendre ce que fait le script.
+
 ### Sur une seule machine (utile, mais limité)
 
 Deux daemons avec des data-dirs, des mots de passe et des ports **distincts** :
