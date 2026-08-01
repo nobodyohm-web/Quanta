@@ -460,7 +460,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 "active_miners": miners.active_miners,
                 "miner_window_blocks": miners.window_blocks,
                 "online": status.is_online,
-                "node_id": status.node_id,
+                // The Iroh EndpointId — stable across restarts (it is derived
+                // from the persisted `node_key`), and the same string a peer
+                // dials. Empty until the endpoint binds. Until v3.15.1 this
+                // reported a per-process random value instead, so anything
+                // keying on it saw a different "node" after every restart.
+                "node_id": status.peer_id,
                 "address": address,
             }))
         }
@@ -1022,6 +1027,37 @@ mod tests {
         assert!(info["minted_uqta"].is_number());
         assert_eq!(info["max_supply_uqta"], json!(crate::p2p::reputation::MAX_SUPPLY_MICRO));
         assert!(info["blocks"].is_number());
+    }
+
+    /// `getinfo.node_id` is the node's network identity — the Iroh EndpointId,
+    /// derived from the persisted `node_key`, and the exact string a peer
+    /// dials. It is NOT a per-process value.
+    ///
+    /// It used to be `BLAKE3(Uuid::new_v4())`, minted in `WillowNode::new()`:
+    /// a fresh 64-hex string on every boot that no peer could ever observe.
+    /// Anything keying on it — an operator dashboard, a deposit monitor, a
+    /// peer inventory — silently saw a different node after each restart.
+    /// This test pins the contract: with no endpoint bound there is no
+    /// identity, and the field must say so rather than invent one.
+    #[tokio::test]
+    async fn getinfo_node_id_is_the_network_identity_not_a_per_boot_value() {
+        let state = test_state().await;
+
+        let first = dispatch(&state, "getinfo", &json!({})).await.unwrap();
+        let second = dispatch(&state, "getinfo", &json!({})).await.unwrap();
+        assert_eq!(first["node_id"], second["node_id"], "identity is not re-drawn per call");
+
+        let node_id = first["node_id"].as_str().expect("node_id is a string");
+        assert!(
+            node_id.is_empty(),
+            "no endpoint is bound in a test state, so there is no identity to \
+             report — got {node_id:?}, which is the shape of the old bug: a \
+             plausible 64-hex value indistinguishable from a real EndpointId"
+        );
+
+        // It must track the one identity field, whatever the endpoint state is.
+        let status = state.node.get_status().await;
+        assert_eq!(first["node_id"], json!(status.peer_id));
     }
 
     #[tokio::test]

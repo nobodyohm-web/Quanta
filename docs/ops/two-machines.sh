@@ -139,11 +139,11 @@ echo "  Expected: identical height and tip on both sides (convergence),"
 echo "            and >= 2 distinct payees (REWARD-SHARE-1 in the wild)."
 
 # --- (4) survive a restart (RDV-0) ---------------------------------------
-# The network identity is the 32-byte `node_key` file, NOT `getinfo.node_id` —
-# that RPC field is BLAKE3 of a fresh UUID minted in `WillowNode::new()`, so it
-# changes on every boot by design and says nothing about the Iroh endpoint.
-# Comparing the key file tests what RDV-0 actually promises: lose it and every
-# ticket ever handed out goes stale.
+# Two independent witnesses of the same promise: the 32-byte `node_key` file on
+# disk, and the EndpointId the RPC reports. Checking both catches the case where
+# the key survives but the node fails to load it — which is precisely how the
+# old `getinfo.node_id` (a per-boot random value, fixed in v3.15.1) managed to
+# report "identity lost" while `node_key` sat untouched.
 say "Restart test — stopping the node, then bringing it back…"
 KEYCOPY="$DIR/node_key.before-restart"
 cp "$DIR/node_key" "$KEYCOPY" 2>/dev/null || fail "no node_key to compare — RDV-0 never persisted one"
@@ -153,19 +153,32 @@ sleep 3
 RUST_LOG=info "$BIN" --data-dir "$DIR" --rpc-addr "$RPC" --mine >> "$LOG" 2>&1 &
 NODE_PID=$!
 T0=$(date +%s)
+
+# The RPC answers before the endpoint binds, so read the identity only once the
+# node has one — otherwise an empty string reads as "identity changed".
+NODEID2=""
+for _ in $(seq 1 60); do
+  NODEID2=$(field node_id "$(rpc getinfo)")
+  [ -n "$NODEID2" ] && break
+  sleep 1
+done
+
 BACK=""
 for _ in $(seq 1 90); do
   P=$(field peers "$(rpc getinfo)")
   if [ "${P:-0}" -gt 0 ] 2>/dev/null; then BACK=$(( $(date +%s) - T0 )); break; fi
   sleep 2
 done
-
-if cmp -s "$KEYCOPY" "$DIR/node_key"; then
+if cmp -s "$KEYCOPY" "$DIR/node_key" && [ "$NODEID2" = "$NODEID" ]; then
   KEYMSG="network identity preserved"
-else
+elif ! cmp -s "$KEYCOPY" "$DIR/node_key"; then
   fail "(4) FAILED — node_key changed across restart"
   echo "  RDV-0 is broken: every previously issued ticket is now stale."
   KEYMSG="IDENTITY LOST"
+else
+  fail "(4) FAILED — node_key survived but the node reports a different EndpointId"
+  echo "  $NODEID -> $NODEID2 — the key is being persisted but not loaded."
+  KEYMSG="IDENTITY MISMATCH"
 fi
 rm -f "$KEYCOPY"
 

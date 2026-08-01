@@ -13,7 +13,7 @@ change you are considering is safe.
 Every pull request must pass all three CI jobs. They are the same commands you can run locally:
 
 ```bash
-cargo test   --manifest-path src-tauri/Cargo.toml                       # 508 tests + 1 integration
+cargo test   --manifest-path src-tauri/Cargo.toml                       # 513 tests + 1 integration
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo deny   --manifest-path src-tauri/Cargo.toml check                 # advisories · licenses · sources · bans
 npm run check && npm run build                                          # svelte-check 0/0

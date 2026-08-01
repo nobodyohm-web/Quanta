@@ -5,11 +5,11 @@
 
 <p>
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.15.0-informational">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.15.1-informational">
   <img alt="Protocole" src="https://img.shields.io/badge/protocole-TORUS%20v9-lightgrey">
   <img alt="Backend" src="https://img.shields.io/badge/backend-Rust%20%2B%20Tauri%202-orange">
   <img alt="Frontend" src="https://img.shields.io/badge/frontend-Svelte%205-ff3e00">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-508%20%2B%201-success">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-513%20%2B%201-success">
   <img alt="Status" src="https://img.shields.io/badge/status-alpha%20non%20audit%C3%A9-yellow">
 </p>
 
@@ -40,7 +40,7 @@ vérifiable dans le code et dans la suite de tests.
 | Gadget de finalité Casper-FFG **câblé en vivant** : votes, certificat ⅔, plancher irréversible, slashing STAKE→BURN, réconciliation de fork | Multisig M-of-N ML-DSA (on-chain, sans UX multi-partie ni test d'intégration) | **Valeur de marché** — QUANTA n'est coté nulle part, l'app n'affiche aucun prix |
 | Récompense de bloc **recalculée** par chaque nœud et **partagée** avec les participants récents (v9) | | Vrai VRF cryptographique + VDF (ADR-004 ouverte) |
 | Nœud headless + JSON-RPC (17 méthodes, authentifié) + explorateur web | | |
-| 508 tests + 1 test d'intégration, `clippy -D warnings` propre, svelte-check 0/0 | | |
+| 513 tests + 1 test d'intégration, `clippy -D warnings` propre, svelte-check 0/0 | | |
 
 Les points durs, dits franchement :
 
@@ -215,7 +215,7 @@ Prérequis : Node 18+, Rust stable, toolchain Tauri 2.
 npm install
 npm run tauri dev                                      # app de bureau, hot-reload
 
-cargo test --manifest-path src-tauri/Cargo.toml        # 508 tests + 1 intégration
+cargo test --manifest-path src-tauri/Cargo.toml        # 513 tests + 1 intégration
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 npm run check                                          # svelte-check (0 erreur / 0 warning)
 
