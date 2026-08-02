@@ -52,6 +52,11 @@ une dette *upstream*, Iroh attend un consensus d'industrie sur la signature
 post-quantique des EndpointIds. Elle n'authentifie ni l'argent, ni la finalité,
 ni les messages — seulement le point de terminaison réseau.
 
+Le raisonnement complet derrière ces choix — ce qu'un ordinateur quantique casse
+exactement, pourquoi une chaîne publique est un cas particulier, pourquoi l'hybride
+sur le transport et le PQ pur sur les signatures — est développé dans
+[`docs/POST-QUANTUM.md`](docs/POST-QUANTUM.md).
+
 ## Modèle de menace — ce qui est défendu
 
 - **Forge de transactions** : chaque tx est signée ML-DSA-65 par la clé liée à
