@@ -139,6 +139,10 @@ La clé ML-DSA est **dérivée de la graine** (XOF BLAKE3) : aucun secret suppl�
 Les secrets sont `zeroize`és après usage. Une adresse est `BLAKE3(ADDR_DOMAIN ‖ clé publique
 ML-DSA)`, présentée en Bech32m (`qta1…`).
 
+Pourquoi tout ça, et comment ça marche : [`docs/POST-QUANTUM.md`](docs/POST-QUANTUM.md) —
+le cours complet, de « qu'est-ce que Shor casse au juste » jusqu'aux tailles réelles et au
+vocabulaire, écrit pour être compris **et** réexpliqué.
+
 ---
 
 ## 🛡️ Sécurité du gossip
@@ -292,6 +296,10 @@ Par ordre de ce qui bloque réellement :
   protocole, la table des invariants avec leur lieu d'application, et les bugs qui ont façonné
   le design *(anglais)*.
 - [`WHITEPAPER.md`](WHITEPAPER.md) · [`WHITEPAPER_FR.md`](WHITEPAPER_FR.md) — whitepaper.
+- [`docs/POST-QUANTUM.md`](docs/POST-QUANTUM.md) — la cryptographie post-quantique expliquée
+  de bout en bout : ce que Shor casse, pourquoi c'est urgent sans machine quantique, les
+  familles de remplacement, les standards, le prix en octets, le glossaire, et l'inventaire
+  exact de Quanta.
 - [`docs/ops/QUICKSTART.md`](docs/ops/QUICKSTART.md) — lancer l'app, le nœud headless, le RPC,
   et le test scripté à deux machines.
 - [`docs/ops/RUN-WITH-A-FRIEND.md`](docs/ops/RUN-WITH-A-FRIEND.md) — faire tourner un nœud
