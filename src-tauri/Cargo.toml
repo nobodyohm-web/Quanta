@@ -135,7 +135,7 @@ dirs = "6"
 # déterministe depuis la graine Ed25519 (XOF BLAKE3) → zéro migration de vault.
 # Voir security/hybrid_crypto.rs.
 fips204 = "0.4.6"
-rand_core = "0.6"
+rand_core = "0.10"
 
 # ─── Phase 2B : Consensus CRDT ───────────────────────────────────
 crdts = "7"        # G-Counter, PN-Counter, OR-Set, LWW-Register
