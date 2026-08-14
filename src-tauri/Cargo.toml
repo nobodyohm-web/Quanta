@@ -63,7 +63,7 @@ iroh-gossip = "0.98"
 # already know; it cannot answer "who else runs Quanta?". We publish/read that
 # on BEP-44 mutable slots derived from the gossip topic (see `p2p/rendezvous.rs`).
 # Version pinned to what iroh 0.98 itself depends on — one DHT crate in the tree.
-mainline = "6"
+mainline = "8"
 
 # PQ-TRANSPORT-1 — rustls en dépendance **directe** uniquement pour activer la
 # feature `prefer-post-quantum`, qui fait préférer `X25519MLKEM768` dans la
