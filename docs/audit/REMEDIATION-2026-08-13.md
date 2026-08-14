@@ -262,3 +262,49 @@ cargo clippy --all-targets -- -D warnings    -> RC=0
 cargo deny --manifest-path src-tauri/Cargo.toml check -> advisories/bans/licenses/sources ok
 npx svelte-check                             -> 0 erreur, 0 avertissement
 ```
+
+---
+
+## 13. Quatrième passe (2026-08-14) — la CSP, puis le reste de la liste
+
+Cette passe commence par un aveu : **A13 était faux et livré sans avoir jamais été
+exécuté.** Le correctif remplaçait `script-src 'self' 'unsafe-inline'` par une
+politique en mode `hash`, ce qui est la bonne réponse — mais SvelteKit ne hashe
+que **ses** scripts inline. L'anti-flash de thème, écrit à la main dans
+`src/app.html`, n'était couvert par aucun hash : l'intersection des deux
+politiques le refusait. Rien n'échouait — ni le build, ni `svelte-check`, ni
+`clippy`. Le seul symptôme était à l'exécution : thème sombre repartant en clair,
+flash blanc, violation dans la console du webview. Un correctif de sécurité qui
+introduit une régression visuelle, invisible à toute la chaîne de vérification.
+
+Le script est parti dans `static/theme-boot.js`, chargé par `<script src>`
+synchrone : `'self'` est déjà dans les deux politiques et ne se périme jamais,
+contrairement à un hash écrit à la main. Et `scripts/check-csp.mjs` relit
+désormais le **bundle produit** à chaque CI : la propriété n'est pas dans le code
+source, elle est dans le fichier livré.
+
+| id | ce qui n'allait pas | correctif |
+|---|---|---|
+| **A13** (régression) | La CSP en mode `hash` refusait le script d'`app.html` ; personne ne l'avait exécutée | Script externalisé dans `static/`, garde-fou `check-csp.mjs` branché sur la CI, vérifié rouge |
+| **A10** | `listtransactions` : `from_height` sans plancher, boucle sans `.await` donc **non annulable**, sous le verrou de lecture du ledger. Le `limit` plafonnait la sortie, jamais le parcours | Fenêtre bornée à `MAX_LISTTX_SCAN_BLOCKS = 10 000` par `listtx_window()` — fonction pure, donc testable à des hauteurs qu'aucun ledger de test n'atteint. `truncated` et `scan_floor` disent à l'appelant que la réponse est partielle |
+| **A17** | La règle CSRF refusait **toute** origine, y compris la sienne : aucun client navigateur, pas même l'explorateur servi par ce serveur, ne pouvait dépenser. Défaillance en position sûre, mais le commentaire décrivait un comportement que le code n'avait pas | Égalité stricte `Origin` ⇄ `Host` (hôte **et** port). Un autre port de la boucle locale est une origine étrangère, `Origin: null` est refusé, un client sans en-tête reste servi |
+| **M-14** | Quatre vues linéaires en la hauteur construites **avant** tout rejet, sous le verrou d'écriture. L'attaquant payait O(1) pour faire payer O(hauteur) | Porte O(1) (horodatage + borne de taille) avant le moindre parcours ; `stats()` appelé une fois au lieu de deux sur le chemin heureux ; le wrapper `validate_block_emission`, devenu inutile, supprimé |
+| **R17** | L'éviction du tampon de fork allouait ~2 048 `String` par bloc offert, pour une décision qui n'en demande aucune | `worst_entry()` en O(log n) sans allocation : `\|tip − idx\|` est unimodale sur un ensemble ordonné, donc son maximum est à l'un des deux bords. Un test compare la décision au balayage complet sur 64 configurations tirées au sort |
+| **R7** | Registre de pseudos sans plafond, `rebuild_by_pk()` O(n) à chaque insertion : 21 ms par insertion à 100 000 entrées, 1 Go de JSON réécrit toutes les 30 s | voir `.audit_fixes/DONE_r7.md` |
+| **R9** | Ordre de composition DHT trié par octets d'`EndpointId`, donc **minable** : 8 identités à préfixe nul suffisaient à éclipser tout nouveau nœud à 100 % | voir `.audit_fixes/DONE_r9.md` |
+
+### Sur M-14, ce qui n'est pas corrigé
+
+Le chemin **heureux** reste O(hauteur). Le supprimer demande des vues
+incrémentales maintenues à l'insertion — un cache dont la moindre erreur devient
+une divergence de consensus, c'est-à-dire un fork. Cela mérite sa propre passe et
+son propre plan de test, pas une ligne en fin de liste.
+
+### Sur la manière de tester un coût
+
+M-14 a d'abord été « vérifié » par une mesure de temps qui passait au vert **avec
+et sans** le correctif : sur une chaîne de test, la vérification ML-DSA d'une
+seule transaction domine largement quelques centaines d'itérations triviales. Le
+test a été remplacé par un compteur `CHAIN_WALKS` compilé sous `#[cfg(test)]`,
+qui rend la propriété exacte et déterministe. Un test qui n'a jamais été rouge ne
+prouve rien — y compris, et surtout, quand il est vert.

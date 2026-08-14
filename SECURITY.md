@@ -159,7 +159,14 @@ bonnes ; ce sont les défenses **absentes** qui ouvraient le système, et elles
 | `MOY-3` | La préimage de revendication de pseudo était injective par accident de format, et ne nommait pas sa chaîne | **corrigé (14/08)** — encodage canonique + `CHAIN_ID` |
 | `BAS-1` | `address::parse` retombait sur l'hex : la somme de contrôle disparaissait sur les deux chemins de dépense | **corrigé (14/08)** — `parse` strict, `parse_hex_unchecked` nommé, avertissement à l'écran d'envoi |
 | `R14` `R15` | Trois fonctions publiques mortes qui produisaient des enveloppes rejetées en silence ; anti-rejeu et bans oubliés à chaque redémarrage | **corrigé (14/08)** — supprimées ; 8ᵉ clé de snapshot, restauration monotone |
-| **restant** | Grinding de la graine d'élection, prédictibilité sans VRF, `M-14` (validation O(hauteur)), séparation `ctx` FIPS-204 | **ouvert** — nommé et détaillé dans `docs/audit/REMEDIATION-2026-08-13.md` §9.6 et §11 |
+| `A13` | **Notre propre correctif CSP était faux et n'avait jamais été exécuté** : SvelteKit ne hashe que ses scripts, l'anti-flash de thème d'`app.html` était donc refusé — thème cassé au démarrage, rien de rouge dans la CI | **corrigé (14/08)** — script externalisé, `scripts/check-csp.mjs` relit le bundle produit à chaque CI |
+| `A10` | `listtransactions` : balayage sans plancher, sans point d'annulation, sous le verrou de lecture du ledger | **corrigé (14/08)** — fenêtre bornée à 10 000 blocs, `truncated` et `scan_floor` rendus à l'appelant |
+| `A17` | La règle CSRF refusait **toute** origine, y compris la sienne : aucun navigateur ne pouvait dépenser | **corrigé (14/08)** — égalité stricte `Origin` ⇄ `Host`, port compris |
+| `M-14` | Quatre parcours de toute l'histoire par bloc reçu, payés **avant** tout rejet : l'attaquant paie O(1), la victime O(hauteur) | **partiellement corrigé (14/08)** — porte O(1) avant les parcours ; le chemin heureux reste O(hauteur), voir §13 |
+| `R7` | Registre de pseudos sans plafond, réindexation O(n) à chaque insertion : 21 ms/insertion à 100 000 entrées, 1 Go réécrit toutes les 30 s | **corrigé (14/08)** — index incrémental (~265 ns), plafond 10 000 par **refus** et non par éviction |
+| `R9` | Ordre de composition DHT trié par octets d'`EndpointId`, donc minable : 8 identités à préfixe nul éclipsaient tout nouveau nœud à 100 % | **corrigé (14/08)** — trois mélanges `OsRng` par cycle, 2 pairs adoptés par slot au maximum |
+| `R17` | Éviction du tampon de fork en O(n) avec ~2 048 allocations par bloc offert — **et** des index fantômes qu'aucune borne ne comptait | **corrigé (14/08)** — recherche aux bords en O(log n) sans allocation ; la fuite de clés, trouvée par ce correctif, est fermée |
+| **restant** | Grinding de la graine d'élection, prédictibilité sans VRF, coût O(hauteur) du chemin heureux (M-14), séparation `ctx` FIPS-204, revendication de pseudo gratuite (R7 §ouvert) | **ouvert** — nommé et détaillé dans `docs/audit/REMEDIATION-2026-08-13.md` §9.6, §11 et §13 |
 
 **Ce qui reste vrai malgré tout** : la liaison intrinsèque adresse↔clé
 (`from == BLAKE3(ADDR_DOMAIN ‖ pk)`), l'indépendance réelle de la racine ML-DSA

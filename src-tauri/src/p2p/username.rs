@@ -20,7 +20,7 @@
 
 use crate::security::CryptoEngine;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
 
@@ -78,6 +78,10 @@ pub enum UsernameError {
     /// R2 (CLAIM-WINDOW-1) — `claimed_at` hors bornes : antérieur au protocole,
     /// ou dans le futur au-delà de la dérive tolérée.
     InvalidClaimTime,
+    /// R7 (REGISTRY-CAP-1) — le registre a atteint [`MAX_USERNAME_RECORDS`] et
+    /// la revendication porte sur un pseudo **inconnu**. Refus, jamais éviction :
+    /// voir la justification sur la constante.
+    RegistryFull,
 }
 
 // ─── Normalisation & validation ──────────────────────────────────────────────
@@ -297,6 +301,48 @@ pub fn normalize_code(input: &str) -> String {
 
 // ─── Registre ────────────────────────────────────────────────────────────────
 
+/// **R7 (AUDIT-2026-08-13) — REGISTRY-CAP-1 : le registre n'avait aucune borne,
+/// et on choisit de REFUSER au plafond plutôt que d'ÉVINCER.**
+///
+/// `apply` ne regardait jamais `by_name.len()`. Un enregistrement pèse ~10,7 Ko
+/// (clé ML-DSA de 3 904 caractères hex + signature de 6 618) et l'espace de noms
+/// `[a-z][a-z0-9_]{2,19}` est astronomique. L'audit a mesuré 3 000 revendications
+/// par minute avec 100 clés d'expéditeur : 100 000 entrées et **1 Go de RAM** en
+/// 33 minutes — 1 Go que `state_persistence` réécrit **en entier** dès que la clé
+/// `usernames` change (amplification : 10,7 Ko reçus → 1 Go écrit sur disque).
+///
+/// **Pourquoi refuser et non évincer.** Une éviction serait une fonction pure de
+/// l'état local, mais l'état local n'est pas le même partout : deux nœuds n'ont
+/// jamais reçu le même sous-ensemble de revendications au même instant, ils
+/// n'évinceraient donc pas la même entrée, et l'éviction est irréversible côté
+/// gossip. Pire, elle **rouvre R2** : supprimer un pseudo supprime aussi son
+/// `first_seen`, donc sa fenêtre de contestation ; le pseudo redevient libre et
+/// le premier antidatage venu le prend. On échangerait un déni de service contre
+/// un détournement d'adresse de paiement — exactement ce que R2 vient de fermer.
+/// Le refus, lui, garde le registre **monotone** : rien n'est jamais retiré,
+/// aucun pseudo ne change de propriétaire hors des règles R2. Un nœud saturé
+/// ignore des pseudos qu'un autre connaît (« je ne connais pas @x ») mais ne leur
+/// attribue jamais un autre propriétaire (« @x appartient à quelqu'un d'autre ») :
+/// la divergence résiduelle est une absence, pas un conflit, et un paiement échoue
+/// au lieu de partir chez le mauvais destinataire.
+///
+/// **Pourquoi 10 000.** Aucun plafond n'est hors de portée : à 3 000 revendications
+/// par minute et pour zéro coût, n'importe quelle borne tombe en quelques minutes.
+/// Le plafond ne protège donc pas la disponibilité du namespace, seulement les
+/// ressources du nœud, et il se choisit sur ce seul budget : 10 000 × 10,7 Ko ≈
+/// 107 Mo de pire cas, en RAM comme en JSON persisté — du même ordre que le reste
+/// de l'état d'un nœud de bureau, contre ~535 Mo pour les 50 000 suggérés par
+/// l'audit. Au-delà, une revendication de pseudo inconnu est refusée en O(1)
+/// **sans vérification ML-DSA** : ni RAM, ni disque, ni CPU. Rendre la
+/// disponibilité du namespace au réseau demande de faire *payer* la revendication
+/// (une transaction du ledger) ; c'est une rupture de protocole, elle n'est pas
+/// faite ici.
+///
+/// Le plafond ne s'applique qu'aux pseudos **inconnus** : un pseudo déjà présent
+/// reste arbitrable par les règles R2, sinon saturer le registre reviendrait à
+/// figer tous les vols en cours.
+pub const MAX_USERNAME_RECORDS: usize = 10_000;
+
 /// Snapshot sérialisable (persistance SQLite, comme les autres stores).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsernameRegistrySnapshot {
@@ -315,8 +361,14 @@ pub struct UsernameRegistrySnapshot {
 pub struct UsernameRegistry {
     /// `username` → record (source de vérité).
     by_name: HashMap<String, UsernameRecord>,
-    /// `owner_pk` → pseudo principal (dérivé, pour l'affichage en O(1)).
-    by_pk: HashMap<String, String>,
+    /// `owner_pk` → pseudos détenus, ordonnés par `(claimed_at, username)` ; le
+    /// premier élément est le pseudo principal (affichage en O(1)).
+    ///
+    /// R7 : cet ensemble **ordonné** est ce qui rend l'index incrémental. Avec le
+    /// simple `owner_pk → pseudo` d'avant, retirer un pseudo à son propriétaire
+    /// (cas `Replaced`) ne disait pas quel pseudo devait le remplacer — il fallait
+    /// reparcourir tout `by_name` pour le retrouver.
+    by_pk: HashMap<String, BTreeSet<(u64, String)>>,
     /// R2 — `username` → première observation locale du détenteur courant.
     first_seen: HashMap<String, u64>,
 }
@@ -333,16 +385,23 @@ impl UsernameRegistry {
         }
     }
 
+    /// R7 : la restauration ne **tronque pas** un instantané plus grand que
+    /// [`MAX_USERNAME_RECORDS`]. Ce que porte le disque est notre propre état
+    /// passé, pas une entrée hostile fraîche, et le supprimer effacerait les
+    /// `first_seen` correspondants — donc rouvrirait R2 sur les pseudos jetés. Un
+    /// nœud gonflé par un flood antérieur au correctif reste gonflé mais cesse de
+    /// croître : le plafond arrête la croissance, il ne rétrécit pas.
     pub fn restore(snap: UsernameRegistrySnapshot) -> Self {
-        let mut s = Self::default();
+        let mut s = Self {
+            // R2 : un pseudo restauré sans date de première observation est réputé
+            // définitif (`first_seen` absent ⇒ fenêtre fermée). C'est le défaut sûr :
+            // une base d'avant le correctif ne rouvre pas la porte au vol.
+            first_seen: snap.first_seen,
+            ..Default::default()
+        };
         for r in snap.records {
-            s.by_name.insert(r.username.clone(), r);
+            s.insert_record(r);
         }
-        // R2 : un pseudo restauré sans date de première observation est réputé
-        // définitif (`first_seen` absent ⇒ fenêtre fermée). C'est le défaut sûr :
-        // une base d'avant le correctif ne rouvre pas la porte au vol.
-        s.first_seen = snap.first_seen;
-        s.rebuild_by_pk();
         s
     }
 
@@ -350,25 +409,46 @@ impl UsernameRegistry {
         self.by_name.len()
     }
 
-    /// Reconstruit l'index inverse `pk → pseudo principal`. Le pseudo principal
-    /// d'une clé qui en détient plusieurs est le plus ancien (`claimed_at`),
-    /// départagé par ordre alphabétique — déterministe.
-    fn rebuild_by_pk(&mut self) {
-        self.by_pk.clear();
-        for rec in self.by_name.values() {
-            match self.by_pk.get(&rec.owner_pk) {
-                Some(current) => {
-                    let cur = &self.by_name[current];
-                    if (rec.claimed_at, rec.username.as_str())
-                        < (cur.claimed_at, cur.username.as_str())
-                    {
-                        self.by_pk.insert(rec.owner_pk.clone(), rec.username.clone());
-                    }
-                }
-                None => {
-                    self.by_pk.insert(rec.owner_pk.clone(), rec.username.clone());
-                }
-            }
+    /// **R7 (AUDIT-2026-08-13) — l'index inverse se met à jour en O(log k) au lieu
+    /// d'être reconstruit en O(n) à chaque message.**
+    ///
+    /// Toute insertion réussie appelait `rebuild_by_pk()`, qui vidait `by_pk` et
+    /// reparcourait l'intégralité de `by_name` : 191 µs par insertion sur un
+    /// registre vide, 4,28 ms à 25 000 entrées, 21,0 ms à 100 000 (mesures release
+    /// de l'audit). Linéaire par message, donc quadratique sur la durée — environ
+    /// 17 minutes de CPU pour 100 000 insertions, sur la tâche même qui fait
+    /// tourner le nœud.
+    ///
+    /// Point de passage **unique** de toute écriture de `by_name` : l'entrée
+    /// remplacée sort de l'index avant que la nouvelle n'y entre. C'est ce qui
+    /// couvre le cas `Replaced`, où l'ancien propriétaire perd ce pseudo et doit
+    /// retomber sur le suivant qu'il détient — ou disparaître de l'index s'il n'en
+    /// détient plus aucun. Un index purement additif garderait ici un pseudo qui
+    /// ne lui appartient plus.
+    fn insert_record(&mut self, rec: UsernameRecord) {
+        let owner_pk = rec.owner_pk.clone();
+        let username = rec.username.clone();
+        let claimed_at = rec.claimed_at;
+        if let Some(previous) = self.by_name.insert(username.clone(), rec) {
+            self.index_remove(&previous);
+        }
+        self.by_pk
+            .entry(owner_pk)
+            .or_default()
+            .insert((claimed_at, username));
+    }
+
+    /// Retire un enregistrement de l'index inverse. La clé disparaît de `by_pk`
+    /// quand elle ne détient plus rien : sans ça, l'index accumulerait une entrée
+    /// morte par revendication perdue, soit une seconde fuite non bornée.
+    fn index_remove(&mut self, rec: &UsernameRecord) {
+        let mut emptied = false;
+        if let Some(names) = self.by_pk.get_mut(&rec.owner_pk) {
+            names.remove(&(rec.claimed_at, rec.username.clone()));
+            emptied = names.is_empty();
+        }
+        if emptied {
+            self.by_pk.remove(&rec.owner_pk);
         }
     }
 
@@ -380,15 +460,26 @@ impl UsernameRegistry {
     }
 
     /// Pseudo principal détenu par une clé (pour afficher `@alex` au lieu de la
-    /// clé partout dans l'UI).
+    /// clé partout dans l'UI). Le principal d'une clé qui détient plusieurs
+    /// pseudos est le plus ancien (`claimed_at`), départagé par ordre
+    /// alphabétique — c'est l'ordre de l'ensemble, donc une lecture en tête.
     pub fn username_of(&self, owner_pk: &str) -> Option<String> {
-        self.by_pk.get(owner_pk).cloned()
+        self.by_pk
+            .get(owner_pk)
+            .and_then(|names| names.first())
+            .map(|(_, name)| name.clone())
     }
 
-    /// Un pseudo est-il disponible (valide ET non pris) ?
+    /// Un pseudo est-il disponible (valide, non pris, ET acceptable) ?
+    ///
+    /// R7 : le plafond entre dans la réponse. Sans ça, l'UI annoncerait « libre »
+    /// un pseudo que `apply` refuse aussitôt par [`UsernameError::RegistryFull`] —
+    /// l'utilisateur croirait à un bug plutôt qu'à un registre saturé.
     pub fn is_available(&self, input: &str) -> bool {
         let name = normalize_username(input);
-        validate_username(&name).is_ok() && !self.by_name.contains_key(&name)
+        validate_username(&name).is_ok()
+            && !self.by_name.contains_key(&name)
+            && self.by_name.len() < MAX_USERNAME_RECORDS
     }
 
     pub fn get(&self, input: &str) -> Option<&UsernameRecord> {
@@ -418,6 +509,18 @@ impl UsernameRegistry {
     /// - contestation d'un pseudo observé depuis plus de
     ///   [`CLAIM_CONTEST_WINDOW_SECS`] — l'ancienneté antidatée ne déloge plus un
     ///   détenteur établi.
+    ///
+    /// **R7 (AUDIT-2026-08-13) — on décide avant de payer la cryptographie.**
+    /// La vérification ML-DSA (~150 µs) était en tête de fonction, donc payée par
+    /// **tout** message, y compris ceux dont l'arbitrage est déjà connu : un
+    /// doublon rediffusé par le gossip, une contestation qui perd le départage,
+    /// une contestation hors fenêtre. Un attaquant obtenait 150 µs de calcul par
+    /// message pour des revendications qui n'avaient aucune chance de changer
+    /// l'état. La signature n'est désormais vérifiée que sur les deux chemins qui
+    /// **écrivent** — insertion d'un pseudo libre et remplacement gagnant — plus le
+    /// refus de plafond qui, lui, tombe avant. Un enregistrement identique au
+    /// détenteur en place n'a pas besoin d'être revérifié : il l'a été à son
+    /// insertion, et l'égalité est octet à octet.
     pub fn apply_at(
         &mut self,
         rec: UsernameRecord,
@@ -434,15 +537,19 @@ impl UsernameRegistry {
         if !claim_time_in_bounds(rec.claimed_at, now) {
             return Err(UsernameError::InvalidClaimTime);
         }
-        verify_sig(&rec)?;
 
-        let outcome = match self.by_name.get(&rec.username) {
-            None => {
-                self.first_seen.insert(rec.username.clone(), now);
-                self.by_name.insert(rec.username.clone(), rec);
-                ApplyOutcome::Inserted
-            }
-            Some(existing) if existing == &rec => ApplyOutcome::AlreadyPresent,
+        /// Ce que la revendication ferait au registre. Calculé pendant qu'on tient
+        /// une vue en lecture de `by_name`, appliqué après l'avoir relâchée.
+        enum Decision {
+            Insert,
+            AlreadyPresent,
+            Keep,
+            Replace,
+        }
+
+        let decision = match self.by_name.get(&rec.username) {
+            None => Decision::Insert,
+            Some(existing) if existing == &rec => Decision::AlreadyPresent,
             Some(existing) => {
                 // R2 : la fenêtre de contestation. `first_seen` absent (instantané
                 // d'avant le correctif) ⇒ pseudo réputé définitif.
@@ -451,20 +558,37 @@ impl UsernameRegistry {
                     .get(&rec.username)
                     .is_some_and(|seen| now <= seen.saturating_add(CLAIM_CONTEST_WINDOW_SECS));
                 if contestable && challenger_wins(&rec, existing) {
-                    // La fenêtre court depuis la PREMIÈRE observation du pseudo,
-                    // pas de chaque changement de détenteur : sinon une chaîne de
-                    // contestations la rouvrirait indéfiniment.
-                    self.by_name.insert(rec.username.clone(), rec);
-                    ApplyOutcome::Replaced
+                    Decision::Replace
                 } else {
-                    ApplyOutcome::Kept
+                    Decision::Keep
                 }
             }
         };
-        if matches!(outcome, ApplyOutcome::Inserted | ApplyOutcome::Replaced) {
-            self.rebuild_by_pk();
+
+        match decision {
+            Decision::Insert => {
+                // R7 : le plafond ne mord que sur les pseudos inconnus, et il mord
+                // avant la vérification ML-DSA — sinon le refus resterait un
+                // amplificateur CPU gratuit une fois le registre saturé.
+                if self.by_name.len() >= MAX_USERNAME_RECORDS {
+                    return Err(UsernameError::RegistryFull);
+                }
+                verify_sig(&rec)?;
+                self.first_seen.insert(rec.username.clone(), now);
+                self.insert_record(rec);
+                Ok(ApplyOutcome::Inserted)
+            }
+            Decision::AlreadyPresent => Ok(ApplyOutcome::AlreadyPresent),
+            Decision::Keep => Ok(ApplyOutcome::Kept),
+            Decision::Replace => {
+                verify_sig(&rec)?;
+                // La fenêtre court depuis la PREMIÈRE observation du pseudo, pas de
+                // chaque changement de détenteur : sinon une chaîne de contestations
+                // la rouvrirait indéfiniment. `first_seen` n'est donc pas touché ici.
+                self.insert_record(rec);
+                Ok(ApplyOutcome::Replaced)
+            }
         }
-        Ok(outcome)
     }
 }
 
@@ -887,5 +1011,181 @@ mod tests {
             "R2 : sans première observation connue, le pseudo est gelé (défaut sûr)"
         );
         assert_eq!(restored.resolve("alex").as_deref(), Some(victim.as_str()));
+    }
+
+    // ── R7 (AUDIT-2026-08-13) — index incrémental et plafond du registre ──────
+
+    /// Rebuild intégral de l'index inverse, écrit ici et **nulle part ailleurs** :
+    /// c'est exactement le parcours O(n) que la production n'a plus le droit de
+    /// faire. Il sert d'oracle à l'index incrémental.
+    fn reference_primary_index(reg: &UsernameRegistry) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        for rec in reg.by_name.values() {
+            let better = match out.get(&rec.owner_pk) {
+                Some(current) => {
+                    let cur = &reg.by_name[current];
+                    (rec.claimed_at, rec.username.as_str())
+                        < (cur.claimed_at, cur.username.as_str())
+                }
+                None => true,
+            };
+            if better {
+                out.insert(rec.owner_pk.clone(), rec.username.clone());
+            }
+        }
+        out
+    }
+
+    /// Ce que l'index incrémental répond réellement, clé par clé. Un ensemble vide
+    /// laissé dans `by_pk` est une fuite d'entrée morte : on le fait échouer ici.
+    fn live_primary_index(reg: &UsernameRegistry) -> HashMap<String, String> {
+        reg.by_pk
+            .iter()
+            .map(|(pk, names)| {
+                let (_, name) = names
+                    .first()
+                    .expect("R7 : aucun ensemble vide ne doit subsister dans by_pk");
+                (pk.clone(), name.clone())
+            })
+            .collect()
+    }
+
+    /// **R7 — l'index incrémental doit rendre *exactement* le rebuild complet.**
+    /// C'est la seule chose que le remplacement de `rebuild_by_pk` peut casser :
+    /// un `Replaced` retire un pseudo à son ancien propriétaire, et un index qui
+    /// ne ferait qu'ajouter lui laisserait un pseudo qui ne lui appartient plus —
+    /// donc l'UI afficherait `@alex` pour la clé du perdant.
+    #[test]
+    fn r7_the_incremental_reverse_index_equals_a_full_rebuild() {
+        let mut reg = UsernameRegistry::new();
+
+        // La clé 1 détient deux pseudos ; son principal est le plus ancien.
+        assert_eq!(reg.apply_at(record(1, "zoe", 300), NOW).unwrap(), ApplyOutcome::Inserted);
+        assert_eq!(reg.apply_at(record(1, "alex", 200), NOW).unwrap(), ApplyOutcome::Inserted);
+        assert_eq!(reg.username_of(&addr(1)).as_deref(), Some("alex"));
+
+        // La clé 2 conteste "alex" plus ancienne et gagne : la clé 1 perd "alex"
+        // et doit retomber sur "zoe".
+        assert_eq!(reg.apply_at(record(2, "alex", 100), NOW).unwrap(), ApplyOutcome::Replaced);
+        assert_eq!(reg.username_of(&addr(1)).as_deref(), Some("zoe"));
+        assert_eq!(reg.username_of(&addr(2)).as_deref(), Some("alex"));
+
+        // La clé 3 ne détient qu'un pseudo et se le fait prendre : elle doit
+        // DISPARAÎTRE de l'index, pas y rester attachée au pseudo d'un autre.
+        assert_eq!(reg.apply_at(record(3, "bob", 300), NOW).unwrap(), ApplyOutcome::Inserted);
+        assert_eq!(reg.apply_at(record(4, "bob", 100), NOW).unwrap(), ApplyOutcome::Replaced);
+        assert_eq!(reg.username_of(&addr(3)), None);
+        assert_eq!(reg.username_of(&addr(4)).as_deref(), Some("bob"));
+
+        // Contestation perdante, doublon, contestation hors fenêtre : trois
+        // chemins qui ne doivent toucher à rien.
+        assert_eq!(reg.apply_at(record(5, "alex", 400), NOW).unwrap(), ApplyOutcome::Kept);
+        let again = reg.apply_at(record(2, "alex", 100), NOW).unwrap();
+        assert_eq!(again, ApplyOutcome::AlreadyPresent);
+        let late = NOW + CLAIM_CONTEST_WINDOW_SECS + 1;
+        assert_eq!(reg.apply_at(record(6, "zoe", 1), late).unwrap(), ApplyOutcome::Kept);
+
+        assert_eq!(
+            live_primary_index(&reg),
+            reference_primary_index(&reg),
+            "R7 : l'index tenu à jour message par message doit être indiscernable du rebuild"
+        );
+
+        // Un redémarrage repart du même index — `restore` emprunte le même chemin.
+        let restored = UsernameRegistry::restore(reg.snapshot());
+        assert_eq!(live_primary_index(&restored), reference_primary_index(&restored));
+        assert_eq!(restored.username_of(&addr(1)).as_deref(), Some("zoe"));
+        assert_eq!(restored.username_of(&addr(3)), None);
+    }
+
+    /// **R7 — au plafond, un pseudo inconnu est refusé, sans éviction et sans
+    /// vérification de signature.** Le refus, et non l'éviction, est ce qui garde
+    /// le registre monotone : rien ne sort, donc aucun `first_seen` n'est effacé,
+    /// donc R2 n'est pas rouvert. Et le refus tombe avant le ML-DSA, sinon un
+    /// registre saturé resterait un amplificateur CPU à 150 µs par message.
+    #[test]
+    fn r7_beyond_the_cap_an_unknown_name_is_refused_before_any_signature_check() {
+        let mut reg = UsernameRegistry::new();
+        assert_eq!(reg.apply_at(record(1, "alex", 200), NOW).unwrap(), ApplyOutcome::Inserted);
+
+        // On sature le registre sans payer 10 000 signatures ML-DSA : le plafond ne
+        // regarde que la cardinalité. Les enregistrements passent par le même point
+        // d'écriture que la production, donc l'index reste cohérent.
+        let squatter = "11".repeat(32);
+        let mut i = 0usize;
+        while reg.count() < MAX_USERNAME_RECORDS {
+            let name = format!("pad{i:06}");
+            reg.first_seen.insert(name.clone(), T0);
+            reg.insert_record(UsernameRecord {
+                username: name,
+                owner_pk: squatter.clone(),
+                owner_key: String::new(),
+                claimed_at: T0,
+                signature: String::new(),
+            });
+            i += 1;
+        }
+        assert_eq!(reg.count(), MAX_USERNAME_RECORDS);
+
+        // Pseudo inconnu → refus.
+        let mut fresh = record(7, "newcomer", 300);
+        assert_eq!(
+            reg.apply_at(fresh.clone(), NOW).unwrap_err(),
+            UsernameError::RegistryFull,
+            "R7 : au plafond, un pseudo inconnu n'entre pas"
+        );
+        // Même refus avec une signature manifestement fausse : la preuve qu'aucune
+        // vérification ML-DSA n'a été payée avant de dire non.
+        fresh.signature = "00".repeat(16);
+        assert_eq!(
+            reg.apply_at(fresh, NOW).unwrap_err(),
+            UsernameError::RegistryFull,
+            "R7 : le plafond est évalué AVANT la vérification de signature"
+        );
+
+        // Le plafond ne fige pas les pseudos déjà connus : R2 continue d'arbitrer,
+        // sinon saturer le registre reviendrait à valider tous les vols en cours.
+        assert_eq!(reg.apply_at(record(8, "alex", 100), NOW).unwrap(), ApplyOutcome::Replaced);
+        assert_eq!(reg.resolve("alex").as_deref(), Some(addr(8).as_str()));
+
+        // Rien n'a été évincé et rien n'a débordé : l'état est monotone.
+        assert_eq!(reg.count(), MAX_USERNAME_RECORDS, "un remplacement n'ajoute pas d'entrée");
+        assert!(
+            reg.resolve("pad000000").is_some(),
+            "aucun pseudo n'a été jeté pour faire de la place"
+        );
+        // L'UI ne doit pas annoncer libre ce que le registre va refuser.
+        assert!(!reg.is_available("newcomer"), "R7 : au plafond, plus rien n'est disponible");
+    }
+
+    /// **R7 — une revendication qui ne peut rien changer ne paie plus de
+    /// vérification ML-DSA.** C'était 150 µs de calcul offerts par message à un
+    /// attaquant qui rediffusait des revendications perdantes ou hors fenêtre.
+    /// La contrepartie assumée : ces messages sont ignorés au lieu d'être signalés
+    /// comme mal signés — aucun appelant ne distingue les deux, tous deux
+    /// n'écrivent rien.
+    #[test]
+    fn r7_a_claim_that_cannot_win_costs_no_signature_check() {
+        let mut reg = UsernameRegistry::new();
+        reg.apply_at(record(1, "alex", 100), NOW).unwrap();
+
+        // Contestation perdante (date postérieure) à signature bidon : ignorée
+        // sans être vérifiée.
+        let mut loser = record(2, "alex", 500);
+        loser.signature = "ff".repeat(16);
+        assert_eq!(reg.apply_at(loser, NOW).unwrap(), ApplyOutcome::Kept);
+
+        // Hors fenêtre de contestation, plus rien n'est arbitrable : même chemin.
+        let late = NOW + CLAIM_CONTEST_WINDOW_SECS + 1;
+        let mut stale = record(3, "alex", 1);
+        stale.signature = "ff".repeat(16);
+        assert_eq!(reg.apply_at(stale, late).unwrap(), ApplyOutcome::Kept);
+
+        // En revanche une contestation qui GAGNERAIT est vérifiée : le raccourci ne
+        // doit jamais installer un enregistrement non authentifié.
+        let mut winner = record(4, "alex", 50);
+        winner.signature = "ff".repeat(16);
+        assert_eq!(reg.apply_at(winner, NOW).unwrap_err(), UsernameError::InvalidSignature);
+        assert_eq!(reg.resolve("alex").as_deref(), Some(addr(1).as_str()));
     }
 }

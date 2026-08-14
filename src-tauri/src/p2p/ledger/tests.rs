@@ -4587,3 +4587,108 @@
             t0.elapsed()
         );
     }
+
+    /// **M-14 (AUDIT-2026-08-13) — un bloc implausible ne doit plus coûter un
+    /// parcours de toute l'histoire.**
+    ///
+    /// `validate_remote_block` construisait quatre vues linéaires en la hauteur
+    /// (soldes on-chain, liaisons ML-DSA, nonces, statistiques) **avant** de
+    /// regarder si le bloc tenait debout. Mesuré par l'audit : 1,35 µs par bloc
+    /// entrant à hauteur 100, 38,3 µs à hauteur 4 000, sous le verrou d'écriture —
+    /// pendant que l'émetteur, lui, payait O(1).
+    ///
+    /// Ce que le test observe est un **compteur**, pas un temps : sur une chaîne
+    /// de test, la vérification ML-DSA d'une seule transaction domine largement
+    /// quelques centaines d'itérations, et une mesure de durée passerait au vert
+    /// pour la mauvaise raison. `CHAIN_WALKS` (compilé en test uniquement) compte
+    /// les parcours réels ; la propriété devient exacte et déterministe.
+    #[test]
+    fn m14_an_implausible_block_triggers_no_chain_walk_at_all() {
+        use std::sync::atomic::Ordering;
+        use crate::p2p::ledger::validation::CHAIN_WALKS;
+
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        for _ in 0..(MEDIAN_TIME_SPAN + 2) {
+            l.seal_block(&a, 0.0);
+        }
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+
+        // Bloc parfaitement formé par ailleurs, mais horodaté sous la médiane.
+        let bad_time = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "1971-01-01T00:00:00+00:00",
+            &a,
+            vec![],
+        );
+        let before = CHAIN_WALKS.load(Ordering::Relaxed);
+        let err = l
+            .clone()
+            .integrate_remote_block(bad_time)
+            .expect_err("horodatage sous la médiane ⇒ refus");
+        let walks = CHAIN_WALKS.load(Ordering::Relaxed) - before;
+        assert_eq!(
+            walks, 0,
+            "M-14 : un bloc mal horodaté ne doit déclencher AUCUN parcours de \
+             chaîne — il en a déclenché {walks} (erreur rendue : {err})"
+        );
+
+        // Et le chemin honnête, lui, doit continuer à payer ce qu'il faut : la
+        // porte est une avance de rejet, pas une suppression de vérification.
+        let good = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            &grind_ts(&tip.timestamp, 1),
+            &a,
+            vec![],
+        );
+        let before = CHAIN_WALKS.load(Ordering::Relaxed);
+        l.clone()
+            .integrate_remote_block(good)
+            .expect("un bloc honnête reste accepté");
+        assert!(
+            CHAIN_WALKS.load(Ordering::Relaxed) > before,
+            "M-14 : la validation complète doit toujours consulter la chaîne — \
+             sinon on n'a pas optimisé, on a supprimé une vérification"
+        );
+    }
+
+    /// M-14 — et la borne de taille aussi passe devant, pour la même raison :
+    /// refuser un bloc de mille transactions ne doit pas d'abord vérifier mille
+    /// signatures ni relire toute la chaîne.
+    #[test]
+    fn m14_an_oversized_block_is_refused_before_any_chain_walk() {
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        for _ in 0..(MEDIAN_TIME_SPAN + 2) {
+            l.seal_block(&a, 0.0);
+        }
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+
+        let mut wb = pq_wallet();
+        let b = gen_addr(&mut wb);
+        let filler = l
+            .build_signed_tx_at(&b, &a, MICRO, TxType::Transfer, &wb,
+                "2027-05-01T00:00:00+00:00".into(), true)
+            .expect("tx signée");
+        let txs = vec![filler; MAX_TXS_PER_BLOCK + 1];
+        let fat = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            &grind_ts(&tip.timestamp, 1),
+            &a,
+            txs,
+        );
+        let err = l
+            .integrate_remote_block(fat)
+            .expect_err("un bloc au-delà de la borne est refusé");
+        assert!(
+            err.contains("BLOCK-SIZE-1"),
+            "M-14 : la borne de taille doit trancher la première — reçu : {err}"
+        );
+    }

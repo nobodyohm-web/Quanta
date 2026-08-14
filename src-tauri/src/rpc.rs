@@ -392,10 +392,25 @@ fn auth_rejection(req: &HttpReq, auth: &RpcAuth, public: bool) -> Option<String>
     if public {
         return None; // `--public` already refuses these downstream, with its own error
     }
-    // A browser attaches `Origin` automatically on cross-origin requests; a
-    // same-origin or absent one is fine, a foreign one never is.
+    // **A17 (AUDIT-2026-08-13) — la règle refusait TOUTE origine, y compris la
+    // sienne.**
+    //
+    // Le commentaire disait « une origine même-origine ou absente est bien » ;
+    // le code refusait dès que l'en-tête était non vide. Or la spécification
+    // Fetch impose `Origin` sur **tout** POST, même-origine comprise : aucun
+    // client navigateur ne pouvait donc atteindre les méthodes d'argent — pas
+    // même l'explorateur que ce serveur sert lui-même. Défaillance en position
+    // sûre, donc pas une vulnérabilité, mais une règle qui ne faisait pas ce
+    // qu'elle annonçait, ce qui est la façon habituelle de se croire protégé.
+    //
+    // La règle correcte pour le CSRF est l'égalité stricte : l'autorité de
+    // `Origin` doit être celle de `Host`. Une page sur un autre port de la boucle
+    // locale est donc refusée elle aussi — c'est voulu, l'origine web est le
+    // triplet (schéma, hôte, port). `Origin: null` (iframe bac à sable, `data:`)
+    // est refusé : il ne désigne rien qu'on puisse comparer.
     if let Some(origin) = req.header("origin") {
-        if !origin.trim().is_empty() {
+        let origin = origin.trim();
+        if !origin.is_empty() && !origin_matches_host(origin, req.header("host")) {
             return Some("origine croisée refusée".into());
         }
     }
@@ -470,6 +485,13 @@ const RPC_HEAD_TIMEOUT_SECS: u64 = 3;
 /// borne à 16/256 ce qu'un seul hôte peut immobiliser. Contre un attaquant
 /// **distribué**, elle ne fait que relever le coût ; c'est dit tel quel.
 const RPC_MAX_CONN_PER_IP: usize = 16;
+/// **A10** — plafond de blocs parcourus par `listtransactions`. La valeur suit le
+/// défaut historique (1 000 blocs de recul) élargi d'un ordre de grandeur : assez
+/// large pour qu'un intégrateur qui interroge toutes les minutes ne rate jamais un
+/// dépôt, assez étroit pour que le parcours reste borné à quelques millisecondes,
+/// quelle que soit la hauteur de la chaîne. Au-delà, l'appelant pagine avec
+/// `from_height` — ce qui est déjà l'usage prévu du paramètre.
+const MAX_LISTTX_SCAN_BLOCKS: u64 = 10_000;
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
@@ -625,6 +647,42 @@ fn host_rejection(req: &HttpReq, loopback_only: bool) -> Option<String> {
     } else {
         Some("en-tête Host étranger refusé (protection anti-rebinding DNS)".into())
     }
+}
+
+/// **A10** — fenêtre de balayage de `listtransactions` : `(depuis, plancher)`.
+///
+/// Extraite en fonction pure pour une raison précise : la propriété à garantir
+/// est « le parcours reste borné quelle que soit la hauteur », et on ne peut pas
+/// la tester sur un ledger de test — il faudrait forger 10 000 blocs. Sous forme
+/// de fonction, la borne se vérifie à toutes les hauteurs, y compris celles qu'on
+/// n'atteindra jamais en test.
+///
+/// Le plancher ne dépend que de la hauteur ; la demande de l'appelant ne peut que
+/// le remonter, jamais le descendre. Le défaut (1 000 blocs de recul) est
+/// conservé : c'est le comportement qu'un intégrateur existant attend.
+fn listtx_window(height: u64, requested_from: Option<u64>) -> (u64, u64) {
+    let floor = height.saturating_sub(MAX_LISTTX_SCAN_BLOCKS);
+    let asked = requested_from.unwrap_or_else(|| height.saturating_sub(1000));
+    (asked.max(floor), floor)
+}
+
+/// A17 — l'origine désigne-t-elle exactement l'autorité que le client a
+/// contactée ? Comparaison sur l'autorité brute (hôte **et** port), insensible à
+/// la casse ; le schéma est ignoré, ce serveur n'écoute qu'en clair et une
+/// origine `https://` vers ce même hôte:port ne peut pas exister.
+///
+/// Un `Host` absent fait échouer la comparaison : sans point de référence, on ne
+/// peut rien affirmer, et la seule réponse sûre est le refus.
+fn origin_matches_host(origin: &str, host: Option<&str>) -> bool {
+    let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
+        return false;
+    };
+    let authority = origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin)
+        .trim_end_matches('/');
+    !authority.is_empty() && authority.eq_ignore_ascii_case(host)
 }
 
 /// A8 — l'autorité désigne-t-elle bien la machine locale ? Le port est ignoré ; ce
@@ -954,17 +1012,40 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             let ledger = state.node.ledger.read().await;
             let height = ledger.chain_height();
             let finalized = ledger.finalized_floor_index();
-            let from_height = params
-                .get("from_height")
-                .and_then(|v| v.as_u64())
-                .unwrap_or_else(|| height.saturating_sub(1000));
+            // **A10 (AUDIT-2026-08-13) — le balayage était non borné ET non
+            // annulable.**
+            //
+            // `from_height` n'avait aucun plancher : un appelant mettait 0. Le
+            // `limit` plafonne la SORTIE, pas le PARCOURS — sur une adresse sans
+            // transaction, la boucle traverse toute la chaîne. Et comme son corps
+            // ne contient aucun `.await`, le `timeout` de `serve` ne peut pas
+            // l'interrompre : un `Future` n'est annulable qu'à un point d'attente.
+            // Le balayage tenait donc un thread du runtime ET le verrou de lecture
+            // du ledger jusqu'à son terme — or ce runtime est aussi celui du
+            // minage, du gossip et du vote de finalité.
+            //
+            // Deux bornes plutôt qu'une : le plancher rend la requête O(fenêtre)
+            // quelle que soit la hauteur, et l'`Ordering::Relaxed` du compteur de
+            // blocs visités arrête le parcours même si quelqu'un élargit un jour la
+            // fenêtre. `truncated` le dit à l'appelant au lieu de lui rendre une
+            // réponse silencieusement partielle — un intégrateur qui surveille des
+            // dépôts doit savoir qu'il lui manque des blocs.
+            let (from_height, floor) =
+                listtx_window(height, params.get("from_height").and_then(|v| v.as_u64()));
             let limit = params
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100)
                 .min(1000) as usize;
             let mut out: Vec<Value> = Vec::new();
+            let mut scanned = 0u64;
+            let mut truncated = false;
             'scan: for i in from_height..=height {
+                scanned += 1;
+                if scanned > MAX_LISTTX_SCAN_BLOCKS {
+                    truncated = true;
+                    break 'scan;
+                }
                 if let Some(b) = ledger.block_at(i) {
                     for tx in &b.transactions {
                         let is_in = tx.to == hexs;
@@ -992,6 +1073,11 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 "from_height": from_height,
                 "height": height,
                 "finalized_height": finalized,
+                // A10 — l'appelant doit pouvoir distinguer « rien trouvé » de
+                // « on n'a pas tout regardé ». Sans ce champ, une fenêtre
+                // tronquée ressemble à une absence de dépôt.
+                "scan_floor": floor,
+                "truncated": truncated || out.len() >= limit,
                 "transactions": out,
             }))
         }
@@ -1190,6 +1276,139 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A17 — l'explorateur servi par ce serveur doit pouvoir dépenser ; une
+    /// page étrangère, jamais.**
+    ///
+    /// L'ancienne règle refusait toute origine non vide, donc aussi la sienne :
+    /// aucun client navigateur, pas même l'explorateur embarqué, ne pouvait
+    /// atteindre une méthode d'argent. Le CSRF était bloqué — par accident, en
+    /// bloquant tout le monde.
+    #[test]
+    fn a17_the_servers_own_origin_is_accepted_and_only_that_one() {
+        let auth = RpcAuth::with_token("s3cret");
+        let money = r#"{"method":"sendtoaddress"}"#;
+        let same = req_with(
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", "Bearer s3cret"),
+                ("Host", "127.0.0.1:8645"),
+                ("Origin", "http://127.0.0.1:8645"),
+            ],
+            money,
+        );
+        assert!(
+            auth_rejection(&same, &auth, false).is_none(),
+            "A17 : l'origine du serveur lui-même doit passer"
+        );
+
+        // Le port fait partie de l'origine : un autre service de la boucle locale
+        // est une origine étrangère, et c'est exactement ce qu'on veut refuser.
+        for (host, origin, why) in [
+            ("127.0.0.1:8645", "http://127.0.0.1:9999", "port différent"),
+            ("127.0.0.1:8645", "http://evil.example", "hôte étranger"),
+            ("127.0.0.1:8645", "null", "iframe bac à sable"),
+            ("127.0.0.1:8645", "http://127.0.0.1.evil.example", "suffixe trompeur"),
+        ] {
+            let bad = req_with(
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Authorization", "Bearer s3cret"),
+                    ("Host", host),
+                    ("Origin", origin),
+                ],
+                money,
+            );
+            assert!(
+                auth_rejection(&bad, &auth, false).is_some(),
+                "A17 : {why} doit être refusé ({origin})"
+            );
+        }
+
+        // Sans `Host`, aucune comparaison n'est possible : refus.
+        let no_host = req_with(
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", "Bearer s3cret"),
+                ("Origin", "http://127.0.0.1:8645"),
+            ],
+            money,
+        );
+        assert!(
+            auth_rejection(&no_host, &auth, false).is_some(),
+            "A17 : sans point de référence on refuse plutôt que de supposer"
+        );
+
+        // Et un client non-navigateur (aucune origine) reste servi.
+        let cli = req_with(
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", "Bearer s3cret"),
+                ("Host", "127.0.0.1:8645"),
+            ],
+            money,
+        );
+        assert!(auth_rejection(&cli, &auth, false).is_none(), "curl doit continuer à marcher");
+    }
+
+    /// **A10 — `from_height: 0` ne traverse plus toute la chaîne.**
+    ///
+    /// Le balayage tenait le verrou de lecture du ledger et un thread du runtime
+    /// — celui qui porte aussi le minage, le gossip et le vote de finalité —
+    /// sans aucun point d'annulation, puisque son corps ne contient pas un seul
+    /// `.await`. Le `limit` plafonnait la sortie, jamais le parcours. Le test
+    /// épingle la seule chose qui borne vraiment : le plancher que la réponse
+    /// renvoie à l'appelant.
+    #[tokio::test]
+    async fn a10_the_scan_window_is_bounded_whatever_the_caller_asks() {
+        let state = test_state().await;
+        let addr = crate::security::address::encode(&[7u8; 32]);
+        let r = dispatch(
+            &state,
+            "listtransactions",
+            &json!({ "address": addr, "from_height": 0 }),
+        )
+        .await
+        .expect("listtransactions répond");
+
+        let height = r["height"].as_u64().expect("hauteur");
+        let from = r["from_height"].as_u64().expect("from_height");
+        let floor = r["scan_floor"].as_u64().expect("scan_floor");
+        assert_eq!(
+            floor,
+            height.saturating_sub(MAX_LISTTX_SCAN_BLOCKS),
+            "le plancher est une fonction de la hauteur, pas de la demande"
+        );
+        assert!(
+            from >= floor,
+            "A10 : `from_height: 0` doit être remonté au plancher (from={from}, floor={floor})"
+        );
+        assert!(
+            height + 1 - from <= MAX_LISTTX_SCAN_BLOCKS + 1,
+            "A10 : la fenêtre parcourue reste bornée quelle que soit la hauteur"
+        );
+        assert!(r["truncated"].is_boolean(), "l'appelant sait si la réponse est partielle");
+
+        // Sur une chaîne plus courte que la fenêtre, le plancher ne doit rien
+        // amputer : la borne protège, elle ne mutile pas le cas normal.
+        assert_eq!(floor, 0, "chaîne de test jeune → aucun blocage");
+
+        // Et la propriété aux hauteurs qu'aucun ledger de test ne peut atteindre.
+        for h in [0u64, 1, 9_999, 10_000, 10_001, 5_000_000, u64::MAX] {
+            for asked in [None, Some(0), Some(1), Some(h / 2), Some(h)] {
+                let (from, floor) = listtx_window(h, asked);
+                assert!(from >= floor, "hauteur {h}, demandé {asked:?} : plancher franchi");
+                assert!(
+                    h.saturating_sub(from) <= MAX_LISTTX_SCAN_BLOCKS,
+                    "hauteur {h}, demandé {asked:?} : fenêtre non bornée ({from}..={h})"
+                );
+            }
+        }
+        // Le cas normal n'est pas mutilé : une chaîne jeune répond depuis 0.
+        assert_eq!(listtx_window(500, Some(0)), (0, 0));
+        // Et une demande plus étroite que le plancher reste respectée telle quelle.
+        assert_eq!(listtx_window(50_000, Some(49_000)).0, 49_000);
+    }
 
     async fn test_state() -> Arc<AppState> {
         Arc::new(AppState::new())

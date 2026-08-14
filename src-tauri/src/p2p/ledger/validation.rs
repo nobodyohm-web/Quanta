@@ -9,6 +9,30 @@
 
 use super::*;
 
+/// **M-14 (AUDIT-2026-08-13)** — compteur d'instrumentation, uniquement compilé
+/// en test.
+///
+/// La propriété que M-14 demande n'est pas un verdict mais un **coût** : « les
+/// vues linéaires en la hauteur ne sont pas construites quand le bloc est rejeté
+/// pour une raison qui n'en a pas besoin ». Mesurer un temps ne le prouverait
+/// pas — sur une chaîne de test, la vérification ML-DSA d'une seule transaction
+/// domine largement quelques centaines d'itérations triviales, et le test
+/// passerait pour la mauvaise raison. Compter les parcours, en revanche, est
+/// exact et déterministe.
+///
+/// Rien de tout cela n'existe dans le binaire livré.
+#[cfg(test)]
+pub(crate) static CHAIN_WALKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// M-14 — incrémente le compteur de parcours (no-op hors test).
+#[cfg(test)]
+fn note_chain_walk() {
+    CHAIN_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn note_chain_walk() {}
+
 impl Ledger {
 
     // ── Phase 3.1: Signature Verification (toujours hybride) ─────
@@ -298,6 +322,38 @@ impl Ledger {
                 short(&tip.hash, 16)
             ));
         }
+        // **M-14 (AUDIT-2026-08-13) — le rejet arrivait APRÈS le travail.**
+        //
+        // Les quatre vues construites ci-dessous parcourent toute l'histoire de la
+        // chaîne (`onchain_spendable_before`, `pq_bindings_before`,
+        // `account_nonces_before`, et `stats()` plus bas). Mesuré par l'audit sur
+        // des blocs vides : 1,35 µs par bloc entrant à hauteur 100, 38,3 µs à
+        // hauteur 4 000 — croissance linéaire nette. À un an de chaîne, c'est plus
+        // d'un million de transactions revisitées **par bloc reçu**, sous le
+        // verrou d'écriture, et payées avant même de regarder si le bloc est
+        // structurellement plausible. L'attaquant, lui, paie O(1) pour l'émettre.
+        //
+        // La porte ci-dessous inverse cette asymétrie sans rien changer au verdict :
+        // elle rejoue les seules règles qui ne dépendent **pas** de l'histoire —
+        // horodatage (médiane sur 11 blocs) et borne de taille — avant de payer le
+        // moindre parcours. Un bloc qui échoue sur l'une des deux coûte désormais
+        // O(1) au lieu de O(hauteur). Ce n'est pas une duplication de travail : ces
+        // deux contrôles sont eux-mêmes O(1), et `validate_block_against_prev` les
+        // rejouera à l'identique — la source de vérité reste unique, c'est elle.
+        //
+        // Ce que ça ne corrige PAS : le coût du chemin heureux reste O(hauteur).
+        // Le supprimer demande des vues incrémentales maintenues à l'insertion, un
+        // cache dont toute erreur devient une divergence de consensus. Cela
+        // appartient à une passe qui aura son propre plan de test, pas à celle-ci.
+        let median_before = self.median_time_before(tip);
+        Self::validate_block_timestamp(block, tip, median_before)?;
+        if block.transactions.len() > MAX_TXS_PER_BLOCK {
+            return Err(format!(
+                "bloc rejeté : {} transactions — le maximum est {} (BLOCK-SIZE-1)",
+                block.transactions.len(),
+                MAX_TXS_PER_BLOCK
+            ));
+        }
         // COVER-1: seed the shared validator's coverage check with the on-chain
         // balances up to the tip (this block extends it). Mempool-free → identical
         // verdict on every node.
@@ -309,9 +365,6 @@ impl Ledger {
         let bonded_before = self.validator_stakes();
         // C-01: the as-of-parent nonce expectation, derived from the chain.
         let nonces_before = self.account_nonces_before(tip);
-        // BLOCK-TIME-2 : la médiane des 11 derniers horodatages, fonction pure de
-        // la chaîne (aucune horloge locale, donc aucun fork par dérive).
-        let median_before = self.median_time_before(tip);
         Self::validate_block_against_prev(
             block,
             tip,
@@ -321,23 +374,24 @@ impl Ledger {
             &nonces_before,
             median_before,
         )?;
-        self.validate_block_emission(block)?;
+        // M-14 — `stats()` parcourt toute la chaîne. Il était appelé DEUX fois ici
+        // (une par le wrapper `validate_block_emission`, une pour le plan de
+        // récompense) : le chemin heureux payait donc deux parcours complets là où
+        // un suffit. Le wrapper, qui n'existait que pour ce second appel, a disparu
+        // avec lui — `validate_block_emission_against` est la seule porte, et c'est
+        // déjà celle que le chemin de reorg utilisait.
+        let total_mined = self.stats().total_mined;
+        // TOKENOMICS v2 — garde-fou de consensus : la somme minée d'un bloc ne peut
+        // JAMAIS pousser l'offre au-delà du plafond dur, même venant d'un pair
+        // malveillant. Sans ça, un attaquant scellerait un bloc se créditant des
+        // millions (les tx `NETWORK` sont exemptes de signature) → inflation
+        // arbitraire.
+        Self::validate_block_emission_against(block, total_mined)?;
         // REWARD-SHARE-1 : la RÉPARTITION est vérifiée comme le total — en la
         // recalculant depuis la chaîne, jamais en faisant confiance au bloc.
-        self.validate_block_reward_plan(block, self.stats().total_mined)
+        self.validate_block_reward_plan(block, total_mined)
     }
 
-    /// TOKENOMICS v2 — garde-fou de consensus : la somme minée d'un bloc ne
-    /// peut JAMAIS pousser l'offre au-delà du plafond dur, même venant d'un
-    /// pair malveillant. Sans ça, un attaquant scellerait un bloc se
-    /// créditant des millions (les tx `NETWORK` sont exemptes de signature)
-    /// → inflation arbitraire. Le plafond devient ainsi infalsifiable à
-    /// l'échelle réseau.
-    fn validate_block_emission(&self, block: &Block) -> Result<(), String> {
-        // Linear (happy-path) emission: the block extends the tip, so the
-        // supply *before* it is the whole current chain's minted total.
-        Self::validate_block_emission_against(block, self.stats().total_mined)
-    }
 
     /// FORK-CAP-1: emission validation parameterised by `prior_mined` — the
     /// minted supply that exists **before** this block — so the happy path and
@@ -496,6 +550,7 @@ impl Ledger {
     /// validator). A `#[cfg(test)]` no-drift guard asserts this equals the live
     /// cache for a pending-free chain.
     pub(crate) fn onchain_spendable_before(&self, prev: &Block) -> HashMap<String, i128> {
+        note_chain_walk();
         let synthetic = |a: &str| matches!(a, "NETWORK" | "BURN" | "ESCROW");
         let mut bal: HashMap<String, i128> = HashMap::new();
         // pk → list of (amount, unlock_height) still locked in the unbonding pool.

@@ -141,16 +141,31 @@ impl ForkReconciler {
         {
             return false;
         }
-        let entry = self.buf.entry(block.index).or_default();
-        // Dedup by hash (sorted vector → binary search).
-        let Err(pos) = entry.binary_search_by(|b| b.hash.cmp(&block.hash)) else {
-            return false; // duplicate
+        // **R17 (AUDIT-2026-08-13) — l'index était créé AVANT d'avoir le droit
+        // d'insérer.**
+        //
+        // `entry(idx).or_default()` posait un vecteur vide dans la carte, puis les
+        // trois refus qui suivent (doublon, plafond par index, éviction refusée)
+        // repartaient en le laissant derrière eux. `FORK_BUFFER_MAX_BLOCKS` borne
+        // `total`, c'est-à-dire les blocs — **rien** ne bornait le nombre de clés.
+        // Un pair pouvait donc faire enfler la carte d'index vides sans jamais
+        // consommer un seul emplacement, et ces index fantômes se retrouvaient dans
+        // `keys()`, donc dans le calcul de la fenêtre de sonde d'ancêtre.
+        //
+        // La lecture se fait maintenant sans créer : la carte ne gagne une clé que
+        // sur le chemin qui insère réellement.
+        let pos = match self.buf.get(&block.index) {
+            Some(v) => match v.binary_search_by(|b| b.hash.cmp(&block.hash)) {
+                Ok(_) => return false, // duplicate
+                Err(p) => p,
+            },
+            None => 0,
         };
         // H5 (AUDIT-2026-07-25) — per-index occupancy cap. A competing branch has
         // ONE block per height that matters to us; anything beyond a small margin
         // at a single index is an attacker minting hashes, and without this cap a
         // single index could own the entire buffer.
-        if entry.len() >= FORK_BUFFER_MAX_PER_INDEX {
+        if self.buf.get(&block.index).is_some_and(|v| v.len() >= FORK_BUFFER_MAX_PER_INDEX) {
             return false;
         }
         // H5 — evict by USEFULNESS, not by index.
@@ -170,14 +185,12 @@ impl ForkReconciler {
         if self.total >= FORK_BUFFER_MAX_BLOCKS {
             let tip = ledger.chain_height().saturating_sub(1);
             let newcomer_distance = tip.abs_diff(block.index);
-            let victim = self
-                .buf
-                .iter()
-                .flat_map(|(idx, v)| v.iter().map(move |b| (*idx, b.hash.clone())))
-                .max_by_key(|(idx, hash)| (tip.abs_diff(*idx), hash.clone()));
-            let Some((victim_idx, victim_hash)) = victim else {
+            let Some((victim_idx, victim_hash)) = self.worst_entry(tip) else {
                 return false;
             };
+            // R17 — le hash n'est cloné qu'une fois, pour le gagnant, et seulement
+            // parce que la suppression a besoin d'un emprunt mutable sur `buf`.
+            let victim_hash = victim_hash.to_string();
             // The newcomer is itself the least useful block on offer → refuse it
             // rather than churn the buffer.
             if tip.abs_diff(victim_idx) < newcomer_distance {
@@ -193,7 +206,10 @@ impl ForkReconciler {
                 }
             }
         }
-        // NB: `entry` may have been invalidated by the eviction borrow — re-fetch.
+        // L'éviction a pu déplacer les éléments de CET index : la position calculée
+        // plus haut n'est plus fiable, on la recalcule. Un doublon apparu entretemps
+        // est impossible (l'éviction ne fait que retirer), mais `unwrap_or` garde la
+        // position d'origine plutôt que d'insérer au hasard si jamais.
         let entry = self.buf.entry(block.index).or_default();
         let pos = entry
             .binary_search_by(|b| b.hash.cmp(&block.hash))
@@ -202,6 +218,56 @@ impl ForkReconciler {
         entry.insert(pos, block);
         self.total += 1;
         true
+    }
+
+    /// **R17 (AUDIT-2026-08-13) — l'éviction allouait 2 048 `String` par bloc
+    /// offert.**
+    ///
+    /// L'ancienne recherche de victime balayait tout le tampon avec un
+    /// `max_by_key` dont la clé contenait `hash.clone()` : un clone pour
+    /// construire le couple, un second pour la clé de tri, sur chacun des 1 024
+    /// blocs bufférisés. Un `ChainSegment` de 50 blocs rejetés coûtait donc
+    /// ~102 400 allocations de chaînes de 64 caractères — pour une décision qui
+    /// n'en demande aucune. Post-authentification et borné, donc jamais critique ;
+    /// simplement du travail pur perte sur le chemin chaud du rattrapage.
+    ///
+    /// La forme O(log n) vient d'une propriété de la clé de tri elle-même :
+    /// `idx ↦ |tip − idx|` est unimodale sur un ensemble ordonné — elle décroît
+    /// jusqu'au tip puis recroît — donc son **maximum** est nécessairement atteint
+    /// à l'un des deux bords du tampon. `BTreeMap` donne ces deux bords en
+    /// O(log n), et chaque `Vec` étant maintenu trié par hash croissant, le plus
+    /// grand hash d'un index est son dernier élément. Deux candidats à comparer,
+    /// zéro allocation, résultat identique au balayage complet — c'est ce que
+    /// `r17_the_cheap_victim_search_matches_the_full_scan` vérifie.
+    ///
+    /// Le départage par hash le plus grand est conservé tel quel : il rend
+    /// l'éviction déterministe entre nœuds, ce qui est la propriété qui compte.
+    fn worst_entry(&self, tip: u64) -> Option<(u64, &str)> {
+        // Le plus grand hash de l'index, cherché explicitement plutôt que pris en
+        // `last()` : le tri du vecteur est un invariant d'insertion, pas une
+        // garantie — `offer` réutilise une position calculée AVANT l'éviction, qui
+        // peut avoir déplacé les éléments de ce même index. S'appuyer sur l'ordre
+        // ferait dépendre l'éviction d'un invariant que rien ne vérifie ; un
+        // maximum explicite sur au plus `FORK_BUFFER_MAX_PER_INDEX` éléments coûte
+        // le même ordre de grandeur et ne peut pas mentir.
+        let best_at = |idx: u64| -> Option<(u64, &str)> {
+            let top = self.buf.get(&idx)?.iter().map(|b| b.hash.as_str()).max()?;
+            Some((idx, top))
+        };
+        // Les bords **non vides** : un index vide n'offre aucune victime, et le
+        // balayage complet qu'on remplace les ignorait implicitement.
+        let lo = self.buf.iter().find(|(_, v)| !v.is_empty()).map(|(k, _)| *k)?;
+        let hi = self.buf.iter().rev().find(|(_, v)| !v.is_empty()).map(|(k, _)| *k)?;
+        match (best_at(lo), best_at(hi)) {
+            (Some(a), Some(b)) => Some(
+                if (tip.abs_diff(a.0), a.1) >= (tip.abs_diff(b.0), b.1) {
+                    a
+                } else {
+                    b
+                },
+            ),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Try to make progress against `ledger`: purge dead candidates, adopt any
@@ -425,6 +491,151 @@ impl ForkReconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R17 — bloc minimal : seuls `index` et `hash` comptent pour l'éviction.
+    fn mk_block(index: u64, hash: String) -> Block {
+        Block {
+            index,
+            timestamp: String::new(),
+            transactions: Vec::new(),
+            prev_hash: String::new(),
+            hash,
+            miner: String::new(),
+            energy_kwh: 0.0,
+        }
+    }
+
+    /// **R17 — un index refusé ne doit pas laisser de clé derrière lui.**
+    ///
+    /// `entry(idx).or_default()` créait le vecteur avant les trois refus qui
+    /// suivent. `FORK_BUFFER_MAX_BLOCKS` borne les **blocs**, jamais le nombre de
+    /// clés : un pair pouvait donc faire enfler la carte d'index fantômes sans
+    /// consommer un seul emplacement, et ces index se retrouvaient dans `keys()`,
+    /// donc dans la fenêtre de sonde d'ancêtre. La fuite s'est révélée en
+    /// remplaçant le balayage complet — qui ignorait les vecteurs vides — par une
+    /// recherche aux bords, qui, elle, tombait dessus.
+    #[test]
+    fn r17_a_refused_block_leaves_no_phantom_index_behind() {
+        let mut a = Ledger::new();
+        extend(&mut a, 20, "base");
+        let mut r = ForkReconciler::new();
+
+        // Un index déjà plein : les offres suivantes sur cet index sont refusées.
+        for i in 0..(FORK_BUFFER_MAX_PER_INDEX + 20) {
+            let b = Ledger::forge_block_at(5, &format!("p{i}"), "ts", "m", vec![]);
+            r.offer(b, &a);
+        }
+        // Un doublon exact, refusé lui aussi.
+        let dup = Ledger::forge_block_at(5, "p0", "ts", "m", vec![]);
+        r.offer(dup.clone(), &a);
+        r.offer(dup, &a);
+
+        // Des offres sous le plancher de finalité / à l'index 0, toutes refusées.
+        for idx in [0u64, 0, 0] {
+            let b = Ledger::forge_block_at(idx, "x", "ts", "m", vec![]);
+            assert!(!r.offer(b, &a), "l'index 0 n'est jamais bufférisable");
+        }
+
+        assert!(
+            r.buf.values().all(|v| !v.is_empty()),
+            "R17 : aucun index vide ne doit subsister — clés présentes : {:?}",
+            r.buf.iter().map(|(k, v)| (*k, v.len())).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            r.buf.len(),
+            1,
+            "un seul index a réellement reçu des blocs"
+        );
+        assert_eq!(r.total, r.buf.values().map(|v| v.len()).sum::<usize>());
+    }
+
+    /// **R17 — la recherche de victime en O(log n) doit décider exactement comme
+    /// le balayage complet qu'elle remplace.**
+    ///
+    /// C'est le seul risque du correctif : une optimisation qui change la
+    /// décision d'éviction ferait diverger deux nœuds sur le contenu de leur
+    /// tampon, donc sur la branche qu'ils finissent par adopter. Le test compare
+    /// les deux implémentations sur des configurations tirées au hasard, tip
+    /// compris — dedans, dessous, dessus, et hors tampon.
+    #[test]
+    fn r17_the_cheap_victim_search_matches_the_full_scan() {
+        // Référence : l'ancien balayage, littéralement.
+        fn full_scan(buf: &ForkReconciler, tip: u64) -> Option<(u64, String)> {
+            buf.buf
+                .iter()
+                .flat_map(|(idx, v)| v.iter().map(move |b| (*idx, b.hash.clone())))
+                .max_by_key(|(idx, hash)| (tip.abs_diff(*idx), hash.clone()))
+        }
+
+        // Générateur déterministe : un test qui ne rejoue pas la même séquence
+        // n'est pas reproductible quand il casse.
+        let mut seed = 0x5eed_1234_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for case in 0..64u64 {
+            let mut fb = ForkReconciler::default();
+            let n = 1 + (next() % 40);
+            for _ in 0..n {
+                let idx = 1 + (next() % 25);
+                let hash = format!("{:064x}", next());
+                let v = fb.buf.entry(idx).or_default();
+                if let Err(pos) = v.binary_search_by(|b| b.hash.cmp(&hash)) {
+                    v.insert(pos, mk_block(idx, hash));
+                    fb.total += 1;
+                }
+            }
+            for tip in [0u64, 1, 5, 12, 13, 25, 40] {
+                let cheap = fb.worst_entry(tip).map(|(i, h)| (i, h.to_string()));
+                assert_eq!(
+                    cheap,
+                    full_scan(&fb, tip),
+                    "cas {case}, tip {tip} : les deux recherches doivent élire la MÊME victime"
+                );
+            }
+        }
+    }
+
+    /// R17 — et la victime élue reste bien celle qu'on veut : le bloc le plus
+    /// loin du tip, départagé par le plus grand hash. La propriété n'est pas
+    /// « moins d'allocations », c'est « la même décision, moins cher ».
+    #[test]
+    fn r17_the_victim_is_the_farthest_block_from_the_tip() {
+        let mut fb = ForkReconciler::default();
+        for (idx, hash) in [
+            (10u64, "aa"),
+            (10, "bb"),
+            (99, "cc"), // le plus loin d'un tip à 10
+            (11, "dd"),
+        ] {
+            let blk = mk_block(idx, hash.repeat(32));
+            let v = fb.buf.entry(idx).or_default();
+            let pos = v
+                .binary_search_by(|b| b.hash.cmp(&blk.hash))
+                .unwrap_or_else(|p| p);
+            v.insert(pos, blk);
+            fb.total += 1;
+        }
+        let (idx, hash) = fb.worst_entry(10).expect("tampon non vide");
+        assert_eq!(idx, 99, "le bloc le plus éloigné du tip est la victime");
+        assert_eq!(hash, "cc".repeat(32));
+
+        // Égalité de distance : 5 et 15 sont à 5 du tip 10 -> le plus grand hash.
+        let mut fb2 = ForkReconciler::default();
+        for (idx, hash) in [(5u64, "ff"), (15u64, "11")] {
+            fb2.buf.entry(idx).or_default().push(mk_block(idx, hash.repeat(32)));
+            fb2.total += 1;
+        }
+        assert_eq!(
+            fb2.worst_entry(10).map(|(i, _)| i),
+            Some(5),
+            "à distance égale, le plus grand hash tranche — et il est déterministe"
+        );
+    }
 
     /// Extend `ledger` linearly with `n` forged empty blocks whose timestamps
     /// embed `tag` (so two branches sealed from the same parent differ), and
