@@ -4868,7 +4868,7 @@ dependencies = [
  "objc2-foundation",
  "proptest",
  "rand 0.8.6",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "rustls",
  "security-framework",
  "serde",
