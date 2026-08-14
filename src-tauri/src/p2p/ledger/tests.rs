@@ -4604,8 +4604,8 @@
     /// les parcours réels ; la propriété devient exacte et déterministe.
     #[test]
     fn m14_an_implausible_block_triggers_no_chain_walk_at_all() {
-        use std::sync::atomic::Ordering;
         use crate::p2p::ledger::validation::CHAIN_WALKS;
+        let walks_now = || CHAIN_WALKS.with(|c| c.get());
 
         let mut wa = pq_wallet();
         let a = gen_addr(&mut wa);
@@ -4624,12 +4624,12 @@
             &a,
             vec![],
         );
-        let before = CHAIN_WALKS.load(Ordering::Relaxed);
+        let before = walks_now();
         let err = l
             .clone()
             .integrate_remote_block(bad_time)
             .expect_err("horodatage sous la médiane ⇒ refus");
-        let walks = CHAIN_WALKS.load(Ordering::Relaxed) - before;
+        let walks = walks_now() - before;
         assert_eq!(
             walks, 0,
             "M-14 : un bloc mal horodaté ne doit déclencher AUCUN parcours de \
@@ -4645,12 +4645,12 @@
             &a,
             vec![],
         );
-        let before = CHAIN_WALKS.load(Ordering::Relaxed);
+        let before = walks_now();
         l.clone()
             .integrate_remote_block(good)
             .expect("un bloc honnête reste accepté");
         assert!(
-            CHAIN_WALKS.load(Ordering::Relaxed) > before,
+            walks_now() > before,
             "M-14 : la validation complète doit toujours consulter la chaîne — \
              sinon on n'a pas optimisé, on a supprimé une vérification"
         );

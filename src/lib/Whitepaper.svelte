@@ -1,10 +1,10 @@
 <script lang="ts">
-  // Whitepaper — a readable, bank/editorial view of docs/WHITEPAPER.md inside the app.
+  // Whitepaper — a readable, bank/editorial view of WHITEPAPER_FR.md inside the app.
   //
   // The content is the SINGLE SOURCE OF TRUTH: the markdown file is imported raw
   // (Vite `?raw`) and rendered by a tiny inline parser — no external markdown
   // dependency, and the view can never drift from the file on disk.
-  import source from "../../docs/WHITEPAPER.md?raw";
+  import source from "../../WHITEPAPER_FR.md?raw";
   import { t } from "./i18n.svelte";
 
   // ── Tiny, dependency-free markdown → HTML (headings, paragraphs, lists,
@@ -226,7 +226,7 @@
   </div>
 
   <div class="wp-layout">
-    <!-- Content comes verbatim from docs/WHITEPAPER.md, shaped by the inline parser above. -->
+    <!-- Content comes verbatim from WHITEPAPER_FR.md, shaped by the inline parser above. -->
     <article class="wp-body">{@html html}</article>
 
     <aside class="wp-toc">

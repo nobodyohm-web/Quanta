@@ -9,25 +9,33 @@
 
 use super::*;
 
-/// **M-14 (AUDIT-2026-08-13)** — compteur d'instrumentation, uniquement compilé
-/// en test.
-///
-/// La propriété que M-14 demande n'est pas un verdict mais un **coût** : « les
-/// vues linéaires en la hauteur ne sont pas construites quand le bloc est rejeté
-/// pour une raison qui n'en a pas besoin ». Mesurer un temps ne le prouverait
-/// pas — sur une chaîne de test, la vérification ML-DSA d'une seule transaction
-/// domine largement quelques centaines d'itérations triviales, et le test
-/// passerait pour la mauvaise raison. Compter les parcours, en revanche, est
-/// exact et déterministe.
-///
-/// Rien de tout cela n'existe dans le binaire livré.
+// **M-14 (AUDIT-2026-08-13)** — compteur d'instrumentation, uniquement compilé
+// en test.
+//
+// La propriété que M-14 demande n'est pas un verdict mais un **coût** : « les
+// vues linéaires en la hauteur ne sont pas construites quand le bloc est rejeté
+// pour une raison qui n'en a pas besoin ». Mesurer un temps ne le prouverait
+// pas — sur une chaîne de test, la vérification ML-DSA d'une seule transaction
+// domine largement quelques centaines d'itérations triviales, et le test
+// passerait pour la mauvaise raison. Compter les parcours, en revanche, est
+// exact et déterministe.
+//
+// Le compteur est **par thread**, et ce détail est la correction d'un bug réel :
+// en `AtomicU64` global il a échoué en CI et pas en local, parce que `cargo test`
+// répartit les tests sur plusieurs threads et qu'un test voisin qui valide un bloc
+// incrémentait le compteur qu'un autre était en train de lire. Un compteur global
+// ne peut pas mesurer le travail d'un test isolé quand la suite est parallèle.
+//
+// Rien de tout cela n'existe dans le binaire livré.
 #[cfg(test)]
-pub(crate) static CHAIN_WALKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    pub(crate) static CHAIN_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// M-14 — incrémente le compteur de parcours (no-op hors test).
+/// M-14 — incrémente le compteur de parcours du thread courant (no-op hors test).
 #[cfg(test)]
 fn note_chain_walk() {
-    CHAIN_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    CHAIN_WALKS.with(|c| c.set(c.get() + 1));
 }
 
 #[cfg(not(test))]
