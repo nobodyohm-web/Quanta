@@ -8,25 +8,13 @@
     <!-- Fonts are bundled locally (@fontsource-variable, imported in +page.svelte).
          No CDN, no external fetch — the app is fully offline (frontend rule #7). -->
     <title>QUANTA</title>
-    <!-- Anti-flash de thème : pose data-theme AVANT le premier paint (lit les
-         prefs localStorage, résout "auto" via matchMedia). Défaut marque = clair
-         si rien de stocké. On peint aussi le fond immédiatement (le bundle CSS
-         arrive après ce script) pour éviter tout flash blanc en mode sombre. -->
-    <script>
-      (function () {
-        try {
-          var raw = localStorage.getItem("quanta.prefs.v1") || localStorage.getItem("titan.prefs.v1");
-          var theme = raw ? (JSON.parse(raw).theme || "light") : "light";
-          if (theme === "auto") {
-            theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
-          }
-          if (theme !== "dark" && theme !== "light") theme = "light";
-          var root = document.documentElement;
-          root.setAttribute("data-theme", theme);
-          root.style.backgroundColor = theme === "dark" ? "#0f1115" : "#ffffff";
-        } catch (e) {}
-      })();
-    </script>
+    <!-- A13 — anti-flash de thème : pose data-theme AVANT le premier paint (lit
+         les prefs localStorage, résout "auto" via matchMedia). Le code est
+         EXTERNE et non inline : la CSP en mode `hash` ne connaît que les scripts
+         générés par SvelteKit, donc un inline écrit ici serait refusé. Servi par
+         l'origine, il passe par `'self'` sans hash à maintenir. Balise synchrone :
+         elle s'exécute avant le premier paint. -->
+    <script src="%sveltekit.assets%/theme-boot.js"></script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

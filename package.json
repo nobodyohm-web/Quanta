@@ -12,7 +12,8 @@
     "tauri": "tauri",
     "ai:check": "npm run check && cd src-tauri && cargo clippy -- -D warnings",
     "ai:audit": "cd src-tauri && cargo audit",
-    "ai:format": "npx prettier --write . && cd src-tauri && cargo fmt"
+    "ai:format": "npx prettier --write . && cd src-tauri && cargo fmt",
+    "check:csp": "node scripts/check-csp.mjs"
   },
   "author": "Quanta Protocol Contributors",
   "license": "Apache-2.0",

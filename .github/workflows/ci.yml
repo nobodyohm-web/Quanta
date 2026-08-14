@@ -96,3 +96,10 @@ jobs:
       - name: Type-check (svelte-check)
         run: npm run check
       - run: npm run build
+      # A13 — la CSP en mode `hash` ne peut se vérifier que sur le fichier
+      # produit : un `<script>` inline ajouté à `src/app.html` ne casse ni le
+      # build ni le type-check, il ne casse que l'exécution, en silence, dans la
+      # console du webview. Cette étape relit le bundle et échoue si un script
+      # inline n'est couvert par aucun hash de la politique.
+      - name: CSP — aucun script inline hors politique
+        run: npm run check:csp
