@@ -12,7 +12,7 @@ plus a Svelte desktop UI (out of scope). Consensus is stake-weighted Proof-of-St
 leader election with a Casper-FFG-style finality gadget. The distinguishing property is
 end-to-end post-quantum cryptography for money, finality, gossip authentication, and the
 transport key exchange. See the README for the one-paragraph summary and the source-tree
-map in the repository's top-level `CLAUDE.md`.
+map in [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 ## 2. Assets
 
@@ -85,7 +85,7 @@ const-asserted `≥` the slashing window). A malicious proposer cannot punish an
 the proof, offender address, and fraction are all re-checked.
 
 ### 3.7 Gossip ingestion pipeline
-`dispatch_incoming` enforces, in order: ① size check (max 10 MB envelope), ② JSON
+`dispatch_incoming` enforces, in order: ① size check (max 4 MiB envelope, `MAX_RAW_ENVELOPE_BYTES`), ② JSON
 deserialize, ③ per-peer ban check, ④ dedup (seen-messages LRU 100K), ⑤ timestamp
 freshness (±90s), ⑥ adaptive rate limit (`sqrt(peers/4) × 30 msg/min`, clamped [15, 120]),
 ⑦ per-sender monotonic nonce (anti-replay), ⑧ envelope signature verification — **ML-DSA-65**
@@ -110,7 +110,7 @@ installed as the process default at startup (`lib.rs::run`). This is a defense a
 
 | Adversary | Capabilities assumed | Primary mitigations |
 |---|---|---|
-| Network attacker | replay, MITM, partition, DoS/flood | envelope nonce + timestamp + ML-DSA auth, dedup LRU, rate limit, 10 MB cap, TLS 1.3 hybrid KEX, fork reconciliation |
+| Network attacker | replay, MITM, partition, DoS/flood | envelope nonce + timestamp + ML-DSA auth, dedup LRU, rate limit, 4 MiB cap, TLS 1.3 hybrid KEX, fork reconciliation |
 | Byzantine validators (< ⅓ stake) | equivocate, withhold, propose invalid blocks | ⅔ quorum finality, accountable slashing, proposer verified on receive, shared block validator |
 | Malicious peer | malformed / oversized / forged messages | full ingestion pipeline (§3.7), signature verification, ban-on-report |
 | Local attacker (stolen machine) | offline access to disk / vault | Argon2id + AES-256-GCM, zeroize, biometric KEK, UnlockGuard backoff |
@@ -146,20 +146,35 @@ Stated plainly, because credibility depends on it.
   the proposer is publicly foreseeable. Real unpredictability (VRF) + anti-grinding (VDF)
   are on the roadmap. The internal `vrf` identifiers are legacy names.
 - **The live network is tiny (alpha).** Security properties are proven in a deterministic
-  simulation and verified between two physical machines; they have not been exercised at
-  scale or under adversarial conditions in the wild.
+  simulation; the largest topology ever exercised is two nodes, and never between two
+  physical machines behind two distinct NATs. They have not been exercised at scale or under
+  adversarial conditions in the wild.
 - **Eclipse detection is a simple heuristic** (warning when >80% of peers share the same
   8-hex pubkey prefix). It is not a robust anti-eclipse defense.
 - **Anti-sybil is a proof of concept** (`p2p/sybil.rs`).
-- **Watts are self-declared** in the energy term of the Shapley mining distribution. This
-  is an economic gaming surface, but it is **outside the consensus security path** — validator
-  weight comes purely from on-chain stake (`validator_stakes()`), never from reputation or
-  declared energy.
-- **No prior third-party audit.** This package exists to obtain the first one.
+- **Watts are self-declared**, and the aggregate energy figure the app displays is a sum of
+  declarations. Since `MINT-EXACT-1` this is a **display signal only**: no locally measured
+  value touches the money path. A block's reward is `reputation::emission_for_block`, a pure
+  function of the chain recomputed and imposed by every receiver, and validator weight comes
+  purely from on-chain stake (`validator_stakes()`), never from reputation or declared energy.
+  The remaining consequence of the `f64` energy field is that it is bound into the block header
+  preimage (`M-09`) — it cannot be rewritten by a relay, and it moves no coin.
+- **One external review, not an audit by an established firm.** A paid single-reviewer security
+  review was performed on 2026-08-13: 85 findings, 13 critical. Its reports are published
+  verbatim in [`2026-08-13/`](2026-08-13/) and the remediation is in
+  [`REMEDIATION-2026-08-13.md`](REMEDIATION-2026-08-13.md). It is not a substitute for an audit
+  by an established firm, and this package exists to obtain that one. What the review itself
+  declares it did **not** cover: any real network, constant-time behaviour, fuzzing, and a
+  review of the `fips204` implementation.
+- **Known-open after remediation**, each named with its reason in the remediation report:
+  election-seed grinding (needs a VDF/RANDAO), leader predictability (no deployable
+  post-quantum VRF exists), the O(height) cost of the happy path in block validation, and the
+  FIPS-204 `ctx` domain separator, deliberately not set because an asymmetry between signing
+  and verification would invalidate every signature on the network silently.
 
 ## 7. Prior internal reviews
 
-These were internal, not third-party, and are documented in `CLAUDE.md`.
+These were internal, not third-party. The external review of 2026-08-13 is published in [`2026-08-13/`](2026-08-13/).
 
 - **P2P audit, 2026-05-07** — corrected: **AUDIT-TX-1** (`verify_tx` exempted `to == "BURN"`
   from signature check, allowing a forged `from=victim, to=BURN` drain; now only `NETWORK`

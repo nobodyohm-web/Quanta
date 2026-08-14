@@ -13,10 +13,10 @@ updated: 2026-07-12
 
 # ADR-007 — Portée du post-quantique : comptes en ML-DSA (Quanta entièrement post-quantique)
 
-← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]]
-Lié à : [[ADR-005 — Agrégation des votes & certificats de finalité]] · [[ADR-006 — Gouvernance & évolutivité]] (signatures PQ = noyau **gravé**) · **CRYPTO-ID-1** (audit, `AUDIT_QUANTA_2_PROGRESS.md`) · **bloque GADGET-3**
+← [Registre ADR](README.md) · cadre : [DESIGN-CONSENSUS-DAG-BFT](../protocol/CONSENSUS-DAG-BFT.md)
+Lié à : [ADR-005 — Agrégation des votes & certificats de finalité](ADR-005-vote-aggregation.md) · [ADR-006 — Gouvernance & évolutivité](ADR-006-governance.md) (signatures PQ = noyau **gravé**) · **CRYPTO-ID-1** (audit, `AUDIT_QUANTA_2_PROGRESS.md`) · **bloque GADGET-3**
 
-> [!warning] DÉCISION DE **VISION FONDATRICE** (proposée 2026-06-24 — recommandation **forte (b)**) — ✅ **réalisée (PQ-MIG-3B, 2026-06-25)**
+> [!WARNING] DÉCISION DE **VISION FONDATRICE** (proposée 2026-06-24 — recommandation **forte (b)**) — ✅ **réalisée (PQ-MIG-3B, 2026-06-25)**
 > L'audit **CRYPTO-ID-1** a prouvé, `fichier:ligne` à l'appui, que « entièrement post-quantique »
 > **n'est pas tenu** : comptes, autorisation de tx, enjeu et transport sont **enracinés Ed25519** ;
 > la couche ML-DSA est **auto-déclarée par tx et non liée** au compte, donc elle **ne protège pas**
@@ -93,7 +93,7 @@ chirurgicaux), comme on l'a fait pour le gadget. Il ne se balance pas en un jet.
 ## Ce qui appartient au fondateur (la part §4 / vision)
 
 L'**engagement** à payer ce coût, contre l'alternative d'expédier plus vite avec l'astérisque de (a),
-dépend de l'**horizon, des ressources et de la tolérance** d'Alexandre, que la recommandation
+dépend de l'**horizon, des ressources et de la tolérance** du mainteneur, que la recommandation
 d'ingénierie ne peut pas trancher. Cet ADR fixe la **recommandation** ((b)) ; le fondateur **ratifie
 l'engagement**.
 
@@ -104,7 +104,7 @@ l'engagement**.
   (enjeu et finalité partagent **nativement** la même identité — fin de la disjonction de CRYPTO-ID-1).
 - `REQUIRE_PQ` doit passer à **true** ; le repli Ed25519 est **retiré** ; la clé PQ auto-déclarée par
   transaction est remplacée par l'**identité ML-DSA du compte**.
-- **Cohérence ADR-006** : « signatures post-quantiques » figure déjà dans le **noyau gravé** ([[ADR-006 — Gouvernance & évolutivité]]) ;
+- **Cohérence ADR-006** : « signatures post-quantiques » figure déjà dans le **noyau gravé** ([ADR-006 — Gouvernance & évolutivité](ADR-006-governance.md)) ;
   (b) est ce qui rend cet invariant gravé **honnête** au niveau du compte (aujourd'hui il ne l'est
   qu'au niveau de la couche de signature, pas de la racine).
 - La migration **mérite son propre document de conception**, puis des specs chirurgicaux.

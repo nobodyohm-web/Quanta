@@ -1,8 +1,17 @@
 # Quanta : une monnaie pair-à-pair post-quantique à finalité irréversible
 
-> Statut : alpha, pas encore audité par un tiers. QUANTA n'a aucun marché ni
-> prix ; aucun n'est avancé ni prédit dans ce document. Chaque constante
-> ci-dessous est gravée dans le code et vérifiée par chaque nœud à chaque bloc.
+> Statut : alpha. Un audit externe a été rendu le 13 août 2026 : 85 constats,
+> dont 13 critiques. Les rapports sont publiés dans `docs/audit/2026-08-13/`,
+> et ce qui a été corrigé, comment on le sait et ce qui reste ouvert dans
+> `docs/audit/REMEDIATION-2026-08-13.md`. QUANTA n'a aucun marché ni prix ;
+> aucun n'est avancé ni prédit dans ce document. Chaque constante ci-dessous
+> est lue dans le code de la version 3.16.0 (`TORUS_PROTOCOL_VERSION = 10`).
+> Celles qui lient le consensus — le plafond d'offre, l'émission, le partage de
+> la récompense, le quorum, les fenêtres de finalité et de déverrouillage —
+> sont recalculées et imposées par chaque nœud, et pas seulement appliquées par
+> l'implémentation de référence ; les bornes de transport sont des politiques
+> locales, identiques dans cette implémentation mais qu'aucune règle de
+> consensus n'impose.
 
 **Résumé.** Une monnaie purement pair-à-pair doit survivre aux deux
 défaillances que ses prédécesseurs acceptent. Les signatures à courbes
@@ -51,9 +60,13 @@ l'émission, l'application, existe pour les servir.
 Une pièce, dans Quanta, est une entrée d'un registre répliqué par tous les
 nœuds, dépensable uniquement par une signature ML-DSA-65 qui se vérifie sous
 la clé publique engagée dans l'adresse de l'expéditeur. Tous les montants sont
-des entiers en µQTA, où 1 QTA vaut 10^6 µQTA ; aucun nombre flottant n'existe
-sur un chemin d'argent, ce qui élimine par construction toute dérive
-d'arrondi entre nœuds.
+des entiers en µQTA, où 1 QTA vaut 10^6 µQTA : les soldes, l'émission, le
+partage de la récompense et le burn sont en arithmétique entière, et aucun
+nombre flottant ne décide d'un montant, ce qui élimine par construction toute
+dérive d'arrondi entre nœuds. Un flottant subsiste sur le chemin du consensus
+— le relevé d'énergie qu'un bloc déclare, qui entre dans le hash d'en-tête par
+son motif IEEE-754 canonique, si bien qu'aucun relais ne peut réécrire le champ
+sans changer le bloc. Il ne déplace aucune pièce.
 
 ```
 adresse            a = BLAKE3(dom_addr ‖ pk)                 pk : ML-DSA-65 (FIPS 204)
@@ -96,6 +109,7 @@ qu'un comité pourrait amender.
 
 ```
 E_tick  = (S_max − M) / D            S_max = 10^8 QTA,   D = 5·10^7
+E_bloc  = 2 · E_tick                 un bloc est scellé tous les deux ticks
 M_n     = S_max · (1 − (1 − 1/D)^n)  après n ticks (un tick par minute)
 n_demi  = D · ln 2 ≈ 3,47·10^7 ticks ≈ 66 ans pour la moitié du restant
 burn(x) = ⌊x / 100⌋                  sur chaque transfert de x µQTA
@@ -103,18 +117,22 @@ burn(x) = ⌊x / 100⌋                  sur chaque transfert de x µQTA
 
 La première ligne dit tout : à chaque minute, le réseau émet la fraction
 1/D de ce qui reste à émettre. L'émission est donc élevée aux premiers jours,
-décroît géométriquement, et n'atteint jamais le plafond : la deuxième ligne en
-est la forme close, la troisième en donne l'échelle humaine, environ
-soixante-six ans pour émettre la moitié de ce qui reste, quel que soit le
-moment d'où l'on compte. La quatrième ligne est le seul puits : un pour cent
-de chaque transfert est brûlé, ce qui rend l'offre circulante lentement
-déflationniste à mesure que la monnaie sert.
+décroît géométriquement, et n'atteint jamais le plafond. Un bloc est scellé
+tous les deux ticks et les porte tous les deux, si bien que `E_bloc` est ce que
+vaut un bloc. `M_n` est la forme close de l'offre émise et `n_demi` en donne
+l'échelle humaine, environ soixante-six ans pour émettre la moitié de ce qui
+reste, quel que soit le moment d'où l'on compte. Le burn est le seul puits : un
+pour cent de chaque transfert est détruit, ce qui rend l'offre circulante
+lentement déflationniste à mesure que la monnaie sert.
 
 Il n'y a pas de préminage : l'état de genèse ne contient aucun solde, pas même
-pour l'auteur du projet. Il n'y a pas d'autorité d'émission : un bloc dont
-l'émission dépasse E_tick est invalide aux yeux de chaque nœud, qui recalcule
-la borne lui-même. Le registre maintient enfin un invariant de conservation,
-vérifié à chaque bloc :
+pour l'auteur du projet. Il n'y a pas d'autorité d'émission : un bloc vaut
+exactement `E_bloc`, une fonction pure de la chaîne que chaque nœud recalcule
+depuis l'offre émise avant ce bloc, et un bloc qui émet davantage est invalide
+à leurs yeux à tous. Un bloc peut émettre moins, ou rien du tout — un
+producteur qui renonce à sa récompense est strictement non-inflationniste —
+mais aucun ne peut émettre au-dessus du barème. Le registre maintient enfin un
+invariant de conservation, vérifié à chaque bloc :
 
 ```
 Σ_comptes (dépensable + staké + déverrouillage) + brûlé = émis ≤ S_max
@@ -135,7 +153,7 @@ chaîne, donc identique sur chaque nœud, qu'il soit en vie depuis le premier
 bloc, restauré d'une sauvegarde ou fraîchement synchronisé.
 
 ```
-beacon = BLAKE3(dom_b ‖ hash(B_{h−L}) ‖ slot)      B_{h−L} : bloc L slots derrière le tip
+beacon = BLAKE3(dom_b ‖ hash(B_{h−L}) ‖ slot)      B_{h−L} : bloc L = 2 slots derrière
 seed   = BLAKE3(dom_s ‖ beacon ‖ slot ‖ round)
 P(le validateur i propose) = s_i / S               s_i : enjeu bondé,  S = Σ s_j
 ```
@@ -153,11 +171,17 @@ personne.
 
 L'éligibilité est imposée à la réception, pas seulement à la production : un
 nœud rejette tout bloc dont le proposeur n'était pas un validateur bondé dans
-l'état parent, si bien qu'un nœud malveillant ne peut pas s'auto-introniser.
-L'enjeu entre et sort par des transactions signées ordinaires, visibles par
-tous ; le retrait s'achève U = 10 080 blocs après sa demande, environ deux
-semaines au rythme nominal, et cette lenteur est une pièce de sécurité que le
-paragraphe suivant explique.
+l'état parent, si bien qu'un nœud malveillant ne peut pas s'auto-introniser. La
+règle a une ouverture assumée, cadencée par la hauteur : un bloc sur seize est
+un slot ouvert que n'importe quelle adresse peut proposer, bondée ou non. Sans
+elle, le premier staker fermerait le réseau à tout nouvel arrivant, puisqu'il
+n'existe ni faucet ni préminage — une adresse neuve aurait besoin d'une pièce
+pour staker, de staker pour proposer, et de proposer pour gagner sa première
+pièce. Ce que coûte cette ouverture est dit au paragraphe 9. L'enjeu entre et
+sort par des transactions signées ordinaires, visibles par tous ; le retrait
+s'achève U = 10 080 blocs après sa demande, environ deux semaines au rythme
+nominal, et cette lenteur est une pièce de sécurité que le paragraphe suivant
+explique.
 
 ## 5. La finalité
 
@@ -173,11 +197,18 @@ cert(C) valide  ⟺  3 · Σ_{v ∈ V(C)} s_v  ≥  2 · S
 Un checkpoint certifié est dit justifié ; deux liens justifiés consécutifs
 finalisent l'aîné. Sous ce plancher finalisé, la chaîne est de pierre : chaque
 nœud refuse tout fork qui remplacerait un bloc finalisé, quelle que soit sa
-longueur, quel que soit son auteur. Au-dessus du plancher, les forks se
-départagent par la règle la plus simple qui converge : la chaîne la plus
-longue gagne, les égalités se tranchent lexicographiquement, et deux
-partitions qui se retrouvent adoptent la même branche sans échanger un mot de
-plus que leurs blocs.
+longueur, quel que soit son auteur. Au-dessus du plancher, la chaîne la plus
+longue gagne, et à hauteur égale le départage se fait au rang d'élection
+pondéré par l'enjeu des deux proposeurs — le classement même qui désigne qui
+peut sceller le slot, tiré du beacon enterré, de la hauteur et de l'ensemble
+bondé tel qu'il est chez le parent. Aucune de ces trois entrées ne se trouve
+dans l'un des blocs concurrents : rebroyer un bloc pour obtenir un meilleur
+hash n'achète donc rien, et gagner un départage exige de l'enjeu, donc quelque
+chose à perdre. Le hash ne tranche que ce que le rang ne sépare pas : deux
+blocs d'un même proposeur, ce qui est une équivocation punissable, et le slot
+ouvert, où un proposeur sous l'enjeu minimal n'a aucun rang. Deux partitions
+qui se retrouvent adoptent la même branche sans échanger un mot de plus que
+leurs blocs.
 
 **Théorème (sûreté responsable).** Si deux checkpoints en conflit sont un jour
 finalisés, alors des validateurs détenant ensemble au moins S/3 ont signé des
@@ -207,31 +238,49 @@ la fait payer un tiers de la monnaie, par la preuve.
 
 ## 6. Le réseau
 
-Les nœuds se connectent en QUIC et s'échangent neuf types de messages par
+Les nœuds se connectent en QUIC et s'échangent onze types de messages par
 gossip : la présence, la demande et la livraison de segments de chaîne, les
-nouveaux blocs, les transactions, l'enregistrement des pseudonymes, la
-vivacité et le signalement. L'échange de clés du transport est l'hybride
-X25519MLKEM768, la combinaison d'une courbe classique et du standard
-post-quantique ML-KEM-768 : un adversaire quantique qui enregistre le trafic
-d'aujourd'hui n'en déchiffrera rien demain, et si l'un des deux mécanismes
-tombait, l'autre tiendrait seul.
+nouveaux blocs, les transactions, l'enregistrement des pseudonymes, le ping et
+le pong, le signalement d'un pair, les votes de finalité et les preuves de
+faute. L'échange de clés du transport est l'hybride X25519MLKEM768, la
+combinaison d'une courbe classique et du standard post-quantique ML-KEM-768 :
+un adversaire quantique qui enregistre le trafic d'aujourd'hui n'en déchiffrera
+rien demain, et si l'un des deux mécanismes tombait, l'autre tiendrait seul.
 
-Chaque enveloppe est signée ML-DSA-65 et franchit neuf portes avant de toucher
-le moindre état :
+Chaque enveloppe est signée ML-DSA-65, et l'ordre dans lequel elle est
+contrôlée est lui-même la propriété de sécurité :
 
 ```
-① taille ≤ 10 Mo        ② décodage              ③ expéditeur non banni
-④ dédup (LRU 10^5)      ⑤ |Δt| ≤ 90 s           ⑥ débit ≤ √(pairs/4)·30/min
-⑦ nonce monotone        ⑧ vérif ML-DSA          ⑨ dispatch
+①  taille ≤ 4 Mio                  ②  décodage JSON
+③  forme des champs de tête, O(1)  ④  sonde de bannissement, en lecture
+⑤  vérif ML-DSA-65 sur la pré-image canonique   ← porte d'authentification
+⑥  éviction d'un ban expiré        ⑦  id = BLAKE3(cette même pré-image)
+⑧  |Δt| ≤ 90 s                     ⑨  sonde de dédup (LRU 10^5)
+⑩  comptabilité par pair           ⑪  insertion dans la dédup
+⑫  débit ≤ 30·max(1, √(pairs/4)) par minute, plafonné à 120, puis nonce monotone
+⑬  dispatch
 ```
 
-La borne de taille et la déduplication ferment les inondations ; la fraîcheur
-d'horodatage et le nonce strictement croissant ferment le rejeu ; la limite de
-débit s'adapte à la taille du réseau ; et rien ne se traite sans signature
-valide. La synchronisation déplace au plus cinquante blocs par requête, quatre
-fenêtres en vol, avec compression optionnelle. L'état complet du nœud est
-photographié sur disque toutes les trente secondes : une coupure de courant
-coûte au pire une demi-minute d'état local, jamais la chaîne.
+L'authentification précède toute écriture. Ce qui tourne avant la signature est
+en O(1) et ne mute rien : une borne de taille, un décodage, un contrôle de
+forme sur des champs de tête de longueur fixe, et une sonde en lecture de la
+table des bannis. Ce qui coûte du travail ou laisse une trace vient après —
+l'identifiant canonique, le cache de déduplication, les compteurs par pair, la
+fenêtre de débit, la borne haute du nonce — parce que tant que la signature
+n'est pas vérifiée, le champ expéditeur est une chaîne choisie par l'attaquant.
+Dédupliquer avant d'authentifier n'est pas une préférence de style mais une
+attaque concrète : cela permet à un pair non authentifié d'installer dans le
+cache de déduplication les identifiants de son choix et de censurer
+gratuitement la synchronisation de chaîne d'un pair, et cela impute à des pairs
+honnêtes des octets qu'ils n'ont jamais envoyés. La borne de taille et le cache
+ferment les inondations ; la fraîcheur d'horodatage et le nonce strictement
+croissant ferment le rejeu ; la limite de débit s'adapte à la taille du réseau,
+de trente messages par pair et par minute jusqu'à un plafond de cent vingt. La
+synchronisation déplace au plus cinquante blocs par requête, ou trois
+mébioctets, le premier des deux atteint, quatre fenêtres en vol, avec
+compression optionnelle. L'état complet du nœud est photographié sur disque
+toutes les trente secondes : une coupure de courant coûte au pire une
+demi-minute d'état local, jamais la chaîne.
 
 Le nœud existe aussi sans interface : un daemon headless expose la même chaîne
 par une API JSON-RPC de dix-sept méthodes, de quoi interroger un bloc, un
@@ -252,24 +301,51 @@ que les autres lui appliqueront, et elle re-vérifie chaque bloc d'un fork
 candidat sur une copie d'essai avant toute réorganisation. Un nœud ne peut ni
 accepter un découvert, ni en sceller un, ni corrompre sa propre chaîne par
 une réorganisation hasardeuse ; et aucune réorganisation, jamais, ne descend
-sous le plancher de finalité.
+sous le plancher de finalité. Une seconde borne, indépendante de la finalité,
+refuse toute réorganisation de plus de 128 blocs, quel que soit son score. Le
+prix est nommé plutôt que caché : au-delà de cette profondeur, une partition ne
+guérit plus toute seule, et resynchroniser demande une action explicite de
+l'opérateur.
 
 ## 8. L'incitation
 
-Chaque tick émet E_tick et le partage selon la contribution mesurée, l'énergie
-engagée, le travail accompli, la validation rendue et le temps de présence,
-par valeurs de Shapley, la règle de partage qui attribue à chacun sa
-contribution marginale moyenne :
+Un bloc émet E_bloc, et ce nombre n'est pas choisi par celui qui le scelle :
+c'est une fonction pure de la chaîne, recalculée par chaque récepteur depuis
+l'offre émise avant le bloc. Aucune mesure locale n'entre sur le chemin
+monétaire. L'énergie, le temps de présence et le travail revendiqués par un
+pair sont auto-déclarés, donc invérifiables par construction ; ils ont été
+retirés de l'émission et ne restent que des signaux d'affichage. Une
+récompense dérivée de la seule chaîne est identique sur chaque nœud, et c'est
+ce qui permet à un récepteur de la recalculer au lieu de simplement la borner.
+
+Le partage se recalcule de la même façon, il ne se croit jamais sur parole :
 
 ```
-part_i = φ_i / Σ_j φ_j
+producteur     = E_bloc/2  +  ce que la division entière laisse
+participant i  = (E_bloc − E_bloc/2) · b_i / Σ_j b_j        i ≠ producteur
+b_i            = blocs produits par i dans les W = 32 derniers blocs
 ```
 
-Un nœud seul gagne le tick entier. Les récompenses sont des pièces ordinaires
-sous des adresses ordinaires ; le minage est la seule émission, et le burn de
-un pour cent sur les transferts le seul puits. Les validateurs ne sont pas
-payés pour voter : ils stakent pour être élus proposeurs, et perdent l'enjeu
-s'ils équivoquent. L'application rend ce cycle visible : elle mine en
+La moitié va au producteur du bloc, le reste aux autres adresses ayant produit
+un bloc dans les trente-deux derniers, au prorata du nombre de blocs produits
+par chacune. Aucun µQTA ne se perd en route : ce que la division entière laisse
+revient au producteur, si bien que le plan somme exactement à la récompense. Le
+poids, ce sont les blocs, pas les adresses : les slots sont une ressource
+finie, si bien que scinder une identité en K ne produit pas un bloc de plus et
+ne rapporte rien de plus. Partager à parts égales entre adresses distinctes
+était la règle précédente, et elle subventionnait la duplication
+d'identité — vingt-huit identités captaient 45,2 % de chaque récompense là où
+une seule en gagnait 12,5 %. Chaque nœud récepteur recalcule le plan entier et
+rejette un bloc qui s'en écarte : un producteur ne peut donc ni garder plus que
+sa moitié, ni baisser la part des autres sans baisser la sienne dans la même
+proportion. Un bloc peut porter moins que la récompense entière, ou rien ; sur
+une chaîne sans autre participant récent, le producteur prend tout.
+
+Les récompenses sont des pièces ordinaires sous des adresses ordinaires ; la
+production de blocs est la seule émission, et le burn de un pour cent sur les
+transferts le seul puits. Les validateurs ne sont pas payés pour voter : ils
+stakent pour être élus proposeurs, et perdent l'enjeu s'ils équivoquent.
+L'application rend ce cycle visible : elle fait tourner le nœud en
 arrière-plan, montre chaque récompense à l'instant où la chaîne l'inscrit, et
 laisse envoyer et recevoir par un simple pseudonyme précédé d'un arobase,
 résolu on-chain vers l'adresse de son détenteur.
@@ -282,16 +358,23 @@ cryptographique, qui rendrait l'élu imprévisible jusqu'à sa révélation, et 
 VDF anti-grinding sont des travaux futurs. L'identité de nœud du transport,
 l'endpoint QUIC, reste Ed25519 : c'est une contrainte de la bibliothèque
 amont, hors de ce code, et elle basculera le jour où l'amont livrera des
-identités post-quantiques. Les relevés d'énergie déclarés pondèrent une part
-de l'émission ; ils sont hors du chemin de sécurité du consensus, le poids
-d'un validateur étant l'enjeu on-chain et rien d'autre, mais ils restent une
-surface de jeu économique à l'étude. Le réseau vivant est petit ; les
+identités post-quantiques. Un bloc sur seize est un slot ouvert que n'importe
+quelle adresse peut proposer, bondée ou non ; un protocole ne peut pas être à
+la fois sans permission, résistant aux Sybils et gratuit, donc l'entrée libre
+s'achète en résistance Sybil. Le prix est borné et cadencé par la hauteur, pas
+par le nombre de prétendants : une ferme d'identités capte au plus ce seizième
+de l'émission, quel que soit son nombre d'identités, et jamais davantage. Les
+relevés d'énergie déclarés ne pèsent rien — ils ont quitté le chemin monétaire
+— mais le total réseau qu'affiche l'application reste une somme de
+déclarations et doit se lire comme telle. Le réseau vivant est petit ; les
 propriétés de ce document sont imposées par chaque nœud et exercées en
 simulation déterministe multi-graines, elles ne sont pas encore éprouvées à
-l'échelle. Aucun audit externe n'a encore eu lieu ; le dossier de préparation
-complet, modèle de menace, périmètre chiffré et engagement de publication
-intégrale du rapport, vit dans `docs/audit/`. Enfin QUANTA n'a ni marché ni
-prix, et ce document ne valorise rien.
+l'échelle. L'audit externe du 13 août 2026 a rendu 85 constats, dont 13
+critiques, et a imposé une rupture de protocole de v9 vers v10 ainsi qu'un
+rejeu de la genèse ; ses rapports sont publiés dans `docs/audit/2026-08-13/` et
+la remédiation, y compris ce qui reste ouvert, dans
+`docs/audit/REMEDIATION-2026-08-13.md`. Enfin QUANTA n'a ni marché ni prix, et
+ce document ne valorise rien.
 
 ## 10. Calculs
 
@@ -324,6 +407,6 @@ nœud les vérifie toutes.
 
 ---
 
-*Protocole `TORUS_PROTOCOL_VERSION = 6` · Apache-2.0 · L'implémentation de
-référence, sa suite de tests et sa simulation déterministe du consensus vivent
-dans ce dépôt.*
+*Quanta 3.16.0 · protocole `TORUS_PROTOCOL_VERSION = 10` · chain id
+`quanta-mainnet-v10` · Apache-2.0 · L'implémentation de référence, sa suite de
+tests et sa simulation déterministe du consensus vivent dans ce dépôt.*

@@ -14,15 +14,21 @@
 //! integration (from `handle_new_block` / `handle_chain_segment`). It:
 //!
 //! 1. **Buffers** candidate blocks (dedup by hash, hard cap
-//!    [`FORK_BUFFER_MAX_BLOCKS`], deterministic eviction of the *highest*
-//!    index first — blocks near the fork root are the scarce resource);
+//!    [`FORK_BUFFER_MAX_BLOCKS`], deterministic eviction of the block *farthest
+//!    from our tip* — blocks near the fork root are the scarce resource, and
+//!    junk far below the tip is the cheapest thing an attacker can forge, cf.
+//!    `H5`; the search is `ForkReconciler::worst_entry`, `R17`);
 //! 2. **Assembles** the longest contiguous run rooted at a block **we hold**
 //!    (parent lookup by `prev_hash` at `index - 1`);
 //! 3. **Decides** with the deterministic *live win rule*: adopt iff the run's
-//!    tip is **higher** than ours, or **equal-height with the
-//!    lexicographically greater hash** — the exact N-block generalization of
-//!    the 1-deep tie-break `integrate_remote_block` already applies, so both
-//!    sides of a heal converge to the SAME chain (exactly one side adopts);
+//!    tip is **higher** than ours, or equal-height and preferred by
+//!    [`Ledger::fork_choice_prefers`] — since `C-04` (FORK-RANK-1) that
+//!    comparison is the **stake-weighted election rank** of each tip's proposer,
+//!    NOT the greater hash. The timestamp feeds the hash, so a hash tie-break
+//!    could be ground with a few thousand BLAKE3 and no stake at all. The hash
+//!    only remains as the neutral fallback for an unranked proposer (the open
+//!    slot). Both sides of a heal evaluate the same function, so they converge
+//!    to the SAME chain (exactly one side adopts);
 //! 4. **Applies** through [`Ledger::reorg_to_fork`] — full validation on a
 //!    trial clone (coverage, emission cap, signatures, slashes), loser user
 //!    txs re-queued, synthetic/slash txs dropped, and the **finality floor is

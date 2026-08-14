@@ -1,9 +1,14 @@
 # Politique de sécurité — Quanta Protocol
 
-> Statut : **alpha, non audité par un tiers.** Le code actuel n'a **jamais** été
-> éprouvé entre deux machines physiques derrière deux NAT distincts : le jalon de
-> mai 2026 précède deux ruptures de protocole et une régression qui a rendu le nœud
-> muet sur tout réseau réel pendant deux mois sans qu'aucun compteur ne le signale.
+> Statut : **alpha.** Une revue de sécurité externe a eu lieu le 13/08/2026 — 85
+> constats dont 13 critiques — et ses rapports sont publiés tels quels dans
+> [`docs/audit/2026-08-13/`](docs/audit/2026-08-13/). C'était une revue à **un seul
+> relecteur**, pas un audit de cabinet établi, et elle ne remplace pas ce dernier.
+>
+> Le code n'a par ailleurs **jamais** été éprouvé entre deux machines physiques
+> derrière deux NAT distincts : le jalon de mai 2026 précède deux ruptures de
+> protocole et une régression qui a rendu le nœud muet sur tout réseau réel pendant
+> deux mois sans qu'aucun compteur ne le signale.
 > N'engagez pas de valeur réelle que vous ne pouvez pas perdre.
 
 ## Signaler une vulnérabilité
@@ -93,7 +98,9 @@ sur le transport et le PQ pur sur les signatures — est développé dans
   « unstake-and-run » ne mette pas les fonds à l'abri. Un proposeur malveillant
   ne peut pas punir un innocent : la preuve embarquée est re-vérifiée par chaque
   nœud.
-- **DoS gossip** : 10 Mo max par enveloppe, rate-limit adaptatif borné [15, 120]
+- **DoS gossip** : 4 Mio max par enveloppe (`MAX_RAW_ENVELOPE_BYTES`, réduit de 10 Mo
+  après `R3` — un OOM distant par un pair non authentifié), rate-limit adaptatif
+  plafonné à 120 msg/min
   msg/min, 50 blocs max par segment de synchronisation, bannissement après
   3 signalements, cartes par pair bornées en mémoire.
 - **Eclipse** : heuristique de collision de préfixe de clé publique (> 80 %).
@@ -148,7 +155,7 @@ bonnes ; ce sont les défenses **absentes** qui ouvraient le système, et elles
 | `H-07` | Un message rendait le nœud sourd à tout gossip, définitivement | **corrigé** — somme d'émission `checked`, le débordement est un rejet |
 | `C-02` | Le timestamp d'un bloc n'était validé nulle part | **corrigé** — `BLOCK-TIME-1` : parsable et non décroissant vis-à-vis du parent |
 | `R3` `R4` `R13` | OOM distant par messages, décompression et `Hello` non bornés | **corrigé** — bornes dérivées du plus gros message légal |
-| `C-04` | Le départage de fork était « le plus grand hash gagne » — gagnable par broyage, sans posséder un µQTA | **corrigé (14/08)** — `FORK-RANK-1` : rang d'élection pondéré par l'enjeu, ancré sur un beacon enterré ([`docs/DESIGN-FORK-RANK.md`](docs/DESIGN-FORK-RANK.md)) |
+| `C-04` | Le départage de fork était « le plus grand hash gagne » — gagnable par broyage, sans posséder un µQTA | **corrigé (14/08)** — `FORK-RANK-1` : rang d'élection pondéré par l'enjeu, ancré sur un beacon enterré ([`docs/protocol/FORK-RANK.md`](docs/protocol/FORK-RANK.md)) |
 | `C-03` | Long-range : une branche reconstruite hors ligne remontant à la genèse était admissible tant que la finalité n'avait pas progressé | **corrigé (14/08)** — `REORG-DEPTH-1` (128 blocs, indépendant de la finalité) + `GENESIS-ANCHOR-1` |
 | `H-06` | Le même certificat de finalité échouait puis réussissait selon qui s'était désengagé entre-temps | **corrigé (14/08)** — enjeu figé à la frontière d'époque, fonction pure de la chaîne |
 | `H-08` | 45 % de chaque récompense captés avec 28 identités, pour 28 QTA d'enjeu | **corrigé (14/08)** — `REWARD-WEIGHT-1` : le pot se pondère par les **blocs produits**, pas par le nombre d'adresses |
@@ -167,6 +174,11 @@ bonnes ; ce sont les défenses **absentes** qui ouvraient le système, et elles
 | `R9` | Ordre de composition DHT trié par octets d'`EndpointId`, donc minable : 8 identités à préfixe nul éclipsaient tout nouveau nœud à 100 % | **corrigé (14/08)** — trois mélanges `OsRng` par cycle, 2 pairs adoptés par slot au maximum |
 | `R17` | Éviction du tampon de fork en O(n) avec ~2 048 allocations par bloc offert — **et** des index fantômes qu'aucune borne ne comptait | **corrigé (14/08)** — recherche aux bords en O(log n) sans allocation ; la fuite de clés, trouvée par ce correctif, est fermée |
 | **restant** | Grinding de la graine d'élection, prédictibilité sans VRF, coût O(hauteur) du chemin heureux (M-14), séparation `ctx` FIPS-204, revendication de pseudo gratuite (R7 §ouvert) | **ouvert** — nommé et détaillé dans `docs/audit/REMEDIATION-2026-08-13.md` §9.6, §11 et §13 |
+
+**Les rapports d'origine sont publics.** Les six documents de la revue du
+13/08/2026 et le PoC exécutable de `C-1` sont versionnés dans
+[`docs/audit/2026-08-13/`](docs/audit/2026-08-13/), sans coupe ni reformulation.
+Sans le constat d'origine, une remédiation demande d'être crue sur parole.
 
 **Ce qui reste vrai malgré tout** : la liaison intrinsèque adresse↔clé
 (`from == BLAKE3(ADDR_DOMAIN ‖ pk)`), l'indépendance réelle de la racine ML-DSA

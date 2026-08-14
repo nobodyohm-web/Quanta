@@ -179,7 +179,7 @@ Rendre Quanta « parlable » par un exchange. Chaque brique débloque la suivant
 
 ---
 
-## Décisions stratégiques (pour Alexandre)
+## Décisions stratégiques restant au mainteneur
 
 Deux choix ne relèvent pas de l'ingénierie de routine et t'appartiennent :
 

@@ -9,13 +9,13 @@ updated: 2026-07-12
 
 # Gadget de finalité Quanta — style Casper FFG, post-quantique, par époque
 
-← [[00 — Pilotage QUANTA]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]] (Option 1 — Phase 1)
-Socle ADR : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité BFT]] · [[ADR-003 — Slashing (accountable safety)]] · [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]] · [[ADR-005 — Agrégation des votes & certificats de finalité]]
+← `00 — Pilotage QUANTA` · cadre : [DESIGN-CONSENSUS-DAG-BFT](CONSENSUS-DAG-BFT.md) (Option 1 — Phase 1)
+Socle ADR : [ADR-001 — Fork-choice](../decisions/ADR-001-fork-choice.md) · [ADR-002 — Validator set & comité BFT](../decisions/ADR-002-validator-set.md) · [ADR-003 — Slashing (accountable safety)](../decisions/ADR-003-slashing.md) · [ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](../decisions/ADR-004-election-randomness.md) · [ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md)
 
-> [!abstract] Statut — implémenté et prouvé en simulation DST (2026-06-25)
+> [!NOTE] Statut — implémenté et prouvé en simulation DST (2026-06-25)
 > L'orfèvrerie : le protocole raisonné de bout en bout, puis **construit**. Il s'ancre
 > sur **Casper FFG** (le gadget de finalité d'Ethereum, à sûreté responsable démontrée), adapté
-> à Quanta : votes **ML-DSA** ([[ADR-005 — Agrégation des votes & certificats de finalité]]),
+> à Quanta : votes **ML-DSA** ([ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md)),
 > finalisation **par époque**, et **vérifié en continu par le harnais DST** existant. Les
 > arguments de sûreté/vivacité (§7-8) restent des **esquisses rigoureuses, pas des preuves
 > formelles** : la formalisation et l'audit externe restent devant (§13). Mais l'architecture
@@ -30,19 +30,19 @@ Socle ADR : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité
 > | GADGET-5A/B | `src-tauri/src/sm/fork_choice.rs` + `Ledger::reorg_to_fork` | LMD-GHOST `ghost_head` + résolution de partition |
 >
 > Les 4 méta-décisions §12 sont **tranchées** (ADR-009). Le câblage réseau vivant (gossip des
-> votes, LIVE-1) est **fait** ; voir [[DESIGN-LIVE-WIRING]] pour la suite (LIVE-2, LIVE-3).
+> votes, LIVE-1) est **fait** ; voir [DESIGN-LIVE-WIRING](LIVE-WIRING.md) pour la suite (LIVE-2, LIVE-3).
 
 ## 1. Ce sur quoi on construit
 
 Quanta a déjà : une **chaîne linéaire** de blocs, une production en **preuve d'enjeu** avec
-leader élu via le **beacon** ([[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]]), une
+leader élu via le **beacon** ([ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](../decisions/ADR-004-election-randomness.md)), une
 validation partagée `validate_block_against_prev`, et un **harnais de simulation déterministe**
 (`src-tauri/src/sm/`) qui vérifie **sûreté, conservation et émission** à travers des centaines
 de scénarios fautés. Le gadget se **superpose** à cette chaîne : il ne remplace pas la
 production de blocs, il y ajoute une couche de **finalité déterministe**.
 
 L'idée centrale de Casper, qui colle exactement à la décision
-[[ADR-005 — Agrégation des votes & certificats de finalité]], est que la finalité opère sur des
+[ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md), est que la finalité opère sur des
 **points de contrôle** aux **frontières d'époque**, pas bloc par bloc. C'est précisément ce qui
 rend les certificats post-quantiques gérables.
 
@@ -93,7 +93,7 @@ Le **certificat de finalité** d'une époque est l'**ensemble des votes ML-DSA**
 super-majoritaire qui justifie la frontière. **Un** certificat par époque (pas par bloc) — de
 l'ordre de **165 Ko pour cinquante validateurs**, amorti sur `E` blocs et **élagable** une fois
 l'époque profondément finalisée. Pas de BLS, pas d'ancrage, **un seul système cryptographique**,
-exactement comme tranché en [[ADR-005 — Agrégation des votes & certificats de finalité]]. Le
+exactement comme tranché en [ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md). Le
 certificat est rangé derrière l'**abstraction de certificat** de l'ADR-005, pour qu'une
 agrégation future (BLS, SNARK PQ) reste un **remplacement local**.
 
@@ -117,7 +117,7 @@ suffisent :
    `(source, cible)` en **entoure** un autre qu'il a déjà signé (source antérieure **et** cible
    postérieure).
 
-> [!success] Théorème de sûreté responsable (esquisse)
+> [!TIP] Théorème de sûreté responsable (esquisse)
 > Si deux points de contrôle **en conflit** sont tous deux finalisés, alors des validateurs
 > totalisant **au moins ⅓ de l'enjeu** ont nécessairement violé la condition 1 ou la 2. Comme
 > chaque vote est une signature ML-DSA **non répudiable**, la violation est **prouvable** — donc
@@ -127,7 +127,7 @@ Conséquence forte : on ne peut pas casser la finalité **sans** qu'au moins **u
 l'enjeu** soit détruisible par preuve. La sûreté n'est pas seulement « difficile à violer »,
 elle est **responsable** : toute violation laisse une **preuve cryptographique de qui l'a
 commise**. C'est ce qui donne corps à
-[[ADR-003 — Slashing (accountable safety)]] — le slashing n'est pas un ajout, il **découle** des
+[ADR-003 — Slashing (accountable safety)](../decisions/ADR-003-slashing.md) — le slashing n'est pas un ajout, il **découle** des
 deux conditions, et l'attribution de faute est **directe** parce que les votes sont **séparés**
 (un des gains du PQ pur sur l'agrégat, noté en ADR-005).
 
@@ -143,7 +143,7 @@ ait à violer une condition de slashing. Le protocole ne peut pas se peindre dan
 finaliser exigerait de se faire slasher — c'est ce qui garantit qu'on n'est **jamais bloqué de
 façon irrécupérable**.
 
-> [!warning] Honnêteté — la vivacité est la partie subtile
+> [!WARNING] Honnêteté — la vivacité est la partie subtile
 > Elle dépend de la règle de fork-choice du §9 et des hypothèses de synchronie. C'est là que vit
 > la vraie difficulté de la construction (le « Gasper » d'Ethereum, fork-choice + finalité,
 > recèle des subtilités de vivacité réelles), et c'est là qu'il faudra le plus de soin et, à
@@ -157,7 +157,7 @@ La règle de fork-choice devient **consciente de la finalité** : un nœud const
 branche qui contient le **dernier point de contrôle justifié** le plus récent, et **ne revient
 jamais** sur un point de contrôle **finalisé**. La finalité est un **plancher absolu**.
 
-Or le problème laissé ouvert en [[ADR-001 — Fork-choice]] : le fork-choice intérimaire ne sait
+Or le problème laissé ouvert en [ADR-001 — Fork-choice](../decisions/ADR-001-fork-choice.md) : le fork-choice intérimaire ne sait
 départager qu'**un seul bloc au même index**, pas réconcilier deux chaînes concurrentes de
 plusieurs blocs après une longue partition. **Le gadget le résout.** Quand deux partitions
 guérissent :
@@ -168,7 +168,7 @@ guérissent :
 - **au-dessus** de la finalité, les branches concurrentes se départagent par la règle de
   fork-choice, en suivant le **point de contrôle justifié** le plus récent.
 
-> [!success] Cible d'acceptation — réalisée (GADGET-5B)
+> [!TIP] Cible d'acceptation — réalisée (GADGET-5B)
 > Le basculement attendu **a eu lieu** : le test **2b**, autrefois
 > `t0_8_multiblock_partition_currently_diverges_gadget_deferred`, est maintenant
 > `t0_8_multiblock_partition_reconciles_at_heal` (`src-tauri/src/sm/sim.rs:3467`) et asserte
@@ -181,11 +181,11 @@ guérissent :
 ## 10. Comité et rotation (ADR-002, ADR-004)
 
 Le comité de validateurs est pondéré par l'**enjeu inscrit sur la chaîne**
-([[ADR-002 — Validator set & comité BFT]] — enjeu **seul**, la réputation ayant été retirée du
+([ADR-002 — Validator set & comité BFT](../decisions/ADR-002-validator-set.md) — enjeu **seul**, la réputation ayant été retirée du
 chemin de sécurité). Il **tourne** par époque via l'aléa du **beacon**
-([[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]]). Le quorum de ⅔ se mesure en **enjeu**,
+([ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](../decisions/ADR-004-election-randomness.md)). Le quorum de ⅔ se mesure en **enjeu**,
 pas en têtes. La taille du comité reste **modeste** au départ — ce qui est précisément ce qui
-rend les certificats PQ gérables ([[ADR-005 — Agrégation des votes & certificats de finalité]]).
+rend les certificats PQ gérables ([ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md)).
 
 ## 11. Vérification par le harnais DST (le vrai sceau d'orfèvre)
 
@@ -210,9 +210,9 @@ simulation déterministe : c'est l'objet rare que les gens du domaine respectent
 
 ## 12. Décisions — tranchées par ADR-009
 
-> [!question] Ce dont j'avais besoin de toi — tranché
-> La **règle d'arrêt §4** ([[QUANTA_AGENT_CONSTITUTION]]) nommait explicitement « quel modèle de
-> finalité, faut-il du slashing et comment ». **[[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12]]**
+> [!NOTE] Ce dont j'avais besoin de toi — tranché
+> La **règle d'arrêt** du projet nommait explicitement « quel modèle de
+> finalité, faut-il du slashing et comment ». **[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12](../decisions/ADR-009-carved-vs-adjustable.md)**
 > a tranché :
 >
 > - **`E`, la longueur d'époque** : **32 blocs** (`EPOCH_LENGTH_BLOCKS = 32`, `finality.rs`) —
@@ -221,7 +221,7 @@ simulation déterministe : c'est l'objet rare que les gens du domaine respectent
 >   `meets_supermajority` (`finality_vote.rs`).
 > - **Variante de fork-choice** consciente de la finalité : **LMD-GHOST** (`ghost_head`,
 >   `fork_choice.rs`, GADGET-5A).
-> - **Montants et fenêtre de slashing** ([[ADR-003 — Slashing (accountable safety)]]) : montant
+> - **Montants et fenêtre de slashing** ([ADR-003 — Slashing (accountable safety)](../decisions/ADR-003-slashing.md)) : montant
 >   plein pour les deux conditions du §7 (double vote / vote enveloppant), fenêtre de preuve =
 >   la fenêtre d'unbonding (`SLASH_EVIDENCE_WINDOW_BLOCKS`).
 >
@@ -230,7 +230,7 @@ simulation déterministe : c'est l'objet rare que les gens du domaine respectent
 > disparaît durablement — reportée, non requise pour le gadget tel que livré.
 
 Ces choix recoupent les sous-paramètres encore ouverts d'ADR-002/003/004/005 (taille de comité,
-niveau ML-DSA, format/élagage du certificat) : voir [[docs/decisions/README|Registre des décisions]].
+niveau ML-DSA, format/élagage du certificat) : voir [Registre des décisions](../decisions/README.md).
 
 ## 13. Limites honnêtes
 
@@ -249,25 +249,25 @@ harnais avant la suivante** :
 1. **Squelette d'époque et de point de contrôle** (découper la chaîne, identifier les frontières)
    + l'invariant de **sûreté de finalité** dans le harnais.
 2. Les **votes ML-DSA** et leur agrégation en **certificat d'époque**, derrière l'abstraction
-   ([[ADR-005 — Agrégation des votes & certificats de finalité]]).
+   ([ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md)).
 3. La **règle justification/finalisation** en deux temps, avec son invariant de **vivacité**.
 4. Les **deux conditions de slashing** et la vérification de **sûreté responsable** (comité
-   byzantin injecté) — articule [[ADR-003 — Slashing (accountable safety)]].
+   byzantin injecté) — articule [ADR-003 — Slashing (accountable safety)](../decisions/ADR-003-slashing.md).
 5. Le **fork-choice conscient de la finalité**, et la **bascule du test 2b** (réconciliation de
    partition, **conservation globale au heal**).
-6. **Rotation du comité** par le beacon ([[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]]),
+6. **Rotation du comité** par le beacon ([ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](../decisions/ADR-004-election-randomness.md)),
    puis **pénalité d'inactivité**.
 
 Chacune est un **spec serré**, exécuté et relu, comme tout ce qu'on a fait jusqu'ici. C'est ainsi
 qu'un gros morceau se construit **sans devenir un gros risque**.
 
-> [!note] Statut & suite
+> [!NOTE] Statut & suite
 > Conception **validée et implémentée** (GADGET-1→5B, 2026-06-25) en simulation déterministe,
 > suivant exactement le découpage du §14, chaque pièce **falsifiée par le harnais DST** avant la
 > suivante. Les **🛑** du §12 sont tranchés par ADR-009. Prochaine étape : le **câblage vivant**
 > (le gadget tourne en simulation, pas encore intégralement sur le réseau réel) — LIVE-1 (gossip
 > des votes) est **fait** ; restent LIVE-2 (proposition finalité-consciente) et LIVE-3 (slashing
-> vivant). Voir [[DESIGN-LIVE-WIRING]].
+> vivant). Voir [DESIGN-LIVE-WIRING](LIVE-WIRING.md).
 
 > L'orfèvrerie, c'est cette conception. Sa beauté n'est pas dans sa taille mais dans le fait que
 > **chaque pièce se démontre et se mesure**. Le reste, c'est de la transcription patiente.

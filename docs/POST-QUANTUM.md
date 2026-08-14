@@ -242,7 +242,7 @@ cadavres, les standards ont été publiés le **13 août 2024**.
 | FIPS 203 | ML-KEM | Kyber | Échange de clés (confidentialité) |
 | FIPS 204 | **ML-DSA** | Dilithium | **Signature (authenticité)** |
 | FIPS 205 | SLH-DSA | SPHINCS+ | Signature de secours, à base de hachage |
-| (FIPS 206, en projet) | FN-DSA | Falcon | Signature compacte, non finalisée au 2 août 2026 |
+| (FIPS 206, en projet) | FN-DSA | Falcon | Signature compacte — projet non finalisé en août 2026 (statut NIST, non vérifiable depuis ce dépôt) |
 | (sélectionné en mars 2025) | HQC | — | KEM de secours, à base de codes |
 
 Les noms ont changé à la standardisation : « Kyber » et « Dilithium » sont les noms des
@@ -370,10 +370,12 @@ Quanta en a fait l'expérience de la pire manière possible, et l'anecdote vaut 
 n'importe quelle explication abstraite. Depuis le fork v4, chaque enveloppe de gossip est
 signée en ML-DSA-65 : 3 309 octets de signature, 1 952 octets de clé publique, le tout
 encodé en hexadécimal dans du JSON — ce qui **double** encore la taille. Un simple message
-de présence `Hello` pèse, mesuré dans le journal d'un nœud réel :
+de présence `Hello` pèse, relevé dans le journal d'un nœud réel — le format de ligne
+vient de `p2p/gossip_tasks.rs`, la valeur est une mesure de session et ne se rejoue pas
+depuis le dépôt :
 
 ```
-[Gossip] outgoing 14827 bytes id=e592666f8b5b
+◈ [Gossip] outgoing 14827 bytes id=e592666f8b5b
 ```
 
 Or la bibliothèque de transport plafonnait un message à **4 096 octets**. Les nœuds se
@@ -424,7 +426,7 @@ vous faites quoi ? ».
 
 | Usage | Primitive | Où c'est dans le code |
 |---|---|---|
-| Autorité d'une transaction (l'argent) | **ML-DSA-65** pur (FIPS 204) | `security/hybrid_crypto.rs` |
+| Autorité d'une transaction (l'argent) | **ML-DSA-65** pur (FIPS 204) | règle : `p2p/ledger/validation.rs::verify_tx` · primitives : `security/hybrid_crypto.rs` |
 | Votes de finalité (l'irréversibilité) | **ML-DSA-65** | `sm/finality_vote.rs` |
 | Enveloppes de gossip (chaque message réseau) | **ML-DSA-65** | `p2p/gossip.rs`, `p2p/dispatcher.rs` |
 | Multisig M-parmi-N | **ML-DSA-65**, quorum de clés distinctes | `p2p/ledger/validation.rs::verify_multisig` |
@@ -433,6 +435,14 @@ vous faites quoi ? ».
 | Dérivation depuis le mot de passe | Argon2id — 64 Mio, 3 passes, parallélisme 4 | `security/cipher.rs` |
 | Hachage, adressage par contenu | BLAKE3 | partout |
 | **Identité de nœud (NodeId Iroh)** | **Ed25519 — classique** | dépendance amont |
+
+La première ligne mérite une précision, parce que la distinction est exactement celle
+qu'un auditeur cherche : `security/hybrid_crypto.rs` contient les **primitives**
+(`derive_ml_dsa`, `ml_dsa_sign_deterministic`, `verify_ml_dsa`), pas la règle. La règle
+d'autorité — couche ML-DSA obligatoire, `from` qui doit être `BLAKE3(ADDR_DOMAIN ‖ clé
+révélée)`, aucun repli Ed25519, type `Mining` refusé à tout émetteur utilisateur — est
+appliquée dans `p2p/ledger/validation.rs::verify_tx`, le seul portail traversé aussi bien
+à l'admission d'une transaction qu'à la validation d'un bloc.
 
 La dernière ligne est la limite honnête, et il faut savoir l'énoncer sans la maquiller : la
 bibliothèque de transport Iroh identifie chaque nœud par une clé Ed25519, et attend un
@@ -628,14 +638,16 @@ attack on SIDH*, 2022 — l'attaque qui a tué SIKE sur un ordinateur portable.
 
 Côté Quanta, la posture exacte est dans [`SECURITY.md`](../SECURITY.md) ; les décisions
 motivées, avec à chaque fois l'alternative écartée, dans
-[`docs/decisions/`](decisions/) — en particulier l'**ADR-005** (agrégation des votes et
-certificats de finalité) et l'**ADR-007** (portée du post-quantique : les comptes en
-ML-DSA) ; et le fonctionnement du protocole dans
+[`docs/decisions/`](decisions/) — en particulier
+[**ADR-005**](decisions/ADR-005-vote-aggregation.md) (agrégation des votes et certificats
+de finalité) et [**ADR-007**](decisions/ADR-007-post-quantum-scope.md) (portée du
+post-quantique : les comptes en ML-DSA) ; et le fonctionnement du protocole dans
 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
-*Tous les chiffres concernant Quanta ont été lus dans le code au 2 août 2026, version
-3.15.1, `TORUS_PROTOCOL_VERSION = 9`. Les tailles ML-DSA proviennent des constantes de la
-crate `fips204` 0.4.6 effectivement compilée, et la taille d'enveloppe mesurée provient du
-journal d'un nœud réel.*
+*Tous les chiffres concernant Quanta ont été relus dans le code le 14 août 2026, version
+3.16.0, `TORUS_PROTOCOL_VERSION = 10`, `CHAIN_ID = "quanta-mainnet-v10"`. Les tailles
+ML-DSA proviennent des constantes de la crate `fips204` 0.4.6 effectivement compilée
+(`ml_dsa_65::PK_LEN` = 1 952, `SIG_LEN` = 3 309, `SK_LEN` = 4 032), et la taille
+d'enveloppe citée provient du journal d'un nœud réel, non reproductible depuis le dépôt.*

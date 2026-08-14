@@ -11,28 +11,28 @@ updated: 2026-06-25
 
 # ADR-009 — Frontière gravé/ajustable (ADR-006 ratifiée) et valeurs du §12
 
-← [[README|Registre ADR]] · ratifie : [[ADR-006 — Gouvernance & évolutivité]]
-Lié à : [[ADR-002 — Validator set & comité BFT]] · [[ADR-003 — Slashing (accountable safety)]] ·
-[[ADR-005 — Agrégation des votes & certificats de finalité]] · politique d'émission · PQ-MIG-5 (genèse PQ)
+← [Registre ADR](README.md) · ratifie : [ADR-006 — Gouvernance & évolutivité](ADR-006-governance.md)
+Lié à : [ADR-002 — Validator set & comité BFT](ADR-002-validator-set.md) · [ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md) ·
+[ADR-005 — Agrégation des votes & certificats de finalité](ADR-005-vote-aggregation.md) · politique d'émission · PQ-MIG-5 (genèse PQ)
 
-> [!success] DÉCISION **ACCEPTÉE** (défauts tranchés, réglables — 2026-06-25)
-> [[ADR-006 — Gouvernance & évolutivité]] posait le **principe** (noyau monétaire immuable **par
+> [!TIP] DÉCISION **ACCEPTÉE** (défauts tranchés, réglables — 2026-06-25)
+> [ADR-006 — Gouvernance & évolutivité](ADR-006-governance.md) posait le **principe** (noyau monétaire immuable **par
 > construction**, périphérie ajustable derrière abstractions) mais laissait la **frontière exacte**
 > et les **valeurs** ouvertes. Cet ADR les **tranche**, avec des défauts ancrés dans la littérature
 > et l'**état réel du code**. Les valeurs **monétaires** existantes ne sont **pas redéfinies** ici
-> (ce sont les choix d'Alexandre) ; elles sont **ratifiées comme gravées**. Le reste est fixé à des
+> (ce sont des choix du mainteneur) ; elles sont **ratifiées comme gravées**. Le reste est fixé à des
 > défauts **réglables** (réglages, pas promesses ; évolution par **fork volontaire**, jamais par
 > gouvernance on-chain). **Rien à construire** : aucun code, aucune valeur changée — un **document
 > de ratification**.
 
 ## Contexte
 
-ADR-006 (proposée 2026-06-24) demandait à Alexandre trois ratifications restées ouvertes : la
+ADR-006 (proposée 2026-06-24) demandait au mainteneur trois ratifications restées ouvertes : la
 **frontière exacte** gravé/ajustable, la **liste précise** des invariants gravés (le burn 1 %, l'unité
 µQTA méritent-ils ce statut ?), et les **valeurs §12** (longueur d'époque, quorum, enjeu minimum).
-ADR-009 répond aux trois. La règle d'arrêt §4 de la Constitution s'applique : Claude **cadre** (table
-+ ancrage + conséquences), Alexandre **tranche** — ici les défauts sont posés **réglables**, et les
-valeurs purement **économiques** (échelle monétaire) restent explicitement à Alexandre (§3).
+ADR-009 répond aux trois. La règle d'arrêt du projet s'applique : une décision de cette classe est **cadrée**
+(table + ancrage + conséquences) puis **tranchée** par le mainteneur — ici les défauts sont posés **réglables**, et les
+valeurs purement **économiques** (échelle monétaire) restent explicitement au mainteneur (§3).
 
 ## 1. La frontière gravé/ajustable (ratification d'ADR-006)
 
@@ -74,22 +74,22 @@ gouvernance on-chain, **pas** de code dormant.
 | `SLASH_EVIDENCE_WINDOW_BLOCKS` | **= UNBONDING** | `sm/finality_slashing.rs` ; `const`-assert ≤ unbonding (GADGET-4) | **contrainte gravée** |
 | `SLASH_NUM / SLASH_DEN` | **1 / 1** (plein) | dissuasion maximale ; `sm/finality_slashing.rs` (GADGET-4) | ajustable (fraction) |
 | `SLASH_BURN` | **true** (brûlé) | sain monétairement ; `sm/finality_slashing.rs` (GADGET-4) | **gravé** (brûle vs redistribue) |
-| `MIN_VALIDATOR_STAKE` | **1 QTA = 1_000_000 µQTA — placeholder nominal 🛑** | anti-sybil ; `p2p/pos_consensus.rs` ; **échelle économique = Alexandre** (§3) | ajustable |
-| Allocation de genèse | **vide** (zéro premine) | pilier mission ; PQ-MIG-5 (`p2p/ledger.rs`) | **gravé** (principe) ; valeur réelle = Alexandre |
+| `MIN_VALIDATOR_STAKE` | **1 QTA = 1_000_000 µQTA — placeholder nominal 🛑** | anti-sybil ; `p2p/pos_consensus.rs` ; **échelle économique : décision du mainteneur** (§3) | ajustable |
+| Allocation de genèse | **vide** (zéro premine) | pilier mission ; PQ-MIG-5 (`p2p/ledger.rs`) | **gravé** (principe) ; valeur réelle : décision du mainteneur |
 
 > **Finalité = ⅔ de l'enjeu total actif**, pas un comité échantillonné : il n'y a **pas** de
 > paramètre « taille de comité » dans le **chemin de finalité** (`backing_weight` somme l'enjeu
 > on-chain des votants distincts valides ; le seuil porte sur l'enjeu **total** actif). Si l'élection
 > de leader par beacon (ADR-004) échantillonne, c'est un paramètre **séparé**, hors §12 finalité.
 
-## 3. Ce qui reste honnêtement à Alexandre (valeurs économiques, pas structure)
+## 3. Ce qui reste honnêtement au mainteneur (valeurs économiques, pas structure)
 
 - **`MIN_VALIDATOR_STAKE`** : posé comme **placeholder nominal** (1 QTA) parce que sa valeur sensée
   dépend de l'**échelle monétaire** (offre totale, valeur du µQTA) — le **noyau gravé**, qu'on ne
   redéfinit pas. À fixer quand l'échelle est fixée. La **frontière** (constante gravée *sans setter*,
   ajustable par fork) est, elle, **tranchée**.
 - **Distribution / émission réelles** : ratifiées **gravées à leurs valeurs actuelles en code**.
-  Changer ces nombres reste une décision **de politique monétaire** (Alexandre) ; mais le **statut**
+  Changer ces nombres reste une décision **de politique monétaire** (mainteneur) ; mais le **statut**
   (constantes gravées sans setter) est tranché.
 
 ## Conséquences
@@ -99,7 +99,7 @@ gouvernance on-chain, **pas** de code dormant.
 - **`MIN_VALIDATOR_STAKE` existe** (1 QTA, `pos_consensus.rs`) — il n'est ni absent ni à 0, donc le
   petit spec « placeholder » évoqué en §Conséquences du brouillon **n'est pas nécessaire** : le
   placeholder marqué est déjà là.
-- [[ADR-006 — Gouvernance & évolutivité]] devient **opérationnel** : la frontière est **nommée**, pas
+- [ADR-006 — Gouvernance & évolutivité](ADR-006-governance.md) devient **opérationnel** : la frontière est **nommée**, pas
   seulement intentionnelle. ADR-006 passe de 🟡 *proposée* à ✅ *ratifiée (par ADR-009)*.
 - **Pas de gouvernance on-chain, pas de code dormant** (ADR-006 tenu).
 - Aucun blocage pour le câblage du gadget : tous les paramètres du chemin de finalité ont un défaut
@@ -108,7 +108,7 @@ gouvernance on-chain, **pas** de code dormant.
 ## Ouvert (réglages, pas blocages)
 
 - L'**échelle monétaire** (offre, valeur du µQTA) et donc **`MIN_VALIDATOR_STAKE`** : décision
-  économique d'Alexandre, quand il le souhaite. **Aucune ne bloque** le câblage du gadget.
+  économique du mainteneur, quand il le souhaite. **Aucune ne bloque** le câblage du gadget.
 - Matérialiser un jour la périphérie « ajustable » derrière une **vraie abstraction de paramètres**
   versionnée (fork-only) vs rester sur des `const` simples : à surveiller, **pas à résoudre
   maintenant** (tout changement étant de toute façon un fork).

@@ -1,8 +1,16 @@
 # Quanta: A Post-Quantum Peer-to-Peer Currency with Irreversible Finality
 
-> Status: alpha, not yet audited by a third party. QUANTA has no market and no
+> Status: alpha. A third-party audit was delivered on 13 August 2026: 85
+> findings, 13 of them critical. The reports are published in
+> `docs/audit/2026-08-13/`, and what was fixed, how it is known and what stays
+> open in `docs/audit/REMEDIATION-2026-08-13.md`. QUANTA has no market and no
 > price; none is claimed or predicted anywhere in this document. Every constant
-> below is carved in the code and verified by every node at every block.
+> below is read from the code of version 3.16.0
+> (`TORUS_PROTOCOL_VERSION = 10`). Those that bind consensus — the supply cap,
+> the emission, the reward split, the quorum, the finality and unbonding
+> windows — are recomputed and enforced by every node, not merely applied by
+> the reference implementation; the transport bounds are local policy,
+> identical in that implementation but imposed by no consensus rule.
 
 **Abstract.** A purely peer-to-peer currency must survive the two failures its
 predecessors accept. Elliptic-curve signatures fail against a quantum
@@ -47,8 +55,12 @@ application, exists to serve them.
 A coin, in Quanta, is an entry in a ledger replicated by every node,
 spendable only by an ML-DSA-65 signature verifying under the public key
 committed in the sender's address. All amounts are integers in µQTA, where
-1 QTA equals 10^6 µQTA; no floating-point number exists on any money path,
-which eliminates rounding drift between nodes by construction.
+1 QTA equals 10^6 µQTA: balances, emission, the reward split and the burn are
+integer arithmetic, and no floating-point number decides an amount, which
+eliminates rounding drift between nodes by construction. One float does sit on
+the consensus path — the energy reading a block declares, which enters the
+header hash as its canonical IEEE-754 bit pattern, so no relay can rewrite the
+field without changing the block. It moves no coin.
 
 ```
 address           a = BLAKE3(dom_addr ‖ pk)                 pk : ML-DSA-65 (FIPS 204)
@@ -88,6 +100,7 @@ could amend.
 
 ```
 E_tick  = (S_max − M) / D            S_max = 10^8 QTA,   D = 5·10^7
+E_block = 2 · E_tick                 one block is sealed every two ticks
 M_n     = S_max · (1 − (1 − 1/D)^n)  after n ticks (one tick per minute)
 n_half  = D · ln 2 ≈ 3.47·10^7 ticks ≈ 66 years to half the remaining supply
 burn(x) = ⌊x / 100⌋                  on every transfer of x µQTA
@@ -95,17 +108,21 @@ burn(x) = ⌊x / 100⌋                  on every transfer of x µQTA
 
 The first line says everything: each minute, the network mints the fraction
 1/D of what remains to be minted. Emission is therefore high in the early
-days, decays geometrically, and never reaches the cap: the second line is its
-closed form, the third gives the human scale, about sixty-six years to mint
-half of whatever remains, from any point in time. The fourth line is the only
-sink: one percent of every transfer is burned, which makes the circulating
-supply slowly deflationary as the currency is used.
+days, decays geometrically, and never reaches the cap. A block is sealed every
+two ticks and carries both, so `E_block` is what one block is worth. `M_n` is
+the closed form of the minted supply and `n_half` gives the human scale, about
+sixty-six years to mint half of whatever remains, from any point in time. The
+burn is the only sink: one percent of every transfer is destroyed, which makes
+the circulating supply slowly deflationary as the currency is used.
 
 There is no premine: the genesis state contains no balance, not even for the
-project's author. There is no issuance authority: a block whose emission
-exceeds E_tick is invalid to every node, each of which recomputes the bound
-itself. The ledger finally maintains one conservation invariant, checked at
-every block:
+project's author. There is no issuance authority: a block is worth exactly
+`E_block`, a pure function of the chain that every node recomputes from the
+supply minted before that block, and a block minting more is invalid to all of
+them. A block may mint less, or nothing at all — a producer renouncing its
+reward is strictly non-inflationary — but none can mint above the schedule.
+The ledger finally maintains one conservation invariant, checked at every
+block:
 
 ```
 Σ_accounts (spendable + staked + unbonding) + burned = minted ≤ S_max
@@ -125,7 +142,7 @@ node, whether it has lived since the first block, been restored from a
 backup, or freshly synchronized.
 
 ```
-beacon = BLAKE3(dom_b ‖ hash(B_{h−L}) ‖ slot)      B_{h−L}: block L slots behind the tip
+beacon = BLAKE3(dom_b ‖ hash(B_{h−L}) ‖ slot)      B_{h−L}: block L = 2 slots behind
 seed   = BLAKE3(dom_s ‖ beacon ‖ slot ‖ round)
 P(validator i proposes) = s_i / S                   s_i: bonded stake,  S = Σ s_j
 ```
@@ -142,10 +159,16 @@ anyone's permission.
 
 Eligibility is enforced on reception, not merely on production: a node
 rejects any block whose proposer was not a bonded validator in the parent
-state, so a malicious node cannot crown itself. Stake enters and leaves
-through ordinary signed transactions, visible to all; withdrawal completes
-U = 10,080 blocks after it is requested, about two weeks at the nominal
-rhythm, and this slowness is a security piece the next section explains.
+state, so a malicious node cannot crown itself. The rule has one deliberate
+opening, paced by height: one block in sixteen is an open slot that any
+address may propose, bonded or not. Without it the first staker would close
+the network to every newcomer, since there is no faucet and no premine — a new
+address would need a coin to stake, stake to propose, and propose to earn its
+first coin. What that opening costs is stated in section 9. Stake enters and
+leaves through ordinary signed transactions, visible to all; withdrawal
+completes U = 10,080 blocks after it is requested, about two weeks at the
+nominal rhythm, and this slowness is a security piece the next section
+explains.
 
 ## 5. Finality
 
@@ -161,10 +184,17 @@ cert(C) valid  ⟺  3 · Σ_{v ∈ V(C)} s_v  ≥  2 · S
 A certified checkpoint is called justified; two consecutive justified links
 finalize the elder. Below this finalized floor the chain is stone: every node
 refuses any fork that would replace a finalized block, whatever its length,
-whoever its author. Above the floor, forks are settled by the simplest rule
-that converges: the longest chain wins, ties break lexicographically, and two
-partitions that meet again adopt the same branch without exchanging a word
-beyond their blocks.
+whoever its author. Above the floor the longer chain wins, and at equal height
+the tie is settled by the stake-weighted election rank of the two proposers —
+the very ranking that designates who may seal the slot, drawn from the buried
+beacon, the height, and the bonded set as of the parent. None of those three
+inputs sits in either competing block, so regrinding a block to obtain a
+better hash buys nothing; winning a tie requires stake, hence something to
+lose. The hash settles only what the rank does not separate: two blocks from
+one proposer, which is a slashable equivocation, and the open slot, where a
+proposer below the minimum stake holds no rank at all. Two partitions that
+meet again adopt the same branch without exchanging a word beyond their
+blocks.
 
 **Theorem (accountable safety).** If two conflicting checkpoints are ever
 finalized, then validators together holding at least S/3 signed
@@ -194,30 +224,46 @@ one third of the money, by proof.
 
 ## 6. The Network
 
-Nodes connect over QUIC and exchange nine message types by gossip: presence,
+Nodes connect over QUIC and exchange eleven message types by gossip: presence,
 chain segment request and delivery, new blocks, transactions, username
-registration, liveness and reporting. The transport key exchange is the
-hybrid X25519MLKEM768, the combination of a classical curve and the
-post-quantum standard ML-KEM-768: a quantum adversary recording today's
-traffic will decrypt none of it tomorrow, and if either mechanism fell, the
-other would hold alone.
+registration, ping and pong, peer reporting, finality votes and fault proofs.
+The transport key exchange is the hybrid X25519MLKEM768, the combination of a
+classical curve and the post-quantum standard ML-KEM-768: a quantum adversary
+recording today's traffic will decrypt none of it tomorrow, and if either
+mechanism fell, the other would hold alone.
 
-Every envelope is ML-DSA-65 signed and crosses nine gates before touching any
-state:
+Every envelope is ML-DSA-65 signed, and the order in which it is checked is
+itself the security property:
 
 ```
-① size ≤ 10 MB          ② decode                ③ sender not banned
-④ dedup (LRU 10^5)      ⑤ |Δt| ≤ 90 s           ⑥ rate ≤ √(peers/4)·30/min
-⑦ nonce monotone        ⑧ verify ML-DSA         ⑨ dispatch
+①  size ≤ 4 MiB                    ②  JSON decode
+③  header field shape, O(1)        ④  ban probe, read-only
+⑤  verify ML-DSA-65 over the canonical pre-image   ← authentication gate
+⑥  evict an expired ban            ⑦  id = BLAKE3(that same pre-image)
+⑧  |Δt| ≤ 90 s                     ⑨  dedup probe (LRU 10^5)
+⑩  per-peer byte accounting        ⑪  dedup insert
+⑫  rate ≤ 30·max(1, √(peers/4)) per minute, capped at 120, then monotone nonce
+⑬  dispatch
 ```
 
-The size bound and deduplication close floods; timestamp freshness and the
-strictly increasing nonce close replay; the rate limit adapts to the size of
-the network; and nothing is processed without a valid signature. Chain
-synchronization moves at most fifty blocks per request, four windows in
-flight, with optional compression. The node's full state is photographed to
-disk every thirty seconds: a power cut costs at worst half a minute of local
-state, never the chain.
+Authentication precedes every write. What runs before the signature is O(1)
+and mutates nothing: a size bound, a decode, a shape check on the
+fixed-length header fields, and a read-only probe of the ban table. What
+costs work or leaves a trace comes after — the canonical identifier, the
+deduplication cache, the per-peer counters, the rate window, the nonce
+high-water mark — because until the signature verifies, the sender field is a
+string the attacker chose. Deduplicating before authenticating is not a
+stylistic preference but a concrete attack: it lets an unauthenticated peer
+seat identifiers of its choosing in the deduplication cache and censor a
+peer's chain synchronization for free, and it bills honest peers for bytes
+they never sent. The size bound and the cache close floods; timestamp
+freshness and the strictly increasing nonce close replay; the rate limit
+adapts to the size of the network, from thirty messages per peer per minute
+up to a ceiling of a hundred and twenty. Chain synchronization moves at most
+fifty blocks per request, or three mebibytes, whichever comes first, four
+windows in flight, with optional compression. The node's full state is
+photographed to disk every thirty seconds: a power cut costs at worst half a
+minute of local state, never the chain.
 
 The node also exists without an interface: a headless daemon exposes the same
 chain through a seventeen-method JSON-RPC API, enough to query a block, a
@@ -236,26 +282,51 @@ passes by construction the validation others will apply to it, and it
 re-checks every block of a candidate fork on a trial copy before any
 reorganization. A node can neither accept an overdraft, nor seal one, nor
 corrupt its own chain through a careless reorganization; and no
-reorganization, ever, descends below the finality floor.
+reorganization, ever, descends below the finality floor. A second bound,
+independent of finality, refuses any reorganization deeper than 128 blocks
+whatever its score. The price is named rather than hidden: past that depth a
+partition no longer heals on its own, and resynchronizing takes an explicit
+operator action.
 
 ## 8. Incentive
 
-Each tick mints E_tick and shares it according to measured contribution, the
-energy committed, the work done, the validation rendered and the uptime, by
-Shapley values, the division rule that grants each participant his average
-marginal contribution:
+A block mints E_block, and that number is not chosen by whoever seals it: it
+is a pure function of the chain, recomputed by every receiver from the supply
+minted before the block. No local measurement enters the money path. Energy,
+uptime and work claimed by a peer are self-declared, hence unverifiable by
+construction; they were removed from issuance and remain display signals only.
+A reward derived from the chain alone is identical on every node, which is
+what lets a receiver recompute it instead of merely bounding it.
+
+The split is recomputed the same way, never trusted:
 
 ```
-share_i = φ_i / Σ_j φ_j
+producer      = E_block/2  +  whatever integer division leaves over
+participant i = (E_block − E_block/2) · b_i / Σ_j b_j        i ≠ producer
+b_i           = blocks produced by i within the last W = 32 blocks
 ```
 
-A solo node earns the full tick. Rewards are ordinary coins under ordinary
-addresses; mining is the only issuance, and the one-percent transfer burn the
-only sink. Validators are not paid to vote: they stake to be elected
-proposers, and lose the stake if they equivocate. The application makes this
-cycle visible: it mines in the background, shows every reward the instant the
-chain writes it, and lets you send and receive through a simple @username,
-resolved on-chain to its owner's address.
+Half goes to the producer of the block, the rest to the other addresses that
+produced a block within the last thirty-two, in proportion to how many each
+produced. No µQTA is lost on the way: what integer division leaves over
+returns to the producer, so the plan sums exactly to the reward. The weight is
+blocks, not addresses: slots are a finite resource, so splitting one identity
+into K produces no extra block and earns nothing extra. Sharing equally
+between distinct addresses was the earlier rule, and it subsidized identity
+duplication — twenty-eight identities captured 45.2% of every reward where a
+single one earned 12.5%. Every receiving node recomputes the whole plan and
+rejects a block that departs from it, so a producer cannot keep more than its
+half, nor lower the others' share without lowering its own in the same
+proportion. A block may carry less than the full reward, or none;
+on a chain with no other recent participant, the producer takes it all.
+
+Rewards are ordinary coins under ordinary addresses; block production is the
+only issuance, and the one-percent transfer burn the only sink. Validators are
+not paid to vote: they stake to be elected proposers, and lose the stake if
+they equivocate. The application makes this cycle visible: it runs the node in
+the background, shows every reward the instant the chain writes it, and lets
+you send and receive through a simple @username, resolved on-chain to its
+owner's address.
 
 ## 9. Limitations
 
@@ -264,15 +335,22 @@ election is predictable one slot ahead; a cryptographic VRF, which would keep
 the winner unknown until revealed, and an anti-grinding VDF are future work.
 The transport node identity, the QUIC endpoint, is still Ed25519: an upstream
 library constraint, outside this code, switching the day upstream ships
-post-quantum endpoint identities. Declared energy readings weight a share of
-emission; they sit outside the consensus security path, a validator's weight
-being on-chain stake and nothing else, but they remain an economic gaming
-surface under study. The live network is small; the properties in this
-document are enforced by every node and exercised in multi-seed deterministic
-simulation, not yet proven at scale. No third-party audit has taken place
-yet; the complete readiness package, threat model, measured scope and a
-commitment to publish the full report, lives in `docs/audit/`. Finally,
-QUANTA has no market and no price, and this document values nothing.
+post-quantum endpoint identities. One block in sixteen is an open slot any
+address may propose, staked or not; a protocol cannot be permissionless,
+Sybil-resistant and free at once, so free entry is bought in Sybil resistance.
+The price is bounded and paced by height rather than by the number of
+claimants: a farm of identities captures at most that sixteenth of the
+emission, however many identities it holds, and never more. Declared energy
+readings weigh nothing — they left the money path — but the network total the
+application displays remains a sum of self-declarations and should be read as
+one. The live network is small; the properties in this document are enforced
+by every node and exercised in multi-seed deterministic simulation, not yet
+proven at scale. The third-party audit of 13 August 2026 returned 85 findings,
+13 of them critical, and forced a protocol break from v9 to v10 together with
+a genesis replay; its reports are published in `docs/audit/2026-08-13/` and the
+remediation, including what stays open, in
+`docs/audit/REMEDIATION-2026-08-13.md`. Finally, QUANTA has no market and no
+price, and this document values nothing.
 
 ## 10. Calculations
 
@@ -304,6 +382,6 @@ of them.
 
 ---
 
-*Protocol `TORUS_PROTOCOL_VERSION = 6` · Apache-2.0 · The reference
-implementation, its test suite and its deterministic consensus simulation
-live in this repository.*
+*Quanta 3.16.0 · protocol `TORUS_PROTOCOL_VERSION = 10` · chain id
+`quanta-mainnet-v10` · Apache-2.0 · The reference implementation, its test
+suite and its deterministic consensus simulation live in this repository.*

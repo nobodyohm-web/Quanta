@@ -8,13 +8,13 @@ updated: 2026-06-21
 
 # ADR-004 — Aléa d'élection : beacon vs ECVRF + VDF
 
-← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]] (problème dur #7)
+← [Registre ADR](README.md) · cadre : [DESIGN-CONSENSUS-DAG-BFT](../protocol/CONSENSUS-DAG-BFT.md) (problème dur #7)
 
-> [!info] CASCADE (2026-06-21) — beacon tolérable en Phase 1 (suite à Option 1)
+> [!NOTE] CASCADE (2026-06-21) — beacon tolérable en Phase 1 (suite à Option 1)
 > Le finality gadget (Option 1) garde l'**élection de leader PoS** inchangée (il
 > **ajoute** un vote BFT, pas une nouvelle élection). Surtout, le **comité finalise
 > par quorum** : un leader **prévisible** peut être ciblé/DoS, mais la **liveness
-> est portée par le comité + le slashing** ([[ADR-003 — Slashing (accountable safety)]]),
+> est portée par le comité + le slashing** ([ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md)),
 > pas par le secret du leader. → **Recommandation : garder le beacon enterré pour
 > la Phase 1** (simple, rejouable, non-grindable à court terme) ; **ECVRF
 > (imprévisibilité) + VDF (anti-grinding) → Phase 2 / DAG-BFT**.
@@ -26,7 +26,7 @@ updated: 2026-06-21
 - `pos_consensus::leader_beacon(buried_block_hash, slot)` =
   `BLAKE3(domaine ‖ hash_bloc_enterré ‖ slot)`. Le bloc enterré est à
   `LEADER_ENTROPY_LOOKBACK = 2` derrière le tip.
-- **Déterministe et publiquement prévisible** : aucune clé secrète. [[CLAUDE]]
+- **Déterministe et publiquement prévisible** : aucune clé secrète. la référence technique
   est explicite — « élection *déterministe publiquement vérifiable*, **pas** un
   VRF cryptographique ». Le leader de chaque slot est **calculable d'avance** par
   tous.
@@ -39,7 +39,7 @@ updated: 2026-06-21
 - **Grinding résiduel** : sur un horizon > LOOKBACK, un gros stakeholder peut
   explorer des futurs (rétention/choix de blocs) pour biaiser de futurs slots —
   non fermé sans **VDF**.
-- Couple avec [[ADR-001 — Fork-choice]] : « hash le plus haut » est grindable.
+- Couple avec [ADR-001 — Fork-choice](ADR-001-fork-choice.md) : « hash le plus haut » est grindable.
 
 ## Options
 1. **Garder le beacon enterré (statu quo)** — *défaut possible pour Phase 0.*
@@ -62,11 +62,11 @@ updated: 2026-06-21
 ## Contraintes croisées
 - **Imprévisibilité ↔ propagation** : un leader imprévisible change ce que le
   **réseau virtuel** (T0.5) doit modéliser sur le timing — relié à la décision
-  **transport-flood** ([[AUDIT_QUANTA_2_PROGRESS]], C8).
+  **transport-flood** ([AUDIT_QUANTA_2_PROGRESS](../archive/journals/AUDIT_QUANTA_2_PROGRESS.md), C8).
 - **PQ** : ECVRF/BLS non-PQ ⇒ même arbitrage que le design §7 (tolère-t-on du
   non-PQ dans le chemin consensus, ou 100 % hybride ?).
-- Sans imprévisibilité, le **slashing** ([[ADR-003 — Slashing (accountable safety)]])
-  et un fork-choice Sybil-ancré ([[ADR-001 — Fork-choice]]) portent seuls la sûreté.
+- Sans imprévisibilité, le **slashing** ([ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md))
+  et un fork-choice Sybil-ancré ([ADR-001 — Fork-choice](ADR-001-fork-choice.md)) portent seuls la sûreté.
 
 ## Statut & ce dont j'ai besoin de toi (🛑)
 Pour la Phase 0/1 : on **reste** au beacon enterré (prévisible mais simple et

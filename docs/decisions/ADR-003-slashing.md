@@ -9,17 +9,17 @@ updated: 2026-07-12
 
 # ADR-003 — Slashing (accountable safety)
 
-← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]] (problème dur #2)
+← [Registre ADR](README.md) · cadre : [DESIGN-CONSENSUS-DAG-BFT](../protocol/CONSENSUS-DAG-BFT.md) (problème dur #2)
 
-> [!info] CASCADE (2026-06-21) — **in-scope Phase 1** (suite à Option 1 + stake on-chain)
+> [!NOTE] CASCADE (2026-06-21) — **in-scope Phase 1** (suite à Option 1 + stake on-chain)
 > Le finality gadget (Option 1) **rend le slashing possible** (équivocation =
-> deux votes/blocs signés au même round → preuve). Et [[ADR-002 — Validator set & comité BFT]]
+> deux votes/blocs signés au même round → preuve). Et [ADR-002 — Validator set & comité BFT](ADR-002-validator-set.md)
 > ayant tranché **stake on-chain seul**, on slashe du **stake on-chain** (propre,
 > déterministe). Donc l'**option 1** (slashing d'équivocation) est la direction ;
 > il **reste à toi** : **brûlé** (rareté) vs **redistribué au délateur** (incitation),
 > le **montant** (% du stake), et la **fenêtre** de soumission de preuve.
 
-> [!success] RÉSOLU (2026-06-25) — Option 1 retenue et **implémentée** (GADGET-4)
+> [!TIP] RÉSOLU (2026-06-25) — Option 1 retenue et **implémentée** (GADGET-4)
 > Politique fixée par **ADR-009** : **brûlé** (`SLASH_BURN = true`), montant **plein**
 > (`SLASH_NUM/DEN = 1/1`), **fenêtre = période d'unbonding**
 > (`SLASH_EVIDENCE_WINDOW_BLOCKS = UNBONDING_PERIOD_BLOCKS`, const-assert gravée).
@@ -29,10 +29,10 @@ updated: 2026-07-12
 > (LIVE-3, STAKE→BURN).
 
 ## Contexte (code réel)
-- **Aucun slashing aujourd'hui.** [[CLAUDE]] le dit honnêtement : « slashing de
+- **Aucun slashing aujourd'hui.** la référence technique du dépôt le dit honnêtement : « slashing de
   l'équivocation (absent aujourd'hui) … au roadmap ».
 - L'élection est **publiquement prévisible** (beacon enterré, pas de clé secrète
-  → cf. [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]]). Un leader peut
+  → cf. [ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](ADR-004-election-randomness.md)). Un leader peut
   **équivoquer** (sceller deux blocs au même slot) **sans coût**.
 - Sanction existante : seulement `ReportPeer` → ban réseau 1 h (3 reports). C'est
   du **rate-limit social**, pas de l'**accountable safety** (aucune perte de stake,
@@ -40,7 +40,7 @@ updated: 2026-07-12
 
 ## Ce que le simulateur force
 Les scénarios byzantins (équivocation, double-seal, rétention) sont au programme
-du harnais ([[QUANTA_T0_DST_HARNESS]] / design §6). Pour **tester** la punition,
+du harnais ([QUANTA_T0_DST_HARNESS](../archive/specs/QUANTA_T0_DST_HARNESS.md) / design §6). Pour **tester** la punition,
 il faut une règle de slashing… ou décider explicitement qu'il n'y en a pas (et
 documenter le compromis sûreté).
 
@@ -50,7 +50,7 @@ documenter le compromis sûreté).
    **même** clé au **même** round. N'importe quel nœud la soumet ; le coupable perd
    du stake (brûlé ou redistribué).
    - + dissuasion réelle, *accountable safety* prouvable, indispensable au BFT.
-   - − exige le **stake on-chain** ([[ADR-002 — Validator set & comité BFT]]),
+   - − exige le **stake on-chain** ([ADR-002 — Validator set & comité BFT](ADR-002-validator-set.md)),
      une preuve canonique, et une politique (montant brûlé vs redistribué ; fenêtre
      de soumission ; protection contre fausses preuves).
 2. **Pas de slashing — sûreté par finalité seule** — on s'appuie sur le quorum BFT
@@ -62,12 +62,12 @@ documenter le compromis sûreté).
 3. **Statu quo (ReportPeer)** — explicitement insuffisant ; à acter comme dette.
 
 ## Contraintes croisées
-- **Dépend de** [[ADR-002 — Validator set & comité BFT]] (on ne slashe que du
+- **Dépend de** [ADR-002 — Validator set & comité BFT](ADR-002-validator-set.md) (on ne slashe que du
   stake on-chain) et du finality gadget (l'équivocation se définit par round/vote).
 - La **preuve** d'équivocation doit être **déterministe et rejouable** (compat
   harnais §3) ; un montant brûlé impacte la conservation µQTA → property-test à
   étendre.
-- Politique économique → [[TOKENOMICS_V2]] (brûler renforce la rareté ;
+- Politique économique → [TOKENOMICS_V2](../archive/design-notes/TOKENOMICS_V2.md) (brûler renforce la rareté ;
   redistribuer récompense le délateur).
 
 ## Statut & ce dont j'ai besoin de toi (🛑)

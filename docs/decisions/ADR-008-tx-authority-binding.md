@@ -4,17 +4,17 @@ id: ADR-008
 status: reversed
 decision-class: portée d'implémentation (tranchée 2026-06-24 ; **reversée** 2026-06-25 par PQ-MIG-3B)
 proposed: 2026-06-24
-ratification: tranchée (Alexandre — « Authority layer, keep `from` ») puis **reversée** (« terminer le tout-PQ, sans astérisque »)
+ratification: tranchée par le mainteneur (« Authority layer, keep `from` ») puis **reversée** (« terminer le tout-PQ, sans astérisque »)
 origine: PQ-MIG-3 (mise en œuvre) — découverte de l'identifiant de compte unifié
 amende: ADR-007 — **rétabli** : la recommandation (b) « comptes tout ML-DSA » est **réalisée** (PQ-MIG-3B)
-liens: [[ADR-007 — Portée du post-quantique (comptes ML-DSA)]] · CRYPTO-ID-1 · [[AUDIT_QUANTA_2_PROGRESS]]
+liens: [ADR-007 — Portée du post-quantique (comptes ML-DSA)](ADR-007-post-quantum-scope.md) · CRYPTO-ID-1 · [AUDIT_QUANTA_2_PROGRESS](../archive/journals/AUDIT_QUANTA_2_PROGRESS.md)
 ---
 
 # ADR-008 — Autorité de tx post-quantique (PQ-MIG-3) — **REVERSÉ par PQ-MIG-3B**
 
-← [[README|Registre ADR]] · **rétablit** [[ADR-007 — Portée du post-quantique (comptes ML-DSA)]] (b)
+← [Registre ADR](README.md) · **rétablit** [ADR-007 — Portée du post-quantique (comptes ML-DSA)](ADR-007-post-quantum-scope.md) (b)
 
-> [!warning] STATUT — **REVERSÉ le 2026-06-25 (PQ-MIG-3B)**
+> [!WARNING] STATUT — **REVERSÉ le 2026-06-25 (PQ-MIG-3B)**
 > Cet ADR avait choisi l'**Option (a)** d'ADR-007 (garder `from` = clé Ed25519 + **registre de
 > liaison on-chain**), en assumant un **astérisque permanent** sur « comptes entièrement
 > post-quantiques ». **PQ-MIG-3B a reversé cette décision** : `from`/`to` deviennent l'**adresse

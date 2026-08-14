@@ -7,7 +7,7 @@ updated: 2026-07-12
 
 > **Statut : Phase 0 + Phase 1 livrées (gadget de finalité prouvé en simulation, 2026-06-25 ;
 > gossip des votes câblé en vivant, LIVE-1) ; Phase 2 (DAG-BFT, ce document) non lancée.**
-> Voir [[DESIGN-FINALITY-GADGET]] pour la Phase 1 réalisée et [[DESIGN-LIVE-WIRING]] pour le
+> Voir [DESIGN-FINALITY-GADGET](FINALITY-GADGET.md) pour la Phase 1 réalisée et [DESIGN-LIVE-WIRING](LIVE-WIRING.md) pour le
 > câblage réseau. Ce document ne couvre que la **Phase 2** (Option 2, DAG-BFT complet), qui reste
 > à l'état de conception — *aucune ligne de code DAG-BFT écrite*. Il fait suite à la passe « A+E+C »
 > (post-quantique, preuves formelles, aléa non-grindable) qui, elle, est implémentée et vérifiée
@@ -104,7 +104,7 @@ commit déterministe (sélection d'ancre via le beacon) produit l'ordre total.
    réécrit PAS le consensus sans pouvoir tester la convergence sous adversité.
 2. **Phase 1** : **Option 1** (finality gadget) → finalité déterministe rapide,
    slashing, risque contenu. Livre 80 % de la valeur perçue (« rapide + sûr »).
-   → **Conception détaillée** : [[DESIGN-FINALITY-GADGET]] (style Casper FFG, votes ML-DSA
+   → **Conception détaillée** : [DESIGN-FINALITY-GADGET](FINALITY-GADGET.md) (style Casper FFG, votes ML-DSA
    post-quantiques, finalisation par époque ; **implémentée et prouvée en simulation DST,
    2026-06-25**). Les 4 méta-décisions §7 ci-dessous sont tranchées en ADR-001→005 + ADR-009
    (`docs/decisions/`) — voir §7 pour le registre des décisions prises.
@@ -158,19 +158,19 @@ commit déterministe (sélection d'ancre via le beacon) produit l'ordre total.
 Ces quatre points, posés pour lancer la Phase 1, sont **tranchés** :
 
 1. **Périmètre** : **Option 1** (finality gadget) d'abord — livrée, `src-tauri/src/sm/`
-   (GADGET-1→5B). Voir [[DESIGN-FINALITY-GADGET]].
+   (GADGET-1→5B). Voir [DESIGN-FINALITY-GADGET](FINALITY-GADGET.md).
 2. **Prérequis** : le harnais de test **d'abord** (Phase 0, DST) — livré (commit dd3ad99,
    « baseline Phase 0 »), utilisé pour prouver le gadget avant tout câblage réseau.
 3. **Signatures** : **100 % ML-DSA, sans BLS** — tranché en
-   [[ADR-005 — Agrégation des votes & certificats de finalité]] ; les certificats de finalité sont
+   [ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md) ; les certificats de finalité sont
    un ensemble de votes ML-DSA (~165 Ko / 50 validateurs), pas d'agrégation BLS.
 4. **Compat** : le protocole est déjà à **`TORUS_PROTOCOL_VERSION = 4`** (`gossip.rs`, 3→4 par LIVE-3B) — la
    fenêtre de migration v2/v3 est du passé.
 
-Référence : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité BFT]] ·
-[[ADR-003 — Slashing (accountable safety)]] · [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]] ·
-[[ADR-005 — Agrégation des votes & certificats de finalité]] ·
-[[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12]] ; commits dd3ad99
+Référence : [ADR-001 — Fork-choice](../decisions/ADR-001-fork-choice.md) · [ADR-002 — Validator set & comité BFT](../decisions/ADR-002-validator-set.md) ·
+[ADR-003 — Slashing (accountable safety)](../decisions/ADR-003-slashing.md) · [ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](../decisions/ADR-004-election-randomness.md) ·
+[ADR-005 — Agrégation des votes & certificats de finalité](../decisions/ADR-005-vote-aggregation.md) ·
+[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12](../decisions/ADR-009-carved-vs-adjustable.md) ; commits dd3ad99
 (baseline Phase 0) et 4d4fd63 (gadget + migration PQ complète).
 
 La **Phase 2** (ce document, DAG-BFT complet) reste, elle, **non lancée** : aucune de ces

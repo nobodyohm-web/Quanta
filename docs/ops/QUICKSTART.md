@@ -185,4 +185,4 @@ côtés = convergence prouvée.
 > depuis le fork v4 (`iroh-gossip` plafonne un message à 4 096 o, une enveloppe signée
 > ML-DSA en pèse ~15 000, et l'émission échouait en silence tout en étant comptée
 > comme réussie). Détail dans
-> [`docs/ARCHITECTURE.md` §7](../ARCHITECTURE.md#7-three-bugs-that-shaped-the-design).
+> [`docs/ARCHITECTURE.md` §7](../ARCHITECTURE.md#7-four-bugs-that-shaped-the-design).

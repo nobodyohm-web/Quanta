@@ -8,10 +8,10 @@ updated: 2026-07-12
 
 # Câblage du gadget de finalité en vivant — connecter le cœur prouvé au réseau réel
 
-← [[00 — Pilotage QUANTA]] · cadre : [[DESIGN-FINALITY-GADGET]] (le gadget) · paramètres : [[ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12]]
-Socle : gadget complet (GADGET-3 finalité · GADGET-4 slashing · GADGET-5A/B fork-choice + résolution de partition) · migration PQ complète ([[ADR-007 — Portée du post-quantique (comptes ML-DSA)]] (b), PQ-MIG-3B → PQ-MIG-5)
+← `00 — Pilotage QUANTA` · cadre : [DESIGN-FINALITY-GADGET](FINALITY-GADGET.md) (le gadget) · paramètres : [ADR-009 — Frontière gravé-ajustable (ADR-006 ratifiée) et valeurs du §12](../decisions/ADR-009-carved-vs-adjustable.md)
+Socle : gadget complet (GADGET-3 finalité · GADGET-4 slashing · GADGET-5A/B fork-choice + résolution de partition) · migration PQ complète ([ADR-007 — Portée du post-quantique (comptes ML-DSA)](../decisions/ADR-007-post-quantum-scope.md) (b), PQ-MIG-3B → PQ-MIG-5)
 
-> [!abstract] Statut — LIVE-1, LIVE-2, LIVE-3 tous livrés ; **aucune règle de consensus nouvelle**
+> [!NOTE] Statut — LIVE-1, LIVE-2, LIVE-3 tous livrés ; **aucune règle de consensus nouvelle**
 > Le gadget **tourne, prouvé en simulation déterministe** (harnais DST), et **tourne désormais aussi
 > en vivant** : **LIVE-1 est implémenté** — les votes circulent par le gossip
 > (`GossipMessage::FinalityVote`, bras de dispatch, `FinalityTracker` dans

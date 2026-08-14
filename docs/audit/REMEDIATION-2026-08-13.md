@@ -1,6 +1,6 @@
 # Remédiation — audit externe du 13 août 2026
 
-**Cible** `quanta-protocol` 3.15.1 · protocole TORUS **v9 → v10**
+**Cible** `quanta-protocol` 3.15.1 → **3.16.0** · protocole TORUS **v9 → v10**
 **Source** `QUANTA_AUDIT.md` et ses cinq rapports détaillés (crypto, consensus, réseau, applicatif,
 chaîne d'approvisionnement) — 85 constats, dont 13 critiques.
 
@@ -104,7 +104,7 @@ Toute signature et tout hash changent, genèse comprise (`8a06b5f9…` puis, apr
 - **Relais et cache pré-authentification de plumtree.** Comportement d'`iroh-gossip`, pas de code
   d'ici. Réduire la borne divise le coût par 2,5 ; elle ne le supprime pas.
 - **Deux actions manuelles de chaîne d'appro.** Créer l'environnement GitHub `release` et y déplacer
-  `TAURI_SIGNING_PRIVATE_KEY` ; `npm audit fix` (`nanoid`). Voir `.audit_fixes/DONE_supplychain.md`.
+  `TAURI_SIGNING_PRIVATE_KEY` ; `npm audit fix` (`nanoid`).
 
 ---
 
@@ -157,7 +157,7 @@ graine de `elect_leader`. Ses trois entrées — beacon enterré, hauteur, ensem
 ne sont dans aucun des deux blocs concurrents : **le broyage ne déplace plus rien**. Le cas ex æquo
 est exactement l'auto-équivocation, que le gadget de finalité punit.
 
-Détail complet, y compris pourquoi ni VRF ni horloge : [`docs/DESIGN-FORK-RANK.md`](../DESIGN-FORK-RANK.md).
+Détail complet, y compris pourquoi ni VRF ni horloge : [`docs/DESIGN-FORK-RANK.md`](../protocol/FORK-RANK.md).
 
 ### 9.2 C-03 — REORG-DEPTH-1 et GENESIS-ANCHOR-1 : le long-range
 
@@ -200,7 +200,7 @@ horloge.
 | **B-16** | `total_supply` soustrayait deux bases différentes : compteur public faux dès qu'un burn était en attente | Même base des deux côtés, dans le ledger et dans la vue |
 | **SC-06** | La cible de fuzz mourait à 100 % au mur ML-DSA : couverture réelle nulle | Seconde porte commençant **après** l'authentification |
 | **HAUT-2/3, MOY-2/4/5** | Blob de fonds absent ⇒ clé neuve fabriquée ; sel Argon2id dérivé de la clé publique ; phrase de récupération non effacée | Ancre d'adresse `pq_fund_anchor_v1` + refus, sel aléatoire persisté, `SecretString(Zeroizing)`, **avec migration ancien→neuf testée** |
-| **R12, R5, R6/R11/R16, R10, A5, A8** | Files non bornées, amplification O(N²), travail avant authentification, bannissement *fail-open*, RPC sans plafond de connexions, rebinding DNS | Voir `.audit_fixes/DONE_net2.md` |
+| **R12, R5, R6/R11/R16, R10, A5, A8** | Files non bornées, amplification O(N²), travail avant authentification, bannissement *fail-open*, RPC sans plafond de connexions, rebinding DNS | Files bornées avec rejet du plus ancien, fan-out plafonné, signature vérifiée avant toute écriture d'état, bannissement *fail-closed*, `RPC_MAX_CONNECTIONS`/`RPC_MAX_DISPATCH`, `Host` validé |
 
 ### 9.6 Ce qui reste ouvert après la deuxième passe
 
@@ -290,8 +290,8 @@ source, elle est dans le fichier livré.
 | **A17** | La règle CSRF refusait **toute** origine, y compris la sienne : aucun client navigateur, pas même l'explorateur servi par ce serveur, ne pouvait dépenser. Défaillance en position sûre, mais le commentaire décrivait un comportement que le code n'avait pas | Égalité stricte `Origin` ⇄ `Host` (hôte **et** port). Un autre port de la boucle locale est une origine étrangère, `Origin: null` est refusé, un client sans en-tête reste servi |
 | **M-14** | Quatre vues linéaires en la hauteur construites **avant** tout rejet, sous le verrou d'écriture. L'attaquant payait O(1) pour faire payer O(hauteur) | Porte O(1) (horodatage + borne de taille) avant le moindre parcours ; `stats()` appelé une fois au lieu de deux sur le chemin heureux ; le wrapper `validate_block_emission`, devenu inutile, supprimé |
 | **R17** | L'éviction du tampon de fork allouait ~2 048 `String` par bloc offert, pour une décision qui n'en demande aucune | `worst_entry()` en O(log n) sans allocation : `\|tip − idx\|` est unimodale sur un ensemble ordonné, donc son maximum est à l'un des deux bords. Un test compare la décision au balayage complet sur 64 configurations tirées au sort |
-| **R7** | Registre de pseudos sans plafond, `rebuild_by_pk()` O(n) à chaque insertion : 21 ms par insertion à 100 000 entrées, 1 Go de JSON réécrit toutes les 30 s | voir `.audit_fixes/DONE_r7.md` |
-| **R9** | Ordre de composition DHT trié par octets d'`EndpointId`, donc **minable** : 8 identités à préfixe nul suffisaient à éclipser tout nouveau nœud à 100 % | voir `.audit_fixes/DONE_r9.md` |
+| **R7** | Registre de pseudos sans plafond, `rebuild_by_pk()` O(n) à chaque insertion : 21 ms par insertion à 100 000 entrées, 1 Go de JSON réécrit toutes les 30 s | index incrémental (~265 ns), plafond `MAX_USERNAME_RECORDS = 10 000` appliqué par **refus** et non par éviction — évincer supprimerait le `first_seen` du pseudo jeté et rouvrirait `R2` |
+| **R9** | Ordre de composition DHT trié par octets d'`EndpointId`, donc **minable** : 8 identités à préfixe nul suffisaient à éclipser tout nouveau nœud à 100 % | trois mélanges `OsRng` par cycle (une graine publique serait rejouable, donc de nouveau minable) et `MAX_ADOPTED_PER_SLOT = 2` |
 
 ### Sur M-14, ce qui n'est pas corrigé
 

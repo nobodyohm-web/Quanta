@@ -9,9 +9,9 @@ updated: 2026-06-21
 
 # ADR-002 — Validator set & comité BFT
 
-← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]] (problème dur #1)
+← [Registre ADR](README.md) · cadre : [DESIGN-CONSENSUS-DAG-BFT](../protocol/CONSENSUS-DAG-BFT.md) (problème dur #1)
 
-> [!success] DÉCISION (2026-06-21) — **Stake on-chain seul** (option 1, variante pure)
+> [!TIP] DÉCISION (2026-06-21) — **Stake on-chain seul** (option 1, variante pure)
 > La sécurité (éligibilité + poids BFT) est ancrée au **stake gravé dans le
 > ledger**, dérivé déterministiquement à une frontière d'**epoch** → tous les
 > nœuds calculent le **même** comité (objet de consensus). La **réputation sort
@@ -22,7 +22,7 @@ updated: 2026-06-21
 > - `Validator::weight()` → **`= stake` pur** (retirer le bonus réputation `min(rep×10_000, stake)`).
 > - `build_validator_set` → source = **snapshot de stake on-chain par epoch**, plus `reputation.get_leaderboard`.
 > - Nouvelles tx **`Stake` / `Unstake`** (staking explicite on-chain) + comptabilité du stake dans le ledger.
-> - Découpler `reputation.rs` du consensus ; ajuster [[TOKENOMICS_V2]] / `shapley.rs` (réputation = récompense, pas pouvoir).
+> - Découpler `reputation.rs` du consensus ; ajuster [TOKENOMICS_V2](../archive/design-notes/TOKENOMICS_V2.md) / `shapley.rs` (réputation = récompense, pas pouvoir).
 > - Quorum BFT = **2f+1 pondéré stake** ; `f` défini en **stake**, pas en nombre de nœuds.
 >
 > **Sous-décisions encore ouvertes** (implémentation, à fixer avant le code) :
@@ -44,7 +44,7 @@ updated: 2026-06-21
 - **C7** : le cœur `Node::propose_block_at(now_ms, validators)` prend l'ensemble
   en **paramètre injecté** — exprès, pour ne pas trancher ici.
 
-> [!danger] Le vrai trou
+> [!CAUTION] Le vrai trou
 > Chaque nœud construit l'ensemble depuis **sa** réputation/`leaderboard` locale.
 > Rien ne garantit que deux nœuds calculent le **même** ensemble → ils peuvent
 > élire des leaders **différents** au même slot → **fork**. L'élection est
@@ -71,12 +71,12 @@ réelle. Pour tester la convergence, tous les nœuds doivent dériver un ensembl
    réputation reste un signal **applicatif** (mining/Shapley), hors poids BFT.
 
 ## Contraintes croisées
-- Définit **qui peut finaliser** → préalable à [[ADR-003 — Slashing (accountable safety)]]
+- Définit **qui peut finaliser** → préalable à [ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md)
   (on ne slashe que des membres du comité) et au finality gadget.
 - Quorum BFT = **2f+1 pondéré par stake** (design #1) → `f` défini en **stake**,
   pas en nombre de nœuds.
 - Sort la **réputation** du chemin de sécurité si on prend l'option 1/3 → impacte
-  [[TOKENOMICS_V2]] et `shapley.rs`.
+  [TOKENOMICS_V2](../archive/design-notes/TOKENOMICS_V2.md) et `shapley.rs`.
 
 ## Statut & ce dont j'ai besoin de toi (🛑)
 La réputation (énergie/contribution, **off-chain et locale**) doit-elle peser

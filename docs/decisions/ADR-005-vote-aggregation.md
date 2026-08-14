@@ -11,10 +11,10 @@ updated: 2026-07-12
 
 # ADR-005 — Agrégation des votes & certificats de finalité (post-quantique pur, par époque)
 
-← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]] (méta-décision §7 — Signatures)
-Lié à : [[ADR-001 — Fork-choice]] · [[ADR-002 — Validator set & comité BFT]] · [[ADR-003 — Slashing (accountable safety)]] · [[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]]
+← [Registre ADR](README.md) · cadre : [DESIGN-CONSENSUS-DAG-BFT](../protocol/CONSENSUS-DAG-BFT.md) (méta-décision §7 — Signatures)
+Lié à : [ADR-001 — Fork-choice](ADR-001-fork-choice.md) · [ADR-002 — Validator set & comité BFT](ADR-002-validator-set.md) · [ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md) · [ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](ADR-004-election-randomness.md)
 
-> [!success] DÉCISION (2026-06-23) — **Post-quantique pur, finalisation par époque**
+> [!TIP] DÉCISION (2026-06-23) — **Post-quantique pur, finalisation par époque**
 > Le certificat de finalité d'une époque = l'ensemble des votes **ML-DSA** du comité atteignant
 > le quorum. **Pas de BLS, pas d'ancrage, un seul système crypto**, le tout derrière une
 > **abstraction de certificat** qui garde l'agrégation future (BLS/SNARK) comme remplacement
@@ -37,7 +37,7 @@ Le format de ces votes **paraissait** poser une tension irréductible :
 
 1. **Un vote de finalité est éphémère ; une transaction est éternelle.** Le post-quantique est
    urgent là où une signature doit rester infalsifiable **des années** — les **transactions**,
-   déjà signées PQ ([[CLAUDE]] : Ed25519 + ML-DSA-65). Un vote de finalité ne compte que dans la
+   déjà signées PQ (Ed25519 + ML-DSA-65). Un vote de finalité ne compte que dans la
    fenêtre où la finalité se décide : pas de « récolter aujourd'hui, forger demain » sur une
    décision jetable. *(Cela n'amoindrit pas l'intérêt du PQ sur les votes — ça retire seulement
    l'argument « le trou BLS serait acceptable ».)*
@@ -74,7 +74,7 @@ une réécriture.
   l'accroche la plus nette. L'hybride **retirait** cet argument en imposant un astérisque BLS. Le
   BLS est une **optimisation d'ingénierie invisible au public**, pas un argument de valeur.
 - **Simplicité** : un seul système crypto, pas d'ancrage ; l'**attribution de faute** (slashing,
-  [[ADR-003 — Slashing (accountable safety)]]) est **plus simple sur des signatures séparées** que
+  [ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md)) est **plus simple sur des signatures séparées** que
   sur un agrégat. Le build **le moins risqué** tant qu'il n'y a pas d'audit externe.
 - **Le seul vrai inconvénient du PQ pur** — la **taille** des signatures (le coût *calcul* étant
   négligeable) — est **neutralisé par la finalisation par époque** tant que le comité reste
@@ -103,7 +103,7 @@ reste du gadget. Tant que le comité est modeste, **c'est inutile**.
 - **Débloque** la conception protocolaire du gadget — **sans dépendance crypto résiduelle à
   trancher** : on construit en **ML-DSA dès l'étape 1**.
 - **Promesse whitepaper renforcée et simplifiée** (PQ pur, sans nuance).
-- **Slashing** ([[ADR-003 — Slashing (accountable safety)]]) : attribution de faute **directe**
+- **Slashing** ([ADR-003 — Slashing (accountable safety)](ADR-003-slashing.md)) : attribution de faute **directe**
   sur des votes séparés, plus simple que sous agrégat.
 - Impose la **finalisation par époque** comme **propriété structurante** du gadget (pas un détail
   d'implémentation).
@@ -125,7 +125,7 @@ ADR **accepté** (post-quantique pur, par époque) ; sous-paramètres **fixés p
 ## Questions ouvertes
 
 - Taille de comité, quorum, longueur d'époque, format et élagage des certificats (ci-dessus).
-- Interaction avec l'**aléa d'élection** ([[ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)]])
+- Interaction avec l'**aléa d'élection** ([ADR-004 — Aléa d'élection (beacon vs ECVRF+VDF)](ADR-004-election-randomness.md))
   pour la **rotation du comité**.
 - **Seuil concret de comité** au-delà duquel l'agrégation redeviendrait nécessaire (à
   **surveiller**, pas à résoudre maintenant).

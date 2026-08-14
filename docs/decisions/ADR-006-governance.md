@@ -2,7 +2,7 @@
 type: adr
 id: ADR-006
 status: ratified
-decision-class: vision (non-technique — ratification de frontière par Alexandre)
+decision-class: vision (non-technique — ratification de frontière par le mainteneur)
 proposed: 2026-06-24
 ratification: ADR-009 (2026-06-25)
 ratified-by: ADR-009
@@ -12,10 +12,10 @@ updated: 2026-07-12
 
 # ADR-006 — Gouvernance & évolutivité (noyau immuable par construction, évolution par fork)
 
-← [[README|Registre ADR]] · cadre : [[DESIGN-CONSENSUS-DAG-BFT]]
-Lié à : politique d'émission · [[ADR-005 — Agrégation des votes & certificats de finalité]] (abstraction de certificat) · **couche au-dessus du consensus**
+← [Registre ADR](README.md) · cadre : [DESIGN-CONSENSUS-DAG-BFT](../protocol/CONSENSUS-DAG-BFT.md)
+Lié à : politique d'émission · [ADR-005 — Agrégation des votes & certificats de finalité](ADR-005-vote-aggregation.md) (abstraction de certificat) · **couche au-dessus du consensus**
 
-> [!info] DÉCISION DE **VISION** (proposée 2026-06-24) — ✅ **ratifiée par ADR-009 (2026-06-25)**
+> [!NOTE] DÉCISION DE **VISION** (proposée 2026-06-24) — ✅ **ratifiée par ADR-009 (2026-06-25)**
 > Quanta n'a **pas** de gouvernance on-chain. Le **noyau monétaire** (plafond 100M + loi
 > d'émission, signatures post-quantiques, conservation, sûreté du consensus) est **immuable par
 > construction** — non pas verrouillé, mais **sans porte** : aucun chemin de code ne le change.
@@ -59,7 +59,7 @@ noyau immuable et une périphérie gouvernable**.
    de l'adopter. **Zéro surface d'attaque de gouvernance** : la gouvernance vit **hors** du code,
    dans le consensus social et le choix de chacun.
 4. **Aucun mécanisme de gouvernance dormant dans le code.** La préparation du futur vient de la
-   **structure** (abstractions propres — ex. l'abstraction de certificat d'[[ADR-005 — Agrégation des votes & certificats de finalité]]),
+   **structure** (abstractions propres — ex. l'abstraction de certificat d'[ADR-005 — Agrégation des votes & certificats de finalité](ADR-005-vote-aggregation.md)),
    **pas** d'un interrupteur caché. Du code de gouvernance dormant = une **surface d'attaque
    dormante** (leçon du **CRDT fantôme** : un module non utilisé reste un vecteur).
 
@@ -129,7 +129,7 @@ fork**), **pas** un clivage de mécanisme déjà câblé.
 ## Frontière — gravé vs ajustable (✅ ratifiée par ADR-009, 2026-06-25)
 
 > *Point de départ pour la ratification — l'esquisse §1/§2 de l'ADR rendue précise et adossée au
-> code. Constitution §4 : je **cadre**, Alexandre **tranche** la frontière exacte. Frontière
+> code. Règle d'arrêt du projet : la décision est **cadrée**, le mainteneur **tranche** la frontière exacte. Frontière
 > ratifiée par ADR-009 (2026-06-25).*
 
 | Invariant / constante | Tier | Mécanisme aujourd'hui | Localisation |
@@ -147,7 +147,7 @@ fork**), **pas** un clivage de mécanisme déjà câblé.
 
 > **Ligne de partage proposée** : est **gravé** ce qui est une **promesse de valeur** (rareté,
 > conservation, post-quantique, sûreté) ; est **ajustable** ce qui est un **paramètre de calibrage
-> opérationnel** dont on attend qu'il soit réglé (par fork) avant ou après lancement. Alexandre
+> opérationnel** dont on attend qu'il soit réglé (par fork) avant ou après lancement. Le mainteneur
 > ratifie la frontière **exacte**.
 
 ## Conséquences
