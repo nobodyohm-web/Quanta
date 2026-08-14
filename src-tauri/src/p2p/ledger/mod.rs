@@ -1743,6 +1743,36 @@ impl Ledger {
         self.balance_cache.get(pk).copied().unwrap_or(0).max(0) as u64
     }
 
+    /// **Ce que la chaîne a versé à `pk` pour sa participation au minage**, en
+    /// µQTA : la somme des coinbases (`TxType::Mining`) qui le créditent.
+    ///
+    /// Cette fonction existe parce que l'écran principal affichait à sa place le
+    /// compteur `atn_earned` du miroir de réputation. Ce compteur est alimenté par
+    /// `reputation::uptime_tick`, c'est-à-dire par une part de Shapley calculée sur
+    /// des watts **estimés localement** — et `MINT-EXACT-1` a sorti tout cela du
+    /// chemin monétaire sans que l'affichage suive. Deux conséquences visibles à
+    /// l'écran : un « total forgé » qui n'avait aucun rapport avec le solde, et un
+    /// compteur qui **survivait au rejeu de la genèse** (le protocole a rompu dix
+    /// fois) parce qu'il vit dans un CRDT persisté, pas dans la chaîne.
+    ///
+    /// Depuis `REWARD-SHARE-1`, un bloc porte plusieurs coinbases : le producteur
+    /// et les participants récents. Toutes créditent leur bénéficiaire par une tx
+    /// `Mining` depuis `NETWORK`, donc les sommer par destinataire donne exactement
+    /// ce que le réseau reconnaît à cette adresse — ni plus, ni moins.
+    ///
+    /// Coût : O(transactions de la chaîne). C'est délibéré. Un cache incrémental de
+    /// plus serait une seconde source de vérité à tenir synchronisée sur le reorg,
+    /// pour une valeur qui n'entre dans aucune décision de consensus et n'est lue
+    /// que par un écran local. Si la chaîne grandit au point que ce parcours pèse,
+    /// la bonne réponse est de le mémoïser à la hauteur du tip, pas de le dupliquer.
+    pub fn mined_by(&self, pk: &str) -> u64 {
+        self.chain
+            .iter()
+            .flat_map(|b| b.transactions.iter())
+            .filter(|tx| matches!(tx.tx_type, TxType::Mining) && tx.to == pk)
+            .fold(0u64, |acc, tx| acc.saturating_add(tx.amount))
+    }
+
     /// Get all **spendable** balances in µQTA. Excludes the synthetic
     /// `STAKE` sink (ONCHAIN-STAKE-1: locked stake is not a spendable holder —
     /// it is accounted via [`Self::locked_stake_total`]); `NETWORK`/`BURN`/`ESCROW`

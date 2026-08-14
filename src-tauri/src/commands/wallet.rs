@@ -14,19 +14,34 @@ pub async fn get_my_reputation(state: tauri::State<'_, Arc<AppState>>) -> Result
     // REPUT-ID-1: reputation is keyed by the ML-DSA **address** (economic actor),
     // matching the mining loop's `uptime_tick(&addr, …)` — not the transport key.
     let pk = state.crypto.lock().await.pq_address_hex().unwrap_or_default();
+    // Le total forgé vient de la chaîne, pas du miroir : `atn_earned` cumule une
+    // part de Shapley sur des watts estimés localement, hors du chemin monétaire
+    // depuis MINT-EXACT-1, et n'est jamais remis à zéro quand la genèse est
+    // rejouée.
+    //
+    // L'ordre de verrous canonique (`mining_loop.rs`) est `reputation → ledger`.
+    // Ce chemin prend le ledger en premier, donc le guard est **explicitement**
+    // clos par ce bloc : les deux verrous ne sont jamais tenus ensemble, et il n'y
+    // a pas d'inversion possible.
+    let mined_uqta = {
+        let ledger = state.node.ledger.read().await;
+        ledger.mined_by(&pk)
+    };
     let rep = state.node.reputation.read().await;
     let micro = p2p::ledger::MICRO as f64;
     // Convert µQTA → QUANTA for frontend display. The frontend reads only
     // public_key, joined_at (Profile) and atn_earned, trust_score, uptime_minutes
-    // (Dashboard); the wallet money split now comes from `get_wallet_overview`
+    // (Dashboard); the wallet money split comes from `get_wallet_overview`
     // (chain truth), so the reputation-mirror `atn_balance`/`atn_staked` are no
-    // longer surfaced here.
+    // longer surfaced here — and `atn_earned` now carries the chain's coinbase
+    // total for this address, keeping the Mining screen and the Wallet screen on
+    // one number instead of two that drifted apart.
     match rep.get_user(&pk) {
         Some(user) => Ok(serde_json::json!({
             "public_key": user.public_key,
             "trust_score": user.trust_score,
             "status": user.status,
-            "atn_earned": user.atn_earned as f64 / micro,
+            "atn_earned": mined_uqta as f64 / micro,
             "uptime_minutes": user.uptime_minutes,
             "energy_kwh": user.energy_kwh,
             "energy_atn_mined": user.energy_atn_mined as f64 / micro,
@@ -36,7 +51,7 @@ pub async fn get_my_reputation(state: tauri::State<'_, Arc<AppState>>) -> Result
             "public_key": pk,
             "trust_score": 0.0,
             "status": "New",
-            "atn_earned": 0.0,
+            "atn_earned": mined_uqta as f64 / micro,
             "uptime_minutes": 0,
             "energy_kwh": 0.0,
             "energy_atn_mined": 0.0,
@@ -189,11 +204,16 @@ pub async fn get_wallet_overview(state: tauri::State<'_, Arc<AppState>>) -> Resu
             c.pq_address_bech32().unwrap_or_default(),
         )
     };
-    let earned_uqta = {
-        let rep = state.node.reputation.read().await;
-        rep.get_user(&addr).map(|u| u.atn_earned).unwrap_or(0)
-    };
     let ledger = state.node.ledger.read().await;
+    // Le « total forgé » est lu **sur la chaîne** — la somme des coinbases qui
+    // créditent cette adresse — et non plus dans `reputation.atn_earned`. Ce
+    // dernier est un compteur d'affichage alimenté par une part de Shapley sur des
+    // watts estimés localement : hors du chemin monétaire depuis MINT-EXACT-1, et
+    // persisté dans un CRDT qui a survécu aux dix ruptures de protocole. Il
+    // affichait donc « +422 forgés » à côté d'un solde de 8, sur une chaîne dont la
+    // genèse avait été rejouée. Les quatre montants de cet écran viennent
+    // maintenant de la même source, ce que le commentaire ci-dessus promettait déjà.
+    let earned_uqta = ledger.mined_by(&addr);
     let micro = p2p::ledger::MICRO as f64;
     let height = ledger.chain_height();
     let spendable = ledger.balance_of(&addr);

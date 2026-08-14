@@ -4692,3 +4692,73 @@
             "M-14 : la borne de taille doit trancher la première — reçu : {err}"
         );
     }
+
+    /// **Le « total forgé » de l'écran principal doit être une propriété de la
+    /// chaîne, pas un compteur local.**
+    ///
+    /// L'app affichait `reputation.atn_earned`, alimenté par `uptime_tick` — une
+    /// part de Shapley calculée sur des watts estimés localement. `MINT-EXACT-1`
+    /// a sorti ce calcul du chemin monétaire, mais l'affichage a continué de le
+    /// lire. Deux symptômes visibles à l'écran : un total sans rapport avec le
+    /// solde, et un compteur qui **survit au rejeu de la genèse** parce qu'il vit
+    /// dans un CRDT persisté — d'où « +422 forgés » à côté de « 8,00 disponibles »
+    /// sur une chaîne repartie de zéro au fork v10.
+    ///
+    /// Ce que le test épingle est donc la propriété qui manquait : ce nombre est
+    /// une fonction de la chaîne seule. Une chaîne neuve le remet à zéro, et il
+    /// vaut exactement la somme des coinbases reçues.
+    #[test]
+    fn mined_by_is_a_property_of_the_chain_not_a_persisted_counter() {
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut wb = pq_wallet();
+        let b = gen_addr(&mut wb);
+
+        let mut l = Ledger::new();
+        assert_eq!(l.mined_by(&a), 0, "une chaîne neuve n'a rien versé à personne");
+
+        // Trois blocs produits par `a`. `seal_block` ne fait que coalescer : la
+        // récompense doit être frappée avant, exactement comme en production
+        // (`mint_block_reward` puis scellement).
+        for _ in 0..3 {
+            l.mint_block_reward(&a);
+            l.seal_block(&a, 0.0);
+        }
+        let mined_a = l.mined_by(&a);
+        assert!(mined_a > 0, "le producteur est crédité par la chaîne");
+        assert_eq!(l.mined_by(&b), 0, "qui n'a rien produit n'a rien reçu");
+
+        // La somme doit valoir exactement les coinbases portées par les blocs,
+        // recomptées ici indépendamment de l'implémentation.
+        let recount: u64 = (0..l.chain_height())
+            .filter_map(|i| l.block_at(i))
+            .flat_map(|blk| blk.transactions.iter())
+            .filter(|tx| matches!(tx.tx_type, TxType::Mining) && tx.to == a)
+            .map(|tx| tx.amount)
+            .sum();
+        assert_eq!(mined_a, recount, "le total forgé est la somme des coinbases reçues");
+
+        // La propriété qui manquait : un rejeu de genèse remet le compteur à zéro,
+        // là où le miroir de réputation le reportait indéfiniment.
+        let fresh = Ledger::new();
+        assert_eq!(
+            fresh.mined_by(&a),
+            0,
+            "après un rejeu de la genèse, la chaîne ne doit reconnaître aucun forgé — \
+             c'est exactement ce qu'un compteur persisté ne sait pas faire"
+        );
+
+        // Et un bénéficiaire du partage est compté comme tel : `b` produit, puis
+        // `a` produit et doit reverser une part à `b` (REWARD-SHARE-1).
+        let before_b = l.mined_by(&b);
+        l.mint_block_reward(&b);
+        l.seal_block(&b, 0.0);
+        for _ in 0..2 {
+            l.mint_block_reward(&a);
+            l.seal_block(&a, 0.0);
+        }
+        assert!(
+            l.mined_by(&b) > before_b,
+            "un participant récent crédité par le plan de partage entre dans le total"
+        );
+    }
