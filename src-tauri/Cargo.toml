@@ -142,7 +142,7 @@ crdts = "7"        # G-Counter, PN-Counter, OR-Set, LWW-Register
 num-traits = "0.2" # ToPrimitive pour convertir BigInt/BigUint des CRDTs en i64/u64
 
 # ─── Phase 2C : Mesure énergie CPU réelle ────────────────────────
-sysinfo = "0.33"   # CPU usage pour calcul watts réel
+sysinfo = "0.39"   # CPU usage pour calcul watts réel
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 
