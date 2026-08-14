@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connect-peer"
+description = "Enables the connect_peer command without any pre-configured scope."
+commands.allow = ["connect_peer"]
+
+[[permission]]
+identifier = "deny-connect-peer"
+description = "Denies the connect_peer command without any pre-configured scope."
+commands.deny = ["connect_peer"]

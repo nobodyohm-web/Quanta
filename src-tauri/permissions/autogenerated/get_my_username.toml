@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-my-username"
+description = "Enables the get_my_username command without any pre-configured scope."
+commands.allow = ["get_my_username"]
+
+[[permission]]
+identifier = "deny-get-my-username"
+description = "Denies the get_my_username command without any pre-configured scope."
+commands.deny = ["get_my_username"]

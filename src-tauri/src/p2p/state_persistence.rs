@@ -29,7 +29,7 @@ use std::sync::Arc;
 const PERSIST_INTERVAL_SECS: u64 = 30;
 
 /// Keys we snapshot, in stable order.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "ledger",
     "reputation",
     "consensus",
@@ -46,6 +46,11 @@ const KEYS: [&str; 7] = [
     // redémarrage repartait de zéro : re-découverte DHT complète au lieu d'un
     // re-dial immédiat des pairs qu'on connaissait déjà.
     "known_peers",
+    // R15 (AUDIT-2026-08-13) — anti-rejeu + bannissements. Les deux repartaient
+    // de zéro à chaque redémarrage : une enveloppe authentique capturée avant
+    // l'arrêt redevenait acceptable après, et un pair banni pour abus repartait
+    // avec une ardoise nette sans avoir rien changé.
+    "nonce_tracker",
 ];
 
 /// Spawn the periodic persistence task (every 30 seconds).
@@ -65,7 +70,7 @@ pub fn spawn_persistence(state: Arc<AppState>) {
             // ── 1. Snapshot all engines in parallel (independent read locks) ──
             let (
                 ledger_json, rep_json, cons_json, gos_json, usernames_json, memo_json,
-                known_peers_json,
+                known_peers_json, nonce_json,
             ) = tokio::join!(
                 snapshot_ledger(&state),
                 snapshot_reputation(&state),
@@ -74,10 +79,11 @@ pub fn spawn_persistence(state: Arc<AppState>) {
                 snapshot_usernames(&state),
                 snapshot_cast_memo(&state),
                 snapshot_known_peers(&state),
+                snapshot_nonce_tracker(&state),
             );
             let snapshots = [
                 ledger_json, rep_json, cons_json, gos_json, usernames_json, memo_json,
-                known_peers_json,
+                known_peers_json, nonce_json,
             ];
 
             // ── 2. Compute hashes; keep only the entries that changed ──
@@ -135,6 +141,12 @@ pub fn spawn_persistence(state: Arc<AppState>) {
             }
         }
     });
+}
+
+/// R15 — anti-rejeu + bannissements en cours (voir `NonceTracker::snapshot`).
+async fn snapshot_nonce_tracker(state: &AppState) -> String {
+    let snap = state.node.nonce_tracker.read().await.snapshot();
+    serde_json::to_string(&snap).unwrap_or_default()
 }
 
 async fn snapshot_ledger(state: &AppState) -> String {
@@ -266,6 +278,21 @@ pub async fn restore_state(state: &AppState, database: &Database) {
             log::info!(
                 "◈ [Finality] Mémo anti-slashing restauré ({} époque(s) déjà votée(s))",
                 count
+            );
+        }
+    }
+
+    // ── R15 — anti-rejeu + bannissements ──────────────────────────
+    // Restauré AVANT que le dispatcher ne puisse traiter le premier message :
+    // sinon la fenêtre de rejeu reste ouverte exactement le temps du démarrage,
+    // ce qu'un attaquant peut provoquer.
+    if let Ok(Some(json)) = database.load_state("nonce_tracker").await {
+        if let Ok(snap) =
+            serde_json::from_str::<p2p::dispatcher::NonceTrackerSnapshot>(&json)
+        {
+            let (senders, bans) = state.node.nonce_tracker.write().await.restore(snap);
+            log::info!(
+                "◈ [R15] Anti-rejeu restauré ({senders} expéditeur(s) suivis, {bans} ban(s) encore actif(s))"
             );
         }
     }

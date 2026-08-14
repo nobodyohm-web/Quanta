@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-was-guardian-reload"
+description = "Enables the was_guardian_reload command without any pre-configured scope."
+commands.allow = ["was_guardian_reload"]
+
+[[permission]]
+identifier = "deny-was-guardian-reload"
+description = "Denies the was_guardian_reload command without any pre-configured scope."
+commands.deny = ["was_guardian_reload"]

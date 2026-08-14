@@ -22,3 +22,36 @@ src-tauri/gen/
 # Obsidian (vault config — personal, local only)
 .obsidian/
 .trash/
+
+# ─── AUDIT SC-15 — matière de signature ───
+# La clé minisign de l'updater est la racine de confiance de tout le parc
+# installé : une fuite via `git add .` est irréversible (pas de révocation).
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.der
+*.sig
+*.minisig
+
+# ─── AUDIT SC-15 — vault et données locales ───
+# Le vault chiffré contient la graine des fonds. Si dirs::data_dir() échoue, le
+# repli écrit ./quanta-protocol/quanta.db DANS le dépôt (node_runtime.rs).
+*.db
+*.sqlite*
+quanta-protocol/
+
+# ─── AUDIT SC-15 — artefacts de build et de fuzz ───
+# corpus/ et artifacts/ contiennent des entrées générées, dont des reproducteurs
+# de crash : hors du dépôt tant qu'ils ne sont pas des graines revues (`git add -f`).
+/target
+src-tauri/fuzz/target/
+src-tauri/fuzz/corpus/
+src-tauri/fuzz/artifacts/
+*.log
+
+# Notes de travail de la remédiation d'audit (plans par constat, rapports de
+# passe). L'état final et les décisions vivent dans docs/audit/ et SECURITY.md ;
+# ces fichiers-ci sont l'échafaudage, pas le bâtiment.
+.audit_fixes/

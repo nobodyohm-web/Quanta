@@ -66,6 +66,16 @@ pub enum CmdError {
     CodeMismatch,
     /// A public key / connection code could not be derived (malformed key).
     InvalidKey,
+    /// **HAUT-2 (AUDIT-2026-08-13)** — le blob de clé de fonds est absent,
+    /// corrompu ou substitué sur un coffre déjà ancré. Refus de déverrouiller.
+    ///
+    /// Ce code existe pour une raison précise : `AuthGate.svelte` passe tout
+    /// message non `err.*` par un repli qui affiche « mot de passe incorrect ».
+    /// Le refus le plus grave du portefeuille se déguisait donc en erreur la plus
+    /// banale, et l'utilisateur réessayait au lieu de restaurer sa phrase.
+    FundKeyLost,
+    /// **HAUT-3** — une identité existe déjà ; la créer l'écraserait.
+    IdentityAlreadyExists,
     /// Passthrough for an unrecognized inner error — emitted verbatim, the
     /// frontend treats it as raw text (fallback branch).
     Other(String),
@@ -115,6 +125,8 @@ impl fmt::Display for CmdError {
             CmdError::UsernameNotFound => f.write_str("err.usernameNotFound"),
             CmdError::CodeMismatch => f.write_str("err.codeMismatch"),
             CmdError::InvalidKey => f.write_str("err.invalidKey"),
+            CmdError::FundKeyLost => f.write_str("err.fundKeyLost"),
+            CmdError::IdentityAlreadyExists => f.write_str("err.identityAlreadyExists"),
             CmdError::Other(s) => f.write_str(s),
         }
     }

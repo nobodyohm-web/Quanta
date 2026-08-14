@@ -40,6 +40,10 @@ const MAX_HEADER: usize = 16 * 1024;
 /// Max JSON-RPC body we accept.
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
+/// A4 (SEND-OPTIN-1) — plafond par défaut d'un `sendtoaddress`, en µQTA
+/// (1 000 QUANTA). Réglable par `QUANTA_RPC_MAX_SEND_UQTA`.
+const DEFAULT_RPC_MAX_SEND_UQTA: u64 = 1_000 * crate::p2p::ledger::MICRO;
+
 /// A JSON-RPC handler error: `(code, message)` mapped into the response `error`.
 type RpcErr = (i64, String);
 
@@ -76,7 +80,31 @@ pub async fn serve(
         "◈ [RPC] JSON-RPC + explorer sur http://{addr} ({})",
         if public { "public read-only" } else { "full/local" }
     );
-    let permits = Arc::new(tokio::sync::Semaphore::new(RPC_MAX_INFLIGHT));
+    serve_on(listener, state, shutdown, public, auth).await
+}
+
+/// A5 — la boucle d'acceptation, sur une écoute **déjà liée**. Séparée de
+/// [`serve`] pour qu'un test puisse prendre un port éphémère et mesurer le
+/// comportement réel du serveur sous connexions muettes, plutôt que de se contenter
+/// de relire les constantes.
+pub async fn serve_on(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    shutdown: CancellationToken,
+    public: bool,
+    auth: Arc<RpcAuth>,
+) {
+    // A8 — une écoute sur la boucle locale n'est joignable par un navigateur que
+    // par rebinding DNS ; ailleurs, le nœud est censé être atteint par son nom.
+    let loopback_only = listener
+        .local_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(true);
+    let connections = Arc::new(tokio::sync::Semaphore::new(RPC_MAX_CONNECTIONS));
+    let dispatch_permits = Arc::new(tokio::sync::Semaphore::new(RPC_MAX_DISPATCH));
+    let per_ip: PeerSlots = Arc::new(std::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    ));
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -84,20 +112,40 @@ pub async fn serve(
                 break;
             }
             accepted = listener.accept() => match accepted {
-                Ok((stream, _peer)) => {
+                Ok((stream, peer)) => {
                     // M1: drop rather than park. Without the ceiling, a slowloris
                     // pins one task + one fd per connection until the process hits
                     // its rlimit.
-                    let Ok(permit) = permits.clone().try_acquire_owned() else {
-                        log::debug!("◈ [RPC] connexion refusée — plafond en vol atteint");
+                    let Ok(permit) = connections.clone().try_acquire_owned() else {
+                        log::debug!("◈ [RPC] connexion refusée — plafond de connexions atteint");
                         continue;
+                    };
+                    // A5 — équité par source, seulement là où une source veut dire
+                    // quelque chose (voir RPC_MAX_CONN_PER_IP).
+                    let ip_slot = if loopback_only {
+                        None
+                    } else {
+                        match PeerSlot::acquire(&per_ip, peer.ip()) {
+                            Some(s) => Some(s),
+                            None => {
+                                log::debug!(
+                                    "◈ [RPC] connexion refusée — {} occupe déjà {} places",
+                                    peer.ip(),
+                                    RPC_MAX_CONN_PER_IP
+                                );
+                                continue;
+                            }
+                        }
                     };
                     let st = state.clone();
                     let au = auth.clone();
+                    let dp = dispatch_permits.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
+                        let _ip_slot = ip_slot;
                         let deadline = Duration::from_secs(RPC_READ_TIMEOUT_SECS);
-                        match tokio::time::timeout(deadline, handle_conn(stream, st, public, au)).await {
+                        let conn = handle_conn(stream, st, public, au, dp, loopback_only);
+                        match tokio::time::timeout(deadline, conn).await {
                             Ok(Err(e)) => log::debug!("◈ [RPC] connexion: {e}"),
                             Err(_) => log::debug!("◈ [RPC] connexion expirée"),
                             Ok(Ok(())) => {}
@@ -110,6 +158,48 @@ pub async fn serve(
                     // spins at 100% CPU, floods the log and starves mining/gossip
                     // on the same runtime.
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+}
+
+/// A5 — compteur de connexions vivantes par adresse source. Borné par construction :
+/// il ne peut contenir plus d'entrées que [`RPC_MAX_CONNECTIONS`], puisqu'une entrée
+/// disparaît dès que sa dernière connexion se termine.
+type PeerSlots = Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>;
+
+/// A5 — place occupée par une connexion pour le compte de sa source. La libération
+/// passe par `Drop` : c'est la seule façon de garantir qu'elle a lieu aussi sur les
+/// chemins d'erreur, d'expiration et d'annulation de tâche.
+struct PeerSlot {
+    slots: PeerSlots,
+    ip: std::net::IpAddr,
+}
+
+impl PeerSlot {
+    fn acquire(slots: &PeerSlots, ip: std::net::IpAddr) -> Option<Self> {
+        let mut map = slots.lock().ok()?;
+        let live = map.entry(ip).or_insert(0);
+        if *live >= RPC_MAX_CONN_PER_IP {
+            // Ne pas laisser une entrée à zéro derrière un refus.
+            if *live == 0 {
+                map.remove(&ip);
+            }
+            return None;
+        }
+        *live += 1;
+        Some(Self { slots: slots.clone(), ip })
+    }
+}
+
+impl Drop for PeerSlot {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.slots.lock() {
+            if let Some(live) = map.get_mut(&self.ip) {
+                *live = live.saturating_sub(1);
+                if *live == 0 {
+                    map.remove(&self.ip);
                 }
             }
         }
@@ -160,27 +250,120 @@ pub struct RpcAuth {
 }
 
 impl RpcAuth {
-    /// Load the cookie from `data_dir`, or mint a fresh one. The file is created
-    /// `0600` on Unix so another local user cannot read the token.
+    /// Load the cookie from `data_dir`, or mint a fresh one.
+    ///
+    /// **A3 (AUDIT-2026-08-13) — COOKIE-OWN-1 : le jeton adopté doit être le
+    /// nôtre.**
+    ///
+    /// Cette fonction adoptait tout fichier `.cookie` existant dont le contenu
+    /// faisait ≥ 32 caractères, **sans regarder ni le propriétaire ni les
+    /// permissions**, et sans réappliquer `0600` sur ce chemin. Un processus local
+    /// quelconque n'avait donc qu'à écrire le fichier avant notre premier
+    /// démarrage pour **choisir** le jeton — et obtenir l'autorité complète sur
+    /// `sendtoaddress`, c'est-à-dire sur les fonds. C'était un cas de « la défense
+    /// existe et ne défend rien » : le `0600` de l'écriture était contourné en ne
+    /// laissant jamais l'écriture avoir lieu.
+    ///
+    /// Un cookie préexistant est désormais adopté **seulement si** :
+    /// - nous en sommes le propriétaire (`st_uid == getuid()`) ;
+    /// - aucun bit d'accès ne le laisse lisible par le groupe ou les autres
+    ///   (`mode & 0o077 == 0`) ;
+    /// - il n'est pas un lien symbolique (lu via `symlink_metadata`, donc un
+    ///   `.cookie -> /ailleurs` est vu pour ce qu'il est) ;
+    /// - il porte au moins 32 caractères, comme avant.
+    ///
+    /// Sinon on **écrase** avec un jeton frais plutôt que de refuser de démarrer :
+    /// le démon reste utilisable, et le processus qui avait planté son jeton perd
+    /// simplement son autorité. Le remplacement est journalisé bruyamment, car
+    /// c'est soit une migration, soit une tentative.
     pub fn load_or_create(data_dir: &std::path::Path) -> std::io::Result<Self> {
         let path = data_dir.join(".cookie");
-        if let Ok(existing) = std::fs::read_to_string(&path) {
-            let t = existing.trim().to_string();
-            if t.len() >= 32 {
-                return Ok(Self { token: t });
+        match Self::adoptable_token(&path) {
+            Ok(Some(t)) => return Ok(Self { token: t }),
+            Ok(None) => {}
+            Err(reason) => {
+                log::warn!(
+                    "◈ [RPC] cookie existant REFUSÉ ({reason}) — un nouveau jeton est généré. \
+                     Tout client qui utilisait l'ancien doit relire {}",
+                    path.display()
+                );
             }
         }
         let mut raw = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
         let token = hex::encode(raw);
         std::fs::create_dir_all(data_dir)?;
-        std::fs::write(&path, &token)?;
+        // A14 : le fichier est créé DIRECTEMENT en 0600 plutôt qu'écrit sous
+        // l'umask puis corrigé — la fenêtre TOCTOU entre les deux, si courte
+        // soit-elle, était une fenêtre de lecture par un autre utilisateur local.
+        Self::write_private(&path, &token)?;
+        Ok(Self { token })
+    }
+
+    /// A3 — le jeton du fichier existant, s'il est adoptable. `Ok(None)` : pas de
+    /// fichier. `Err(raison)` : un fichier existe mais ne satisfait pas les
+    /// conditions de propriété/permissions/longueur.
+    fn adoptable_token(path: &std::path::Path) -> Result<Option<String>, String> {
+        // `symlink_metadata` : on veut connaître le fichier À CE CHEMIN, pas la
+        // cible d'un lien qu'on nous aurait tendu.
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(_) => return Ok(None), // absent : cas normal du premier démarrage
+        };
+        if meta.file_type().is_symlink() {
+            return Err("le chemin est un lien symbolique".into());
+        }
+        if !meta.is_file() {
+            return Err("le chemin n'est pas un fichier ordinaire".into());
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                // Le fichier a été lisible hors du propriétaire : que ce soit une
+                // plantation ou un umask laxiste, le jeton doit être considéré
+                // comme divulgué. On ne le réutilise pas.
+                return Err(format!("permissions {mode:04o} — lisible hors du propriétaire"));
+            }
+            // Preuve de propriété **sans dépendance nouvelle et sans `unsafe`** :
+            // `chmod` n'aboutit que pour le propriétaire du fichier (ou root, qui
+            // nous a alors lancés). Un `.cookie` planté par un autre utilisateur
+            // local échoue ici avec `EPERM`. Le même appel **réapplique** 0600 sur
+            // ce chemin — ce que l'ancienne implémentation ne faisait jamais pour
+            // un fichier adopté.
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("le fichier ne nous appartient pas ({e})"))?;
         }
-        Ok(Self { token })
+        let contents = std::fs::read_to_string(path).map_err(|e| format!("lecture: {e}"))?;
+        let t = contents.trim().to_string();
+        if t.len() < 32 {
+            return Err(format!("jeton trop court ({} caractères)", t.len()));
+        }
+        Ok(Some(t))
+    }
+
+    /// A14 — écrire un fichier de secret en 0600 **dès sa création**, sans passer
+    /// par l'umask. Sur les plateformes non-Unix on retombe sur `fs::write` : il
+    /// n'y a pas de bit de permission équivalent à exiger.
+    fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            f.write_all(contents.as_bytes())?;
+            f.sync_all()
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, contents)
+        }
     }
 
     /// The cookie path, logged at startup so an integrator knows where to read it.
@@ -244,23 +427,61 @@ fn auth_rejection(req: &HttpReq, auth: &RpcAuth, public: bool) -> Option<String>
 /// connected and said nothing parked both forever.
 const RPC_READ_TIMEOUT_SECS: u64 = 10;
 
-/// M1 — in-flight connection ceiling. Excess connections are dropped rather than
-/// parked, so a slowloris cannot exhaust the process's descriptors and take the
-/// mining and gossip tasks down with it.
-const RPC_MAX_INFLIGHT: usize = 128;
+/// **A5 (AUDIT-2026-08-13) — le plafond en vol transformait le slowloris en
+/// coupure de service.**
+///
+/// Un seul plafond de 128 connexions couvrait à la fois la ressource **chère**
+/// (traiter une requête : verrous, CPU, lectures de chaîne) et la ressource **bon
+/// marché** (une socket dont on attend les octets), et il était détenu pendant les
+/// 10 secondes entières du délai global. 128 connexions muettes — ouvertes en
+/// 0,02 s, entretenues pour ~13 kbit/s — refusaient donc **tout** client légitime,
+/// preuve exécutée à l'appui. Sur un nœud lancé `--public`, dont l'aide annonce
+/// qu'il « peut être exposé publiquement sans risque », c'est une coupure totale à
+/// la portée de n'importe qui, sans authentification.
+///
+/// Les deux ressources sont désormais bornées séparément :
+/// - [`RPC_MAX_CONNECTIONS`] borne les descripteurs (une socket en lecture ne coûte
+///   presque rien) ;
+/// - [`RPC_MAX_DISPATCH`] borne le travail réellement concurrent.
+///
+/// Une connexion muette ne consomme donc plus **aucun** permis de traitement, et
+/// elle est coupée à [`RPC_HEAD_TIMEOUT_SECS`] au lieu de 10 s.
+const RPC_MAX_CONNECTIONS: usize = 256;
+
+/// A5 — concurrence de **traitement**. Bien plus bas que le plafond de connexions :
+/// c'est ici que se paient les verrous du ledger et les balayages de chaîne. Un
+/// dépassement fait attendre (la borne globale de 10 s tranche), il ne ferme pas la
+/// connexion au nez du client.
+const RPC_MAX_DISPATCH: usize = 64;
+
+/// A5 — délai propre à la lecture de l'**en-tête**. C'est la fenêtre exacte du
+/// slowloris : un client qui n'a pas fini d'annoncer sa requête en 3 s ne la finira
+/// pas. Le corps, lui, reste couvert par [`RPC_READ_TIMEOUT_SECS`] — un envoi
+/// légitime de plusieurs centaines de kilo-octets sur un lien lent ne doit pas être
+/// coupé par la garde anti-slowloris.
+const RPC_HEAD_TIMEOUT_SECS: u64 = 3;
+
+/// A5 — connexions simultanées tolérées depuis une même adresse source, **quand le
+/// nœud n'écoute pas sur la boucle locale**.
+///
+/// Sur `127.0.0.1` la mesure n'a aucun sens (tout le monde a la même adresse) et
+/// serait même nuisible : elle laisserait un processus local en refuser un autre.
+/// Sur une écoute publique — le cas où l'attaquant est « n'importe qui » — elle
+/// borne à 16/256 ce qu'un seul hôte peut immobiliser. Contre un attaquant
+/// **distribué**, elle ne fait que relever le coût ; c'est dit tel quel.
+const RPC_MAX_CONN_PER_IP: usize = 16;
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Read one HTTP/1.1 request (head + `Content-Length` body). `Ok(None)` when the
-/// peer closes without sending anything. Enforces header/body size caps.
-async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>> {
-    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+/// A5 — lecture de l'en-tête seule, pour pouvoir lui donner son propre délai.
+/// `Ok(None)` : le pair a fermé sans rien dire.
+async fn read_head(stream: &mut TcpStream, buf: &mut Vec<u8>) -> std::io::Result<Option<usize>> {
     let mut tmp = [0u8; 4096];
-    let header_end = loop {
-        if let Some(pos) = find_subsequence(&buf, b"\r\n\r\n") {
-            break pos;
+    loop {
+        if let Some(pos) = find_subsequence(buf, b"\r\n\r\n") {
+            return Ok(Some(pos));
         }
         if buf.len() > MAX_HEADER {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "header too large"));
@@ -274,6 +495,29 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
             };
         }
         buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
+/// Read one HTTP/1.1 request (head + `Content-Length` body). `Ok(None)` when the
+/// peer closes without sending anything. Enforces header/body size caps.
+///
+/// **A5 (AUDIT-2026-08-13)** — l'en-tête a son propre délai, court. C'est là, et
+/// seulement là, que vit le slowloris : une requête dont l'en-tête n'est pas
+/// terminé après [`RPC_HEAD_TIMEOUT_SECS`] n'est pas une requête lente, c'en est
+/// une qui n'arrivera jamais. Le corps garde le délai global, pour ne pas couper un
+/// envoi légitime volumineux sur un lien lent.
+async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>> {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let head = tokio::time::timeout(
+        Duration::from_secs(RPC_HEAD_TIMEOUT_SECS),
+        read_head(stream, &mut buf),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "head read deadline exceeded")
+    })??;
+    let Some(header_end) = head else {
+        return Ok(None);
     };
 
     let head = String::from_utf8_lossy(&buf[..header_end]);
@@ -301,6 +545,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
 
     let body_start = header_end + 4;
     let mut body = buf[body_start..].to_vec();
+    let mut tmp = [0u8; 4096];
     while body.len() < content_length {
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
@@ -312,10 +557,26 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpReq>
     Ok(Some(HttpReq { method, path, headers, body }))
 }
 
+/// **A16 (AUDIT-2026-08-13) — en-têtes de sécurité sur TOUTE réponse RPC.**
+///
+/// Les réponses n'émettaient que `Content-Type`, `Content-Length` et
+/// `Connection`. L'explorateur non authentifié était donc encadrable en iframe
+/// (`frame-ancestors` absent), et le navigateur restait libre de renifler le type
+/// d'une réponse JSON pour l'exécuter autrement (`nosniff` absent). Ces trois
+/// en-têtes ne coûtent rien et ferment les deux.
+const SECURITY_HEADERS: &str = concat!(
+    "X-Content-Type-Options: nosniff\r\n",
+    "Referrer-Policy: no-referrer\r\n",
+    "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; \
+     script-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; \
+     form-action 'none'; frame-ancestors 'none'\r\n",
+);
+
 async fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+        body.len(),
+        SECURITY_HEADERS
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
@@ -324,12 +585,64 @@ async fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) -> st
 
 async fn write_html(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+        body.len(),
+        SECURITY_HEADERS
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
     stream.flush().await
+}
+
+/// **A8 (AUDIT-2026-08-13) — aucune validation de `Host` : rebinding DNS.**
+///
+/// Le nœud répondait à `Host: attacker.example`. Une page web dont le domaine a un
+/// TTL DNS d'une seconde bascule vers `127.0.0.1` : après rebinding elle est
+/// **même-origine** avec `http://attaquant.tld:8645`, donc le navigateur la laisse
+/// **lire** les réponses. Les méthodes d'argent restaient refusées (l'en-tête
+/// `Origin` les protège), mais toute la surface de lecture était ouverte :
+/// `getinfo` livre l'adresse `qta1…` de l'opérateur et son `node_id` Iroh,
+/// `getbalance` son solde, `listtransactions` jusqu'à mille mouvements. C'est une
+/// dé-anonymisation complète pour le prix d'un nom de domaine.
+///
+/// La règle est celle de l'attaque : un navigateur envoie toujours le `Host`
+/// **d'origine**, celui que l'attaquant contrôle, jamais l'adresse à laquelle la
+/// socket a réellement abouti. Exiger un `Host` de boucle locale suffit donc à
+/// fermer le rebinding, sans gêner `curl http://127.0.0.1:8645` ni l'explorateur
+/// embarqué (tous deux envoient l'adresse littérale).
+///
+/// Elle ne s'applique que si le nœud écoute sur la boucle locale : une écoute
+/// publique est censée être atteinte par son nom, et l'opérateur l'a demandée.
+/// Un `Host` absent est toléré — HTTP/1.1 l'exige, aucun navigateur ne l'omet, et
+/// le tolérer garde les clients minimalistes d'intégrateurs fonctionnels.
+fn host_rejection(req: &HttpReq, loopback_only: bool) -> Option<String> {
+    if !loopback_only {
+        return None;
+    }
+    let host = req.header("host")?;
+    if host_is_local(host) {
+        None
+    } else {
+        Some("en-tête Host étranger refusé (protection anti-rebinding DNS)".into())
+    }
+}
+
+/// A8 — l'autorité désigne-t-elle bien la machine locale ? Le port est ignoré ; ce
+/// qui compte est le nom.
+fn host_is_local(host: &str) -> bool {
+    let host = host.trim();
+    // Forme IPv6 littérale : `[::1]:8645`.
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    name.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 async fn handle_conn(
@@ -337,11 +650,24 @@ async fn handle_conn(
     state: Arc<AppState>,
     public: bool,
     auth: Arc<RpcAuth>,
+    dispatch_permits: Arc<tokio::sync::Semaphore>,
+    loopback_only: bool,
 ) -> std::io::Result<()> {
     let req = match read_request(&mut stream).await? {
         Some(r) => r,
         None => return Ok(()),
     };
+
+    // A8 — avant tout traitement, y compris l'explorateur : une page rebindée ne
+    // doit rien pouvoir lire du nœud.
+    if let Some(reason) = host_rejection(&req, loopback_only) {
+        let body = json!({
+            "jsonrpc": "2.0", "id": Value::Null,
+            "error": {"code": -32002, "message": reason}
+        })
+        .to_string();
+        return write_response(&mut stream, "403 Forbidden", body.as_bytes()).await;
+    }
 
     // GET / → the self-contained web explorer (it POSTs JSON-RPC to this same origin).
     if req.method.eq_ignore_ascii_case("GET") {
@@ -379,6 +705,12 @@ async fn handle_conn(
             if public && public_denied(method) {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method disabled in public read-only mode"}})
             } else {
+                // A5 — le permis de traitement n'est pris qu'ICI, autour du seul
+                // travail coûteux. Une connexion qui lit ses octets n'en consomme
+                // aucun, ce qui est exactement ce qui empêchait un client légitime
+                // d'être servi pendant qu'une poignée de sockets muettes tenaient
+                // tous les permis.
+                let _permit = dispatch_permits.acquire().await;
                 match dispatch(&state, method, &params).await {
                     Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
                     Err((code, message)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
@@ -496,7 +828,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
                 .validators
                 .into_iter()
                 .map(|e| {
-                    let bech = address::parse(&e.address_hex)
+                    // BAS-1 : adresse LUE DE LA CHAÎNE, origine machine — la
+                    // somme de contrôle n'a rien à valider ici.
+                    let bech = address::parse_hex_unchecked(&e.address_hex)
                         .map(|b| address::encode(&b))
                         .unwrap_or_else(|_| e.address_hex.clone());
                     json!({ "address": bech, "address_hex": e.address_hex, "stake_uqta": e.stake_uqta })
@@ -554,7 +888,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
 
         "getbalance" => {
             let addr = param_str(params, "address")?;
-            let bytes = address::parse(&addr).map_err(|_| (-32602, "invalid address".into()))?;
+            // BAS-1 : lecture seule, l'hexadécimal d'opérateur reste accepté.
+            let bytes = address::parse_hex_unchecked(&addr)
+                .map_err(|_| (-32602, "invalid address".into()))?;
             let hexs = hex::encode(bytes);
             // Shared per-account money split (see `crate::views`), plus the echoed address.
             let b = crate::views::balance_view(&*state.node.ledger.read().await, &hexs);
@@ -565,6 +901,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
             }))
         }
 
+        // **BAS-1** — c'est LA fonction qu'un échange appelle avant de créditer.
+        // Elle doit être **stricte** : répondre `isvalid: true` sur une chaîne
+        // sans somme de contrôle, c'est certifier ce qu'on n'a pas vérifié.
         "validateaddress" => {
             let addr = param_str(params, "address")?;
             match address::parse(&addr) {
@@ -608,7 +947,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
         // Deposit-detection primitive: scan blocks for txs touching `address`.
         "listtransactions" => {
             let addr = param_str(params, "address")?;
-            let bytes = address::parse(&addr).map_err(|_| (-32602, "invalid address".into()))?;
+            // BAS-1 : lecture seule, l'hexadécimal d'opérateur reste accepté.
+            let bytes = address::parse_hex_unchecked(&addr)
+                .map_err(|_| (-32602, "invalid address".into()))?;
             let hexs = hex::encode(bytes);
             let ledger = state.node.ledger.read().await;
             let height = ledger.chain_height();
@@ -756,14 +1097,64 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Result
         // Build + sign a transfer from the node's OWN wallet and broadcast it.
         // Requires a persistent wallet (Ed25519 + ML-DSA); an ephemeral watch node
         // returns an error rather than silently doing nothing.
+        //
+        // **A4 (AUDIT-2026-08-13) — SEND-OPTIN-1 : cette méthode est désormais
+        // fermée par défaut.**
+        //
+        // Elle signait avec la clé du nœud et diffusait sans déverrouillage, sans
+        // plafond, sans confirmation et sans alerte : le cookie RPC était l'unique
+        // et entière autorité de dépense du démon. Quiconque lit ce fichier —
+        // c'est-à-dire tout processus local avant le correctif A3, ou tout
+        // opérateur d'une sauvegarde du répertoire de données — vidait le
+        // portefeuille en un appel.
+        //
+        // Deux garde-fous, tous deux explicites et journalisés :
+        // - `QUANTA_RPC_ALLOW_SEND=1` doit être posé. Sans lui, la méthode refuse
+        //   en disant comment l'ouvrir. Le reste de l'intégration d'échange n'est
+        //   pas touché : `sendrawtransaction` continue de fonctionner, et il est
+        //   plus sûr par construction (l'intégrateur signe avec sa propre garde,
+        //   le nœud ne fait que relayer).
+        // - `QUANTA_RPC_MAX_SEND_UQTA` plafonne le montant d'un appel (défaut :
+        //   1 000 QUANTA). Un plafond n'arrête pas un attaquant patient, mais il
+        //   transforme « une requête vide le portefeuille » en « il faut N
+        //   requêtes », ce qui laisse le temps aux journaux d'exister.
         "sendtoaddress" => {
+            if std::env::var("QUANTA_RPC_ALLOW_SEND").ok().as_deref() != Some("1") {
+                return Err((
+                    -32004,
+                    "sendtoaddress est désactivé : la dépense par RPC doit être ouverte                      explicitement avec QUANTA_RPC_ALLOW_SEND=1. Pour une intégration                      d'échange, préférez sendrawtransaction (vous signez, le nœud relaie)."
+                        .into(),
+                ));
+            }
             let to_input = param_str(params, "address")?;
             let amount = param_u64(params, "amount_uqta")?;
             if amount == 0 {
                 return Err((-32602, "amount_uqta must be > 0".into()));
             }
+            let cap = std::env::var("QUANTA_RPC_MAX_SEND_UQTA")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_RPC_MAX_SEND_UQTA);
+            if amount > cap {
+                return Err((
+                    -32004,
+                    format!(
+                        "montant {amount} µQTA au-dessus du plafond RPC {cap} µQTA                          (QUANTA_RPC_MAX_SEND_UQTA)"
+                    ),
+                ));
+            }
+            log::warn!(
+                "◈ [RPC] sendtoaddress : {amount} µQTA vers {} — dépense autorisée par \
+                 QUANTA_RPC_ALLOW_SEND",
+                &to_input[..to_input.len().min(16)]
+            );
+            // BAS-1 : `sendtoaddress` accepte encore l'hexadécimal — l'appelant
+            // est un opérateur qui a activé QUANTA_RPC_ALLOW_SEND et colle
+            // souvent une adresse lue sur la chaîne. La forme publique `qta1…`
+            // reste checksummée ; `validateaddress` est là pour trancher avant.
             let to = hex::encode(
-                address::parse(&to_input).map_err(|_| (-32602, "invalid address".to_string()))?,
+                address::parse_hex_unchecked(&to_input)
+                    .map_err(|_| (-32602, "invalid address".to_string()))?,
             );
             // Lock ordering: crypto → ledger → gossip (held throughout, like the
             // desktop wallet's send). Both legs (transfer + 1% burn) are broadcast.
@@ -872,6 +1263,121 @@ mod tests {
         }
     }
 
+
+    /// **A5 (AUDIT-2026-08-13) — une connexion muette immobilisait un permis
+    /// pendant 10 secondes.**
+    ///
+    /// Le plafond en vol couvrait indistinctement « une socket dont on attend les
+    /// octets » et « une requête en cours de traitement », et il était détenu
+    /// pendant tout le délai global : 128 connexions muettes ouvertes en 0,02 s
+    /// coupaient le service à tout client légitime (preuve exécutée dans le
+    /// rapport). Le test mesure la propriété qui ferme cela : un client qui se tait
+    /// est libéré au délai d'**en-tête**, strictement plus court que le délai
+    /// global.
+    #[tokio::test]
+    async fn a5_a_silent_connection_is_released_at_the_head_deadline() {
+        use tokio::io::AsyncReadExt as _;
+        // La propriété tient à la compilation : le délai d'en-tête doit être
+        // strictement plus court que le délai global, sinon la mesure ci-dessous
+        // ne distingue plus rien.
+        const _: () = assert!(RPC_HEAD_TIMEOUT_SECS < RPC_READ_TIMEOUT_SECS);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let shutdown = CancellationToken::new();
+        let state = test_state().await;
+        let auth = Arc::new(RpcAuth::with_token("s3cret"));
+        let server = tokio::spawn(serve_on(listener, state, shutdown.clone(), false, auth));
+
+        // Un slowloris : on ouvre, on annonce une requête, et on ne la finit jamais.
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        sock.write_all(b"POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            .await
+            .expect("partial head");
+
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 64];
+        // Le serveur doit fermer de son propre chef bien avant le délai global.
+        let closed = tokio::time::timeout(
+            Duration::from_secs(RPC_READ_TIMEOUT_SECS - 2),
+            sock.read(&mut buf),
+        )
+        .await;
+        shutdown.cancel();
+        server.abort();
+
+        assert!(
+            closed.is_ok(),
+            "A5 : une connexion muette doit être coupée au délai d'en-tête, pas au délai global"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(RPC_READ_TIMEOUT_SECS),
+            "libérée en {:?}, ce qui doit rester sous le délai global",
+            started.elapsed()
+        );
+    }
+
+    /// A5 — sur une écoute publique, un seul hôte ne peut pas prendre toutes les
+    /// places. La borne est par adresse source ; les autres sources ne la voient
+    /// pas, et une place se rend à la fermeture de la connexion.
+    #[test]
+    fn a5_one_source_cannot_take_every_connection_slot() {
+        let slots: PeerSlots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let flooder: std::net::IpAddr = "203.0.113.7".parse().expect("ip");
+        let honest: std::net::IpAddr = "198.51.100.9".parse().expect("ip");
+
+        let held: Vec<PeerSlot> = (0..RPC_MAX_CONN_PER_IP)
+            .filter_map(|_| PeerSlot::acquire(&slots, flooder))
+            .collect();
+        assert_eq!(held.len(), RPC_MAX_CONN_PER_IP, "la borne est atteignable");
+        assert!(
+            PeerSlot::acquire(&slots, flooder).is_none(),
+            "A5 : une source ne dépasse pas sa part"
+        );
+        assert!(
+            PeerSlot::acquire(&slots, honest).is_some(),
+            "A5 : un autre hôte reste servi pendant l'inondation"
+        );
+
+        drop(held);
+        assert!(
+            PeerSlot::acquire(&slots, flooder).is_some(),
+            "les places se rendent à la fermeture"
+        );
+    }
+
+    /// **A8 (AUDIT-2026-08-13) — rebinding DNS : toute page web lisait l'adresse,
+    /// le solde et l'historique du nœud.**
+    ///
+    /// Après rebinding, la page est même-origine avec `http://attaquant.tld:8645`
+    /// et lit donc les réponses — mais le navigateur envoie toujours le `Host`
+    /// d'origine, jamais l'adresse réellement jointe. C'est exactement ce que ce
+    /// contrôle regarde.
+    #[test]
+    fn a8_a_rebound_host_is_refused_on_a_loopback_bind() {
+        let rebound = req_with(
+            &[("Host", "attacker.example:8645")],
+            r#"{"method":"getinfo"}"#,
+        );
+        assert!(
+            host_rejection(&rebound, true).is_some(),
+            "A8 : un Host étranger doit être refusé sur une écoute locale"
+        );
+        // Les clients légitimes ne sont pas touchés.
+        for host in ["127.0.0.1:8645", "localhost:8645", "[::1]:8645", "127.0.0.1"] {
+            let ok = req_with(&[("Host", host)], r#"{"method":"getinfo"}"#);
+            assert!(
+                host_rejection(&ok, true).is_none(),
+                "{host} doit rester accepté"
+            );
+        }
+        // Un client minimaliste sans en-tête Host reste accepté (aucun navigateur
+        // n'omet le Host, donc le tolérer n'ouvre pas l'attaque).
+        let bare = req_with(&[], r#"{"method":"getinfo"}"#);
+        assert!(host_rejection(&bare, true).is_none());
+        // Écoute publique : le nœud est censé être joint par son nom.
+        assert!(host_rejection(&rebound, false).is_none());
+    }
+
     /// H7 (AUDIT-2026-07-25) — every chain-controlled string interpolated into
     /// `innerHTML` must be escaped. A transaction's `to` is attacker-chosen (the
     /// protocol imposes no shape on it) and `short()` returns any string of ≤18
@@ -970,6 +1476,24 @@ mod tests {
         use crate::security::CryptoEngine;
 
         let state = test_state().await;
+
+        // A4 (SEND-OPTIN-1) : la dépense par RPC est fermée par défaut. Le test
+        // l'ouvre explicitement — et vérifie d'abord qu'elle est bien fermée.
+        let shut = dispatch(
+            &state,
+            "sendtoaddress",
+            &json!({ "address": CryptoEngine::ml_dsa_address_hex(b"x"), "amount_uqta": 1000 }),
+        )
+        .await;
+        assert_eq!(
+            shut.unwrap_err().0,
+            -32004,
+            "A4 : sendtoaddress refuse tant que QUANTA_RPC_ALLOW_SEND n'est pas posé"
+        );
+        // SAFETY: `set_var` est `unsafe` depuis l'édition 2024 (course avec les
+        // lectures d'environnement d'autres threads). Ce test est mono-thread sur
+        // cette variable, qu'aucun autre test ne lit.
+        unsafe { std::env::set_var("QUANTA_RPC_ALLOW_SEND", "1") };
 
         // No wallet identity yet → info reports it, and the key-holding methods refuse.
         let info = dispatch(&state, "getwalletinfo", &json!({})).await.unwrap();

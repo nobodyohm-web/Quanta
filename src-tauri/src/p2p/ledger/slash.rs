@@ -173,6 +173,26 @@ impl Ledger {
         if !verify_proof(&proof, stakes_by_pk, EPOCH_LENGTH_BLOCKS) {
             return false; // no real fault / forged / not slashable
         }
+        // **B-15 (AUDIT-2026-08-13) — la fenêtre de recevabilité des preuves
+        // existait sur le papier seulement.** `SLASH_EVIDENCE_WINDOW_BLOCKS` était
+        // déclarée, documentée « contrainte GRAVÉE par ADR-009 » et protégée par
+        // une assertion de compilation… mais **aucune ligne ne l'appliquait**. Une
+        // preuve de faute d'il y a deux ans restait donc éternellement recevable :
+        // un accusateur pouvait la garder sous le coude et la déposer au moment où
+        // elle fait le plus mal (par exemple juste après que la victime a re-bondé),
+        // et un nœud neuf devait rejouer une histoire sans limite d'âge.
+        //
+        // La fenêtre est bornée par la période de désengagement (l'assertion de
+        // `finality_slashing.rs` le grave) : au-delà, l'offenseur a déjà pu retirer
+        // son enjeu, donc punir n'a plus d'objet — c'est le compromis explicite de
+        // Casper, pas un oubli.
+        let now_epoch = self.chain_height() / EPOCH_LENGTH_BLOCKS;
+        let window_epochs = crate::sm::finality_slashing::SLASH_EVIDENCE_WINDOW_BLOCKS
+            / EPOCH_LENGTH_BLOCKS;
+        let fault_epoch = proof.target_epoch();
+        if now_epoch.saturating_sub(fault_epoch) > window_epochs {
+            return false; // preuve périmée (B-15)
+        }
         let Ok(pk_bytes) = hex::decode(proof.offender()) else {
             return false;
         };

@@ -348,6 +348,99 @@ pub fn leader_beacon(buried_block_hash: &str, slot: u64) -> String {
     hex::encode(h.finalize().as_bytes())
 }
 
+/// **C-04 (AUDIT-2026-08-13) — FORK-RANK-1 : profondeur du classement d'élection.**
+///
+/// Le fork-choice n'a besoin que de savoir *qui, du proposeur A ou du proposeur
+/// B, était le mieux élu pour cette hauteur*. Classer l'ensemble bondé entier
+/// coûterait O(N²) et rendrait le départage sensible à la taille du réseau ;
+/// au-delà de ce rang, tout le monde est ex æquo et le départage retombe sur le
+/// critère suivant. 64 rangs, c'est déjà bien plus que le nombre de validateurs
+/// qu'une partition réaliste peut voir proposer simultanément à une hauteur.
+pub const ELECTION_RANK_DEPTH: u32 = 64;
+
+/// **C-04 (AUDIT-2026-08-13) — le classement d'élection complet d'une hauteur.**
+///
+/// L'audit a montré que l'élection PoS existait (`elect_leader`) mais ne servait
+/// **qu'au scellement** : à la réception, deux blocs concurrents à la même
+/// hauteur étaient départagés par « le plus grand hash », un critère que
+/// n'importe qui peut broyer sans posséder un seul µQTA. L'élection était donc
+/// une politesse, pas une règle.
+///
+/// Cette fonction généralise `elect_leader` en un **classement total** : tirages
+/// pondérés par l'enjeu, **sans remise**, sur la même graine et le même beacon
+/// enterré. Le rang 0 est exactement ce que renvoie [`elect_leader`] — la
+/// propriété est verrouillée par `rank0_is_exactly_elect_leader`. Le fork-choice
+/// peut alors préférer le bloc du proposeur le mieux élu, ce qui rend le broyage
+/// de hash inutile : pour gagner un départage il faut de l'enjeu, donc quelque
+/// chose à perdre.
+///
+/// Sans remise, et non `elect_fallback_leader(round)` : ce dernier retire à
+/// chaque round depuis l'ensemble **complet**, donc il peut ré-élire le même
+/// validateur et ne définit aucun ordre total. Un fork-choice a besoin d'un
+/// ordre total, sinon deux nœuds honnêtes peuvent préférer des blocs différents.
+///
+/// Coût borné : au plus `ELECTION_RANK_DEPTH` tirages, chacun linéaire en le
+/// nombre d'éligibles restants. Renvoie les clés publiques par rang croissant.
+pub fn election_ranking(beacon: &str, slot: u64, validators: &[Validator]) -> Vec<String> {
+    let mut remaining: Vec<&Validator> = validators
+        .iter()
+        .filter(|v| v.stake >= MIN_VALIDATOR_STAKE)
+        .collect();
+    // Ordre permutation-invariant, pour la même raison que dans `elect_leader` :
+    // deux nœuds honnêtes ayant le même ensemble doivent produire le même
+    // classement, quel que soit l'ordre d'itération de la carte d'origine.
+    remaining.sort_by(|a, b| a.pk.cmp(&b.pk));
+
+    let depth = (ELECTION_RANK_DEPTH as usize).min(remaining.len());
+    let mut ranking = Vec::with_capacity(depth);
+
+    for round in 0..depth {
+        // Accumulation u128 : la somme de N poids u64 ne peut pas déborder.
+        let total: u128 = remaining.iter().map(|v| v.weight() as u128).sum();
+        let picked = if total == 0 {
+            0usize
+        } else {
+            let seed = compute_vrf_seed(beacon, slot, round as u32);
+            let target = (seed as u128) % total;
+            let mut cumulative: u128 = 0;
+            let mut idx = remaining.len() - 1; // borne sûre, jamais atteinte
+            for (i, v) in remaining.iter().enumerate() {
+                cumulative += v.weight() as u128;
+                if target < cumulative {
+                    idx = i;
+                    break;
+                }
+            }
+            idx
+        };
+        // `picked` est toujours un indice valide (`remaining` est non vide tant
+        // que `round < depth <= remaining.len()`), donc pas de panique possible.
+        if picked >= remaining.len() {
+            break;
+        }
+        ranking.push(remaining.remove(picked).pk.clone());
+    }
+
+    ranking
+}
+
+/// Rang d'élection d'un proposeur pour une hauteur, ou `None` s'il n'est pas
+/// classé (non bondé, sous le minimum, ou au-delà de [`ELECTION_RANK_DEPTH`]).
+///
+/// C'est l'unique entrée du fork-choice : plus le rang est **petit**, mieux le
+/// proposeur était élu pour cette hauteur, donc plus son bloc est légitime.
+pub fn election_rank_of(
+    beacon: &str,
+    slot: u64,
+    validators: &[Validator],
+    candidate: &str,
+) -> Option<u32> {
+    election_ranking(beacon, slot, validators)
+        .iter()
+        .position(|pk| pk == candidate)
+        .and_then(|p| u32::try_from(p).ok())
+}
+
 /// Deterministic VRF seed from the election beacon + slot + round.
 /// Domain-separated BLAKE3; identical on every node for the same inputs.
 fn compute_vrf_seed(beacon: &str, slot: u64, round: u32) -> u64 {
@@ -367,6 +460,125 @@ fn compute_vrf_seed(beacon: &str, slot: u64, round: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── C-04 (AUDIT-2026-08-13) — FORK-RANK-1 ────────────────────────────────
+
+    /// Le rang 0 du classement DOIT être exactement ce qu'élit `elect_leader`.
+    /// Sans cette égalité, le fork-choice préférerait un autre bloc que celui que
+    /// le producteur honnête a scellé : produire et vérifier divergeraient, et la
+    /// chaîne forkerait à chaque hauteur.
+    #[test]
+    fn c04_rank0_is_exactly_elect_leader() {
+        let vs = vec![
+            Validator { pk: "alice".into(), stake: 5_000_000, reputation: 0 },
+            Validator { pk: "bob".into(), stake: 2_000_000, reputation: 0 },
+            Validator { pk: "carol".into(), stake: 9_000_000, reputation: 0 },
+        ];
+        for slot in 0..200u64 {
+            let beacon = leader_beacon("deadbeef", slot);
+            let ranking = election_ranking(&beacon, slot, &vs);
+            assert_eq!(
+                ranking.first().cloned(),
+                elect_leader(&beacon, slot, &vs),
+                "slot {slot}: le rang 0 doit être le leader élu"
+            );
+        }
+    }
+
+    /// Le classement est un ordre **total** : chaque éligible apparaît une fois
+    /// et une seule. Un doublon rendrait deux blocs ex æquo et ferait retomber le
+    /// départage sur le hash, ce que le correctif est censé fermer.
+    #[test]
+    fn c04_election_ranking_is_a_permutation_of_the_eligible_set() {
+        let vs = vec![
+            Validator { pk: "alice".into(), stake: 5_000_000, reputation: 0 },
+            Validator { pk: "bob".into(), stake: 2_000_000, reputation: 0 },
+            Validator { pk: "carol".into(), stake: 9_000_000, reputation: 0 },
+            Validator { pk: "dave".into(), stake: 999_999, reputation: 0 }, // sous le minimum
+        ];
+        for slot in 0..100u64 {
+            let beacon = leader_beacon("cafe", slot);
+            let mut r = election_ranking(&beacon, slot, &vs);
+            assert_eq!(r.len(), 3, "seuls les 3 bondés sont classés");
+            assert!(!r.contains(&"dave".to_string()), "un sous-minimum n'est jamais classé");
+            r.sort();
+            assert_eq!(r, vec!["alice", "bob", "carol"], "aucun doublon, aucun oubli");
+        }
+    }
+
+    /// Deux nœuds honnêtes construisent leur ensemble depuis une `HashMap`, dont
+    /// l'ordre d'itération diffère d'un processus à l'autre. Si le classement en
+    /// dépendait, ils préféreraient des blocs différents : fork immédiat.
+    #[test]
+    fn c04_election_ranking_is_permutation_invariant() {
+        let vs = vec![
+            Validator { pk: "alice".into(), stake: 5_000_000, reputation: 0 },
+            Validator { pk: "bob".into(), stake: 2_000_000, reputation: 0 },
+            Validator { pk: "carol".into(), stake: 9_000_000, reputation: 0 },
+        ];
+        let mut shuffled = vs.clone();
+        shuffled.reverse();
+        shuffled.swap(0, 1);
+        for slot in 0..50u64 {
+            let beacon = leader_beacon("f00d", slot);
+            assert_eq!(
+                election_ranking(&beacon, slot, &vs),
+                election_ranking(&beacon, slot, &shuffled),
+                "slot {slot}: le classement ne doit pas dépendre de l'ordre d'entrée"
+            );
+        }
+    }
+
+    /// **Le cœur du correctif C-04** : le rang est pondéré par l'enjeu. Un
+    /// validateur qui pèse 10× plus doit occuper le rang 0 nettement plus souvent.
+    /// C'est ce qui rend le broyage de hash inutile : gagner un départage se paie
+    /// en enjeu, pas en cycles CPU.
+    #[test]
+    fn c04_rank_is_weighted_by_stake_not_by_luck() {
+        let vs = vec![
+            Validator { pk: "whale".into(), stake: 50_000_000, reputation: 0 },
+            Validator { pk: "minnow".into(), stake: 5_000_000, reputation: 0 },
+        ];
+        let mut whale_first = 0;
+        for slot in 0..1000u64 {
+            let beacon = leader_beacon("beac0n", slot);
+            if election_ranking(&beacon, slot, &vs).first().map(String::as_str) == Some("whale") {
+                whale_first += 1;
+            }
+        }
+        // Attendu ≈ 909/1000 (10/11). On laisse une marge très large : le test
+        // vérifie la pondération, pas la qualité statistique de BLAKE3.
+        assert!(
+            (820..=980).contains(&whale_first),
+            "le gros enjeu doit dominer le rang 0 (obtenu {whale_first}/1000)"
+        );
+    }
+
+    /// Une adresse sans enjeu n'a **aucun** rang. C'est la propriété qui prive
+    /// l'attaquant de C-04 de tout moyen de gagner un départage hors slot ouvert.
+    #[test]
+    fn c04_an_unbonded_address_is_never_ranked() {
+        let vs = vec![Validator { pk: "alice".into(), stake: 5_000_000, reputation: 0 }];
+        let beacon = leader_beacon("00", 7);
+        assert_eq!(election_rank_of(&beacon, 7, &vs, "attacker"), None);
+        assert_eq!(election_rank_of(&beacon, 7, &vs, "alice"), Some(0));
+    }
+
+    /// Le classement est borné : au-delà de `ELECTION_RANK_DEPTH`, personne n'est
+    /// classé. Sans cette borne, le coût du fork-choice croîtrait en O(N²) avec la
+    /// taille de l'ensemble bondé — un vecteur de déni de service pour le prix
+    /// d'un enjeu minimal répliqué.
+    #[test]
+    fn c04_ranking_depth_is_bounded() {
+        let vs: Vec<Validator> = (0..200)
+            .map(|i| Validator { pk: format!("v{i:03}"), stake: MIN_VALIDATOR_STAKE, reputation: 0 })
+            .collect();
+        let beacon = leader_beacon("bounded", 1);
+        let r = election_ranking(&beacon, 1, &vs);
+        assert_eq!(r.len(), ELECTION_RANK_DEPTH as usize);
+        let unranked = vs.iter().filter(|v| !r.contains(&v.pk)).count();
+        assert_eq!(unranked, 200 - ELECTION_RANK_DEPTH as usize);
+    }
 
     fn test_validators() -> Vec<Validator> {
         vec![

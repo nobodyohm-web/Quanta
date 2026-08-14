@@ -64,7 +64,16 @@ pub async fn ledger_transfer(state: tauri::State<'_, Arc<AppState>>, to: String,
     // form OR the canonical 64-hex form, and normalize to the on-chain hex the
     // ledger keys on. The bech32 path is checksum-validated, so a mistyped receive
     // address is rejected here instead of sending to a valid-looking wrong account.
-    let to = crate::security::address::parse(&to)
+    // **BAS-1 (AUDIT-2026-08-13)** — `parse` est désormais un décodeur Bech32m
+    // STRICT ; la tolérance à l'hexadécimal est explicite et nommée.
+    //
+    // Elle reste nécessaire ici : le front envoie une adresse **résolue** quand
+    // le destinataire est un `@pseudo` (`resolveUsername` renvoie l'hexadécimal
+    // de la chaîne), et cette valeur-là n'a jamais transité par un clavier. La
+    // protection contre la faute de frappe se joue donc là où la frappe existe —
+    // dans `WalletSend.svelte`, qui vérifie la somme de contrôle d'un `qta1…` et
+    // avertit explicitement quand on lui colle de l'hexadécimal nu.
+    let to = crate::security::address::parse_hex_unchecked(&to)
         .map(hex::encode)
         .map_err(|_| CmdError::InvalidRecipient)?;
     if amount <= 0.0 || amount > 1_000_000.0 {

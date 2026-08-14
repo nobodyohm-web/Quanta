@@ -68,11 +68,15 @@ impl Ledger {
         if tx.pq_public_key.as_deref() == Some(MSIG_TAG) {
             return Self::verify_multisig(tx);
         }
-        // Any other from value must carry a valid signature, regardless of
-        // destination (BURN included).
-        if tx.signature.is_empty() {
-            return Err("Transaction non signée".into());
-        }
+        // **MOY-6 (AUDIT-2026-08-13)** — l'exigence « `tx.signature` non vide » a
+        // été retirée. Elle ne vérifiait rien : plus aucune ligne du binaire ne
+        // consultait ce champ (`CryptoEngine::verify` n'a aucun appelant en
+        // production), il était libre, et il entrait pourtant dans la feuille
+        // Merkle — donc dans le hash du bloc. Une exigence qui ne contraint que
+        // la présence d'octets arbitraires n'est pas une vérification : c'est un
+        // faux témoin, et il coûtait une divergence de blocs. L'autorité est
+        // PUREMENT ML-DSA, vérifiée ci-dessous ; le champ reste sur le fil pour
+        // la désérialisation des anciens messages, sans effet.
 
         // PQ-MIG-3 §3: the ML-DSA authority layer is MANDATORY — a tx without a
         // non-empty `pq_public_key` + `pq_signature` is rejected (the Ed25519-only
@@ -106,7 +110,7 @@ impl Ledger {
         // TX-AUTH-NONCE-1 §3: recompute the content hash and REJECT a wire hash
         // that disagrees — no hash malleability (dedup `seen_tx_hashes` is keyed
         // on `tx.hash`; a forged hash must not slip past as "unseen").
-        let recomputed = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        let recomputed = hex::encode(blake3::hash(&payload).as_bytes());
         if tx.hash != recomputed {
             return Ok(false);
         }
@@ -119,7 +123,7 @@ impl Ledger {
         // derives from an Ed25519 key. (`tx.signature` may still carry a vestigial
         // Ed25519 signature for wire-compat; it is NOT consulted for authority.)
         let pq_sig = hex::decode(pq_sig_hex).map_err(|_| "PQ signature invalide")?;
-        Ok(CryptoEngine::verify_pq(pq_pk_hex, payload.as_bytes(), &pq_sig))
+        Ok(CryptoEngine::verify_pq(pq_pk_hex, &payload, &pq_sig))
     }
 
     /// MSIG-1 — verify an M-of-N multisig authority. `Ok(true)` iff ALL hold:
@@ -155,6 +159,25 @@ impl Ledger {
         if auth.threshold == 0 || auth.threshold as usize > keys.len() {
             return Ok(false);
         }
+        // **HAUT-1 (AUDIT-2026-08-13) — MSIG-BOUND-1 : borner AVANT de vérifier.**
+        //
+        // Le comptage ci-dessous fait `K × S` vérifications ML-DSA-65, et ni `K`
+        // (les clés) ni `S` (les signatures) n'étaient bornés : les deux viennent
+        // du JSON attaquant porté par `tx.pq_signature`. Avec des signatures
+        // invalides, `any()` ne court-circuite jamais. À l'ancienne limite
+        // d'enveloppe de 10 Mo, l'optimum donnait ~967 000 vérifications, soit
+        // **135 s de CPU par message** — et le limiteur de débit autorise 120
+        // messages par fenêtre, donc des heures de CPU par victime, pour le prix
+        // d'une identité gossip gratuite.
+        //
+        // `signatures.len() > keys.len()` est refusé aussi : un quorum honnête n'a
+        // jamais plus de signatures que de clés enregistrées.
+        if keys.len() > MAX_MSIG_KEYS
+            || auth.signatures.len() > MAX_MSIG_KEYS
+            || auth.signatures.len() > keys.len()
+        {
+            return Ok(false);
+        }
         // (1) Binding — `from` must be the address of exactly this (canonical) policy.
         match crate::security::multisig_address_hex(&keys, auth.threshold) {
             Some(addr) if addr == tx.from => {}
@@ -164,7 +187,7 @@ impl Ledger {
         let payload = Self::tx_signing_preimage(
             &tx.id, &tx.from, &tx.to, tx.amount, &tx.timestamp, &tx.tx_type, tx.nonce, MSIG_TAG,
         );
-        if tx.hash != hex::encode(blake3::hash(payload.as_bytes()).as_bytes()) {
+        if tx.hash != hex::encode(blake3::hash(&payload).as_bytes()) {
             return Ok(false);
         }
         // (3) Count distinct registered keys carrying ≥1 valid signature.
@@ -179,7 +202,7 @@ impl Ledger {
             .iter()
             .filter(|pk| {
                 sigs.iter()
-                    .any(|sig| CryptoEngine::verify_pq(pk, payload.as_bytes(), sig))
+                    .any(|sig| CryptoEngine::verify_pq(pk, &payload, sig))
             })
             .count();
         Ok(valid_signers as u32 >= auth.threshold)
@@ -187,8 +210,36 @@ impl Ledger {
 
     /// Verify the integrity of the entire chain:
     /// - Each block's prev_hash links to the previous block's hash
-    /// - All user-signed transactions have valid Ed25519 signatures
+    /// - All user-signed transactions have valid ML-DSA-65 signatures
+    ///
+    /// **C-03 (AUDIT-2026-08-13) — GENESIS-ANCHOR-1.** La chaîne était vérifiée
+    /// « bien chaînée », jamais « chaînée à *notre* genèse ». Une chaîne
+    /// parfaitement cohérente mais issue d'une autre genèse passait donc cette
+    /// vérification — c'est le maillon manquant du *long-range* : la seule chose
+    /// qu'un attaquant ne peut pas refabriquer est le bloc 0, encore faut-il le
+    /// comparer. Le hash de genèse est content-bound (PQ-MIG-5) et figé par
+    /// vecteur de test, donc l'ancre est une constante du binaire.
     pub fn verify_chain(&self) -> Result<(u64, u64), String> {
+        match self.chain.first() {
+            None => return Err("chaîne vide : aucune genèse à ancrer".into()),
+            Some(g) => {
+                let expected = Ledger::new();
+                let expected_genesis = expected
+                    .chain
+                    .first()
+                    .ok_or("genèse de référence introuvable")?;
+                if g.index != 0 {
+                    return Err(format!("le bloc 0 porte l'index {} — chaîne non ancrée", g.index));
+                }
+                if g.hash != expected_genesis.hash {
+                    return Err(format!(
+                        "genèse étrangère : {} au lieu de {} (GENESIS-ANCHOR-1)",
+                        short(&g.hash, 16),
+                        short(&expected_genesis.hash, 16)
+                    ));
+                }
+            }
+        }
         let mut verified_blocks = 0u64;
         let mut verified_txs = 0u64;
         for (i, block) in self.chain.iter().enumerate() {
@@ -256,7 +307,20 @@ impl Ledger {
         // the reorg trial clone), so the live `validator_stakes()` IS the bonded
         // set as of the parent — O(1), no replay needed.
         let bonded_before = self.validator_stakes();
-        Self::validate_block_against_prev(block, tip, &onchain_before, &bindings_before, &bonded_before)?;
+        // C-01: the as-of-parent nonce expectation, derived from the chain.
+        let nonces_before = self.account_nonces_before(tip);
+        // BLOCK-TIME-2 : la médiane des 11 derniers horodatages, fonction pure de
+        // la chaîne (aucune horloge locale, donc aucun fork par dérive).
+        let median_before = self.median_time_before(tip);
+        Self::validate_block_against_prev(
+            block,
+            tip,
+            &onchain_before,
+            &bindings_before,
+            &bonded_before,
+            &nonces_before,
+            median_before,
+        )?;
         self.validate_block_emission(block)?;
         // REWARD-SHARE-1 : la RÉPARTITION est vérifiée comme le total — en la
         // recalculant depuis la chaîne, jamais en faisant confiance au bloc.
@@ -287,12 +351,29 @@ impl Ledger {
         block: &Block,
         prior_mined: u64,
     ) -> Result<(), String> {
+        // **H-07 (AUDIT-2026-08-13)** — la somme était un `sum()` u64 nu sur des
+        // montants choisis par un pair. En **debug**, `attempt to add with
+        // overflow` PANIQUAIT dans `validate_remote_block` ; la boucle
+        // `spawn_incoming_dispatch` n'étant jamais relancée, un seul message
+        // rendait le nœud sourd à tout gossip, définitivement. En release la
+        // somme s'enroulait, et seule `validate_block_reward_plan` — une règle
+        // *économique*, pas une garde arithmétique — empêchait le mint infini.
+        //
+        // `try_fold` checked : le débordement devient un rejet de bloc, une
+        // valeur de retour ordinaire. Le comportement est le même en debug et en
+        // release, ce que `overflow-checks` seul ne garantissait pas.
         let block_minted: u64 = block
             .transactions
             .iter()
             .filter(|t| t.tx_type == TxType::Mining)
-            .map(|t| t.amount)
-            .sum();
+            .try_fold(0u64, |acc, t| acc.checked_add(t.amount))
+            .ok_or_else(|| {
+                format!(
+                    "bloc rejeté : la somme des récompenses déborde u64 — émission \
+                     arithmétiquement impossible (H-07, bloc #{})",
+                    block.index
+                )
+            })?;
         if block_minted == 0 {
             return Ok(());
         }
@@ -353,9 +434,19 @@ impl Ledger {
         prior_mined: u64,
     ) -> Result<(), String> {
         let _ = prior_mined; // le PLAFOND du total est vérifié par `validate_block_emission*`
+        // H-07 (défense en profondeur) : `validate_block_emission_against` a déjà
+        // refusé un bloc dont la somme déborde, mais cette fonction est aussi
+        // appelée depuis le chemin fork ; on ne compte donc jamais en u64 nu sur
+        // des montants venus du réseau.
         let mut actual: BTreeMap<String, u64> = BTreeMap::new();
         for tx in block.transactions.iter().filter(|t| t.tx_type == TxType::Mining) {
-            *actual.entry(tx.to.clone()).or_insert(0) += tx.amount;
+            let e = actual.entry(tx.to.clone()).or_insert(0);
+            *e = e.checked_add(tx.amount).ok_or_else(|| {
+                format!(
+                    "bloc rejeté : les récompenses de {} débordent u64 (H-07)",
+                    short(&tx.to, 12)
+                )
+            })?;
         }
         if actual.is_empty() {
             return Ok(());
@@ -364,7 +455,11 @@ impl Ledger {
         // par le bloc. Émettre moins reste permis (non-inflationnaire), mais la
         // répartition doit suivre — un producteur ne peut pas rogner la part des
         // autres sans rogner la sienne dans la même proportion.
-        let total: u64 = actual.values().copied().sum();
+        let total: u64 = actual
+            .values()
+            .copied()
+            .try_fold(0u64, |a, v| a.checked_add(v))
+            .ok_or("bloc rejeté : total des récompenses débordant (H-07)")?;
         let expected: BTreeMap<String, u64> = self
             .expected_block_rewards(block.index, &block.miner, total)
             .into_iter()
@@ -524,6 +619,56 @@ impl Ledger {
         staked
     }
 
+    /// **C-01 (AUDIT-2026-08-13) — NONCE-ONCHAIN-1: the per-account next-expected
+    /// nonce as of `prev`**, a pure function of the chain prefix
+    /// `chain[1 ..= prev.index]`.
+    ///
+    /// The audit's finding was that a transaction's uniqueness had **no on-chain
+    /// enforcement at all**: `seen_tx_hashes` is a mempool-admission set (and the
+    /// block path at `reorg.rs` *inserts* into it without reading the return), so
+    /// one signed transaction could be included in ten consecutive blocks and
+    /// every honest node accepted all ten. The only wall was the victim's
+    /// balance running out.
+    ///
+    /// This map is the state the inclusion rule needs. It is derived, never
+    /// stored, exactly like [`Self::onchain_spendable_before`] and
+    /// [`Self::staked_before`] — so every node computes the same expectation and
+    /// no extra persisted state can drift.
+    ///
+    /// **What carries a nonce.** Only transactions whose authority IS the
+    /// sender's signature: a real (non-synthetic) `from`, and not a `Slash`
+    /// (authorized by an embedded fault proof, not by the offender). Genesis
+    /// (block 0) is system-constructed and `verify_tx`-exempt, so it is skipped —
+    /// counting it would push an allocated account's expectation to 1 before its
+    /// owner ever signed anything.
+    pub(crate) fn account_nonces_before(&self, prev: &Block) -> HashMap<String, u64> {
+        let mut expected: HashMap<String, u64> = HashMap::new();
+        for block in self
+            .chain
+            .iter()
+            .filter(|b| b.index > 0 && b.index <= prev.index)
+        {
+            for tx in &block.transactions {
+                if !Self::tx_carries_account_nonce(tx) {
+                    continue;
+                }
+                let e = expected.entry(tx.from.clone()).or_insert(0);
+                *e = (*e).max(tx.nonce.saturating_add(1));
+            }
+        }
+        expected
+    }
+
+    /// NONCE-ONCHAIN-1 — whether a tx is sequenced by its sender's account nonce.
+    /// Synthetic senders (`NETWORK`, `ESCROW`) have no account; a `Slash` is not
+    /// signed by `from` at all. Everything else is authorized by a signature over
+    /// a pre-image that binds `nonce`, so it must be consumed exactly once.
+    pub(super) fn tx_carries_account_nonce(tx: &Transaction) -> bool {
+        !Self::is_synthetic_sender(&tx.from)
+            && tx.from != "BURN"
+            && !matches!(tx.tx_type, TxType::Slash)
+    }
+
     /// PQ-MIG-3 §1 — the chain-derived ML-DSA **binding registry** as of `prev`:
     /// the first-seen `from → pq_public_key` over every sealed, real-sender, signed
     /// tx up to and including `prev`. A **pure function of the chain** (like
@@ -605,12 +750,40 @@ impl Ledger {
         onchain_before: &HashMap<String, i128>,
         bindings_before: &HashMap<String, String>,
         bonded_before: &HashMap<String, u64>,
+        nonces_before: &HashMap<String, u64>,
+        median_before: i64,
     ) -> Result<(), String> {
         if block.prev_hash != prev.hash {
             return Err(format!(
                 "prev_hash mismatch: block says {} but prev is {}",
                 short(&block.prev_hash, 16),
                 short(&prev.hash, 16)
+            ));
+        }
+        // **C-02 (AUDIT-2026-08-13) — BLOCK-TIME-1 : le `timestamp` d'un bloc est
+        // enfin validé.** Il ne l'était NULLE PART : ni bornes, ni monotonie vis-à-vis
+        // du parent, ni même parsabilité RFC3339. La seule fraîcheur du système
+        // (±90 s) porte sur l'enveloppe gossip, pas sur le contenu du bloc — donc
+        // le champ était un compteur libre, et il entre dans le hash du bloc :
+        // matière à grinding gratuit pour le départage lexicographique de fork.
+        //
+        // Les règles ci-dessous sont **sans horloge** — elles ne comparent le bloc
+        // qu'à son parent. C'est délibéré, et détaillé dans
+        // `validate_block_timestamp` : une borne « pas dans le futur » dépendrait
+        // de l'horloge locale, et sans NTP deux nœuds désynchronisés divergeraient
+        // sur la validité d'un même bloc, ce qui est un fork.
+        Self::validate_block_timestamp(block, prev, median_before)?;
+        // **Étape 4 de l'audit — la borne de taille manquante.** Rien ne limitait
+        // le nombre de transactions d'un bloc : un pair pouvait en pousser un de
+        // plusieurs centaines de mégaoctets et faire payer à chaque nœud la
+        // vérification ML-DSA de chacune. C'est une règle de consensus (donc
+        // vérifiée identiquement partout), placée AVANT toute vérification de
+        // signature pour que le coût du rejet soit O(1).
+        if block.transactions.len() > MAX_TXS_PER_BLOCK {
+            return Err(format!(
+                "bloc rejeté : {} transactions — le maximum est {} (BLOCK-SIZE-1)",
+                block.transactions.len(),
+                MAX_TXS_PER_BLOCK
             ));
         }
         // PROPOSER-1 (GENESIS-V4) — deterministic proposer check. The reported
@@ -745,12 +918,17 @@ impl Ledger {
         // BLK-HASH-1: same canonical hash as production via the shared
         // `block_hash_hex` (PQ-MIG-5) — includes `miner` and a content-binding
         // Merkle root.
+        // M-09 : `energy_kwh` doit être canoniquement représentable AVANT
+        // d'entrer dans le hash — sinon NaN donnerait plusieurs hashs licites
+        // pour un même bloc, ce qui est une malléabilité de plus, pas de moins.
+        Self::validate_block_energy(block)?;
         let expected_hash = Self::block_hash_hex(
             block.index,
             &block.prev_hash,
             &block.timestamp,
             &block.miner,
             &block.transactions,
+            block.energy_kwh,
         );
         if block.hash != expected_hash {
             return Err(format!(
@@ -775,7 +953,142 @@ impl Ledger {
                 tx.amount
             ));
         }
+        // C-01 (NONCE-ONCHAIN-1) — **on-chain uniqueness**. Every signature-bearing
+        // tx must be the exact next transaction of its sender as of this block's
+        // parent. This is the rule the ledger never had: `seen_tx_hashes` guarded
+        // only mempool admission, and the block path inserted into it without
+        // reading the return, so one signature was replayable until the victim's
+        // balance ran out. Checked here means checked on ALL four admission paths
+        // (linear, 1-block fork tie-break, deep-reorg trial clone, sync), because
+        // they all route through this shared validator.
+        let faults = Self::nonce_faults(nonces_before, &block.transactions);
+        if let Some((i, fault)) = faults.first() {
+            let tx = &block.transactions[*i];
+            let expected = nonces_before.get(&tx.from).copied().unwrap_or(0);
+            return Err(format!(
+                "bloc rejeté : tx {} de {} porte le nonce {} ({}) — le nonce attendu \
+                 pour ce compte est {} à cette hauteur (NONCE-ONCHAIN-1)",
+                short(&tx.hash, 12),
+                short(&tx.from, 12),
+                tx.nonce,
+                match fault {
+                    NonceFault::Stale => "déjà consommé — rejeu",
+                    NonceFault::Ahead => "en avance — transaction manquante",
+                },
+                expected
+            ));
+        }
         Ok(())
+    }
+
+    /// **C-02 (BLOCK-TIME-1)** — les trois règles d'horodatage d'un bloc, toutes
+    /// **relatives au parent** donc identiques sur tous les nœuds (aucune lecture
+    /// d'horloge, C1) :
+    ///
+    /// 1. **parsable** — RFC3339. Un timestamp illisible entrait dans le hash du
+    ///    bloc sans que personne ne le regarde ;
+    /// 2. **non-décroissant vis-à-vis de la MÉDIANE des 11 derniers blocs**, et
+    ///    non vis-à-vis du seul parent.
+    ///
+    /// **Pourquoi la médiane, et pas le parent (BLOCK-TIME-2).** La première
+    /// version comparait au parent : `block.ts >= prev.ts`. Cette règle, prise
+    /// isolément, est un **cliquet** — un unique bloc daté de 2099 était parsable,
+    /// supérieur à son parent, donc accepté, et **plus aucun bloc honnête ne
+    /// pouvait jamais être scellé** : tous auraient dû être ≥ 2099. Un proposeur
+    /// quelconque gelait la chaîne pour soixante-treize ans avec un seul champ
+    /// texte. C'est la règle Bitcoin du *median-time-past* qui existe exactement
+    /// pour ça : la médiane d'une fenêtre glissante ne bouge que si une **majorité
+    /// de la fenêtre** ment, donc un menteur isolé ne déplace rien et le bloc
+    /// suivant reste valide. Le recul massif reste fermé, le cliquet disparaît.
+    ///
+    /// **Ce qui n'est délibérément PAS ici : une borne de dérive.** Elle
+    /// paraissait évidente, elle ne tient pas à l'examen. D'abord elle exigerait
+    /// une horloge de confiance : sans NTP, deux nœuds désynchronisés
+    /// divergeraient sur la validité du même bloc, c'est-à-dire un fork — le
+    /// remède serait pire que le mal. Ensuite l'objectif qu'on lui prête (borner
+    /// le grinding du hash de bloc pour le départage lexicographique de fork) lui
+    /// échappe de toute façon : un timestamp RFC3339 porte des fractions de
+    /// seconde, donc l'espace reste illimité même dans une fenêtre étroite. Le
+    /// grinding de fork se ferme au fork-choice (pondération par l'enjeu, VRF
+    /// ADR-004), pas ici. On écrit les règles qui tiennent, et on nomme celle qui
+    /// manque encore.
+    ///
+    /// La genèse n'a pas de parent et n'est jamais validée ici.
+    pub(super) fn validate_block_timestamp(
+        block: &Block,
+        prev: &Block,
+        median_before: i64,
+    ) -> Result<(), String> {
+        let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).map(|t| t.timestamp());
+        let ts = parse(&block.timestamp).map_err(|_| {
+            format!(
+                "bloc rejeté : timestamp « {} » non parsable en RFC3339 (BLOCK-TIME-1)",
+                short(&block.timestamp, 32)
+            )
+        })?;
+        // Le parent fait déjà partie de notre chaîne : s'il est illisible, c'est
+        // notre état qui est corrompu, pas le bloc entrant. On le dit tel quel
+        // plutôt que d'accuser l'expéditeur.
+        parse(&prev.timestamp).map_err(|_| {
+            format!(
+                "état local incohérent : le timestamp du bloc #{} n'est pas parsable",
+                prev.index
+            )
+        })?;
+        if ts < median_before {
+            return Err(format!(
+                "bloc rejeté : timestamp {} antérieur à la médiane des {} derniers \
+                 blocs — le temps ne recule pas (BLOCK-TIME-2)",
+                block.timestamp, MEDIAN_TIME_SPAN
+            ));
+        }
+        Ok(())
+    }
+
+    /// **M-09 (AUDIT-2026-08-13)** — `energy_kwh` doit être un réel fini et
+    /// positif pour être canoniquement hachable.
+    ///
+    /// NaN a des millions de motifs binaires distincts : l'admettre dans la
+    /// préimage rendrait le hash d'un bloc non unique, c'est-à-dire rouvrirait la
+    /// malléabilité que M-09 ferme. Les infinis et les valeurs négatives n'ont de
+    /// toute façon aucun sens physique et empoisonneraient le total d'énergie du
+    /// réseau (`Σ energy_kwh` devient NaN et l'affichage ne s'en remet jamais).
+    pub(super) fn validate_block_energy(block: &Block) -> Result<(), String> {
+        if !block.energy_kwh.is_finite() || block.energy_kwh < 0.0 {
+            return Err(format!(
+                "bloc rejeté : energy_kwh = {} — attendu un réel fini positif (M-09)",
+                block.energy_kwh
+            ));
+        }
+        Ok(())
+    }
+
+    /// **BLOCK-TIME-2** — la médiane des horodatages des [`MEDIAN_TIME_SPAN`]
+    /// derniers blocs jusqu'à `prev` inclus, en secondes epoch.
+    ///
+    /// Fonction pure de la chaîne, donc identique sur tous les nœuds : c'est ce
+    /// qui permet de borner le temps **sans lire aucune horloge locale**. Un
+    /// horodatage illisible déjà en chaîne compte pour 0 plutôt que d'empoisonner
+    /// le calcul — il ne peut de toute façon plus entrer, la règle 1 le refuse.
+    pub(crate) fn median_time_before(&self, prev: &Block) -> i64 {
+        let end = prev.index as usize;
+        let start = end.saturating_sub(MEDIAN_TIME_SPAN - 1);
+        let mut window: Vec<i64> = self
+            .chain
+            .get(start..=end)
+            .unwrap_or(&[])
+            .iter()
+            .map(|b| {
+                chrono::DateTime::parse_from_rfc3339(&b.timestamp)
+                    .map(|t| t.timestamp())
+                    .unwrap_or(0)
+            })
+            .collect();
+        if window.is_empty() {
+            return 0;
+        }
+        window.sort_unstable();
+        window[window.len() / 2]
     }
 
     /// COVER-1/COVER-2 — the **single source of truth** for sequential coverage.
@@ -894,6 +1207,54 @@ impl Ledger {
             }
         }
         bad
+    }
+
+    /// **C-01 (AUDIT-2026-08-13) — NONCE-ONCHAIN-1: the single source of truth for
+    /// on-chain transaction uniqueness.**
+    ///
+    /// Walks `txs` in declared order over a running expectation seeded from
+    /// `nonces_before` ([`Self::account_nonces_before`]) and returns every tx
+    /// that is not the exact next transaction of its sender, tagged with why:
+    ///
+    /// - [`NonceFault::Stale`] — `nonce < expected`. The sender already spent
+    ///   this nonce on this chain. This is the replay the audit proved: the same
+    ///   signed transaction included ten times. A stale tx is **dead forever** on
+    ///   this branch.
+    /// - [`NonceFault::Ahead`] — `nonce > expected`. A gap: the sender's earlier
+    ///   transaction has not landed yet. The tx is **not invalid**, merely not
+    ///   includable *here* — gossip is unordered, so this is an ordinary
+    ///   occurrence.
+    ///
+    /// A faulted tx does **not** advance the running expectation, exactly as an
+    /// uncovered tx does not move the running balance in
+    /// [`Self::uncovered_tx_indices`] — it will be rejected or excluded, so it
+    /// must not sequence anything after it.
+    ///
+    /// Two consumers, one rule (the COVER-1/COVER-2 symmetry):
+    /// [`Self::validate_block_against_prev`] REJECTS the whole block if this is
+    /// non-empty, and `seal_block_at` EXCLUDES exactly these — dropping the stale
+    /// ones and **re-queueing** the ahead ones, so an out-of-order arrival costs a
+    /// block of latency rather than a lost transaction.
+    pub(super) fn nonce_faults(
+        nonces_before: &HashMap<String, u64>,
+        txs: &[Transaction],
+    ) -> Vec<(usize, NonceFault)> {
+        let mut running: HashMap<String, u64> = nonces_before.clone();
+        let mut faults = Vec::new();
+        for (i, tx) in txs.iter().enumerate() {
+            if !Self::tx_carries_account_nonce(tx) {
+                continue;
+            }
+            let expected = running.get(&tx.from).copied().unwrap_or(0);
+            match tx.nonce.cmp(&expected) {
+                std::cmp::Ordering::Equal => {
+                    running.insert(tx.from.clone(), expected.saturating_add(1));
+                }
+                std::cmp::Ordering::Less => faults.push((i, NonceFault::Stale)),
+                std::cmp::Ordering::Greater => faults.push((i, NonceFault::Ahead)),
+            }
+        }
+        faults
     }
 
     pub(super) fn uncovered_tx_indices(

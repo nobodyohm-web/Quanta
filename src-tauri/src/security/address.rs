@@ -209,8 +209,33 @@ pub fn is_valid(s: &str) -> bool {
 }
 
 /// Parse an address from **either** form: the `qta1…` Bech32m public form, or the
-/// 64-char canonical hex used on the ledger. For forgiving RPC/UI boundaries.
+/// 64-char canonical hex used on the ledger.
+///
+/// **BAS-1 (AUDIT-2026-08-13) — le repli hexadécimal désarmait le module.**
+/// Ce module existe pour une raison : une somme de contrôle, pour qu'une adresse
+/// mal recopiée soit **refusée** au lieu d'envoyer des fonds dans le vide. Le
+/// repli silencieux vers `hex::decode` la retirait à tout appelant recevant de
+/// l'hexadécimal brut — `ledger_transfer` et le RPC, c'est-à-dire précisément les
+/// deux chemins de dépense. Une adresse hexadécimale d'un caractère faux reste 64
+/// caractères hexadécimaux valides ; elle passait, et les fonds partaient vers une
+/// adresse qui n'appartient à personne.
+///
+/// La tolérance à l'hexadécimal est **conservée** — la chaîne elle-même est en
+/// hexadécimal, un opérateur en copie légitimement — mais elle est désormais
+/// explicite : `parse_hex_unchecked` le dit dans son nom, et cette fonction-ci
+/// reste le décodeur strict que les frontières utilisateur doivent appeler.
 pub fn parse(s: &str) -> Result<[u8; 32], String> {
+    decode(s)
+}
+
+/// Accepte **en plus** l'hexadécimal canonique de 64 caractères, **sans somme de
+/// contrôle** (BAS-1).
+///
+/// À n'appeler que là où l'entrée est déjà d'origine machine ou explicitement
+/// assumée : un identifiant lu depuis la chaîne, un outil d'opérateur. Sur une
+/// saisie humaine, préférer [`parse`] — c'est la somme de contrôle qui distingue
+/// « adresse erronée » de « fonds perdus ».
+pub fn parse_hex_unchecked(s: &str) -> Result<[u8; 32], String> {
     if let Ok(addr) = decode(s) {
         return Ok(addr);
     }
@@ -309,15 +334,46 @@ mod tests {
         assert!(!is_valid(&foreign));
     }
 
-    /// `parse` accepts both the public bech32m form and the canonical hex form.
+    /// **BAS-1 (AUDIT-2026-08-13)** — `parse` est un décodeur Bech32m STRICT ;
+    /// la tolérance à l'hexadécimal a un nom, et il dit ce qu'elle coûte.
+    ///
+    /// Le repli silencieux vers `hex::decode` retirait la somme de contrôle à
+    /// tout appelant recevant de l'hexadécimal brut — c'est-à-dire aux deux
+    /// chemins de dépense. Une adresse hexadécimale d'un caractère faux reste 64
+    /// caractères hexadécimaux valides : elle passait, et les fonds partaient
+    /// vers une adresse qui n'appartient à personne.
     #[test]
-    fn parse_accepts_bech32m_and_hex() {
+    fn bas1_parse_is_strict_and_the_hex_escape_hatch_is_named() {
         let addr = *blake3::hash(b"dual-form").as_bytes();
         let bech = encode(&addr);
         let hexs = hex::encode(addr);
+
         assert_eq!(parse(&bech).expect("bech32m"), addr);
-        assert_eq!(parse(&hexs).expect("hex"), addr);
+        assert!(
+            parse(&hexs).is_err(),
+            "l'hexadécimal nu n'a pas de somme de contrôle : `parse` le refuse"
+        );
+        assert_eq!(parse_hex_unchecked(&hexs).expect("hex"), addr);
+        assert_eq!(parse_hex_unchecked(&bech).expect("bech32m"), addr);
         assert!(parse("not-an-address").is_err());
+        assert!(parse_hex_unchecked("not-an-address").is_err());
+
+        // La propriété qui compte : UNE faute de frappe dans la forme publique est
+        // refusée, la même faute dans la forme hexadécimale ne l'est pas — c'est
+        // exactement pourquoi les deux fonctions ne portent plus le même nom.
+        let mut typo: Vec<char> = bech.chars().collect();
+        let last = typo.len() - 1;
+        typo[last] = if typo[last] == 'q' { 'p' } else { 'q' };
+        let typo: String = typo.into_iter().collect();
+        assert!(parse(&typo).is_err(), "somme de contrôle Bech32m : la faute est vue");
+
+        let mut hex_typo: Vec<char> = hexs.chars().collect();
+        hex_typo[0] = if hex_typo[0] == 'a' { 'b' } else { 'a' };
+        let hex_typo: String = hex_typo.into_iter().collect();
+        assert!(
+            parse_hex_unchecked(&hex_typo).is_ok(),
+            "l'hexadécimal ne peut PAS voir la faute — la fonction le dit dans son nom"
+        );
     }
 
     /// The public encoding is a pure view over the SAME bytes the engine derives —
@@ -330,7 +386,7 @@ mod tests {
         assert_eq!(decode(&bech).expect("decode"), addr);
         // And the hex the ledger uses decodes to the very same bytes.
         assert_eq!(
-            parse(&crate::security::CryptoEngine::ml_dsa_address_hex(pk)).expect("hex"),
+            parse_hex_unchecked(&crate::security::CryptoEngine::ml_dsa_address_hex(pk)).expect("hex"),
             addr
         );
     }

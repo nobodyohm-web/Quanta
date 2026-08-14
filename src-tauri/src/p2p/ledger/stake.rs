@@ -43,6 +43,15 @@ impl Ledger {
     ///   `STAKE` sink — still locked — until maturation returns them).
     /// - **maturation**: see [`Self::mature_unbonding`].
     pub(super) fn apply_block_stake_effects(&mut self, block: &Block) {
+        // C-01 (NONCE-ONCHAIN-1) — commit the block's nonce effects at the same
+        // moment as its stake effects, on every path that pushes a block. Without
+        // this the live `account_nonces` (which only ever advanced for txs this
+        // node built or gossiped) diverges from the chain-derived expectation the
+        // new inclusion rule enforces — and a wallet restored on another machine
+        // (RECOVER-1: same ML-DSA key, empty database) would rebuild from nonce 0
+        // against a chain that already consumed five, so every transaction it
+        // signed would be rejected as stale, forever.
+        self.apply_block_nonce_effects(block);
         for tx in &block.transactions {
             match tx.tx_type {
                 TxType::Stake => {
@@ -144,10 +153,30 @@ impl Ledger {
     /// reorg's cache-revert loop), so here we only undo the `staked`/`unbonding`
     /// bookkeeping. **Maturation is intentionally NOT un-done**: it is keyed on the
     /// chain *height*, and the replacement block sits at the **same** height, so a
-    /// matured entry stays matured across the swap. This is sound because fork
-    /// resolution here is single-block (≤1 deep) and `UNBONDING_PERIOD_BLOCKS ≫ 1`,
-    /// so no reorg can ever span an unbonding maturation.
+    /// matured entry stays matured across the swap.
+    ///
+    /// **M-12 (AUDIT-2026-08-13) — la justification d'origine était fausse, elle
+    /// est maintenant vraie par construction.** Le commentaire disait « la
+    /// résolution de fork est ici mono-bloc » ; c'était exact avant LIVE-4, plus
+    /// depuis : `pop_above` est appelé pour une profondeur quelconque et
+    /// `reorg_to_fork` est `pub`. Un reorg franchissant une maturation faisait
+    /// compter les mêmes coins **deux fois** — dépensables *et* bondés — donc
+    /// fabriquait du **poids de consensus** (la conservation globale, elle, restait
+    /// vraie grâce au sink). L'audit notait que seule une constante de DoS
+    /// (`FORK_BUFFER_MAX_BLOCKS`) retenait le bug, pas une règle.
+    ///
+    /// C'est désormais une règle : `MAX_REORG_DEPTH` (C-03/REORG-DEPTH-1) borne
+    /// toute réorganisation, et l'assertion de compilation ci-dessous grave le
+    /// lien — si quelqu'un remonte la borne de reorg au-delà de la période de
+    /// désengagement, **le crate ne compile plus**. Un invariant qui dépend de
+    /// deux constantes doit être vérifié par le compilateur, pas par un
+    /// commentaire.
     pub(super) fn revert_block_stake_effects(&mut self, block: &Block) {
+        // M-12 : aucune réorganisation ne peut enjamber une maturation.
+        const _: () = assert!(
+            MAX_REORG_DEPTH < UNBONDING_PERIOD_BLOCKS,
+            "M-12 : un reorg ne doit jamais pouvoir franchir une maturation d'unbonding"
+        );
         // H8 (AUDIT-2026-07-25): iterate in REVERSE. The per-tx operations are not
         // commutative — `saturating_sub` plus the collapse-to-zero that removes the
         // key — so undoing forward does not invert applying forward when one block
@@ -290,6 +319,58 @@ impl Ledger {
                 if let Some(&stake) = by_addr.get(&tx.from) {
                     // The address→pk binding is graven by the tx (verify_tx), so
                     // this maps each bonded address to the exact key it committed to.
+                    out.insert(pk.clone(), stake);
+                }
+            }
+        }
+        out
+    }
+
+    /// **H-06 (AUDIT-2026-08-13) — l'enjeu qui pèse un vote est celui de son
+    /// époque, plus celui de l'instant où le vote arrive.**
+    ///
+    /// `ingest_vote` prenait `validator_stakes_by_pubkey()`, c'est-à-dire l'enjeu
+    /// bondé **au moment de l'ingestion**, et s'en servait pour trois choses à la
+    /// fois : vérifier le vote, calculer son poids, et fixer le dénominateur du
+    /// quorum des ⅔. Les votes étant publics, non expirants et rejouables, le
+    /// **même certificat, inchangé**, échouait à finaliser puis y parvenait plus
+    /// tard — il suffisait que d'autres validateurs se désengagent pour que le
+    /// dénominateur rétrécisse. L'audit l'a mesuré : trois validateurs à 5 QTA, le
+    /// vote de A seul pèse ⅓ donc rien ; B et C désengagent, et le certificat de A
+    /// franchit les ⅔. **Finalisation rétroactive** d'un côté, perte de finalité
+    /// symétrique de l'autre quand un votant se retire.
+    ///
+    /// L'ensemble est désormais figé à la **frontière de l'époque** : l'état bondé
+    /// tel qu'il était au bloc `epoch × epoch_len`. Il n'y a rien à persister —
+    /// c'est une fonction pure de la chaîne, donc identique sur chaque nœud, et un
+    /// certificat vaut ce qu'il valait, pour toujours.
+    ///
+    /// Au-delà de la tête de chaîne (époque future), on retombe sur l'état
+    /// courant : un vote pour une époque pas encore atteinte n'a pas d'autre
+    /// référence, et le bornage d'époque de `finality_live` le refuse déjà.
+    pub fn epoch_validator_stakes_by_pubkey(
+        &self,
+        epoch: u64,
+        epoch_len: u64,
+    ) -> HashMap<String, u64> {
+        let boundary = epoch.saturating_mul(epoch_len.max(1));
+        let Some(anchor) = self.chain.get(boundary as usize) else {
+            return self.validator_stakes_by_pubkey();
+        };
+        let by_addr = self.staked_before(anchor);
+        let mut out = HashMap::new();
+        // Les révélations de clé sont prises jusqu'à la frontière incluse : une
+        // clé révélée plus tard appartient à un enjeu qui n'existait pas encore
+        // à cette époque, donc elle n'a rien à y peser.
+        for block in self.chain.iter().take(boundary as usize + 1) {
+            for tx in &block.transactions {
+                if tx.tx_type != TxType::Stake {
+                    continue;
+                }
+                let Some(pk) = tx.pq_public_key.as_ref() else {
+                    continue;
+                };
+                if let Some(&stake) = by_addr.get(&tx.from) {
                     out.insert(pk.clone(), stake);
                 }
             }

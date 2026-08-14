@@ -134,6 +134,36 @@ pub fn multisig_address_hex(pubkeys: &[String], threshold: u32) -> Option<String
 impl CryptoEngine {
     pub fn new() -> Self { Self { key_pair: None, ml_dsa: None, ml_dsa_primary: None } }
 
+    /// **A2 (AUDIT-2026-08-13) — LOCK-1 : le verrouillage effectif du portefeuille.**
+    ///
+    /// Le « verrouillage » de Quanta était un `ready = false` dans Svelte. Côté
+    /// Rust il n'existait **aucune** fonction de verrouillage : le `CryptoEngine`
+    /// gardait la clé de dépense en mémoire pendant toute la vie du processus, et
+    /// la réauthentification n'était qu'une convention d'interface. Un appel IPC
+    /// direct — ou toute exécution de code dans le webview — retrouvait l'autorité
+    /// complète sur les fonds sans jamais présenter de mot de passe.
+    ///
+    /// Ceci remet réellement le moteur à l'état verrouillé. Les trois champs sont
+    /// des `Option`, et chaque secret qu'ils contiennent est zeroize-on-drop
+    /// (`Zeroizing<[u8;32]>` pour la graine ML-DSA, `fips204::PrivateKey` et
+    /// `ed25519_dalek::SigningKey` pour les clés) : les remettre à `None` **efface
+    /// donc les octets**, ce n'est pas seulement les oublier.
+    ///
+    /// Après cet appel, toute opération d'autorité (`sign_pq`, `sign_tx_authority`,
+    /// `get_pq_seed_bytes`…) échoue jusqu'au prochain déverrouillage par mot de
+    /// passe, parce qu'elles lisent toutes ces mêmes champs.
+    pub fn lock(&mut self) {
+        self.key_pair = None;
+        self.ml_dsa = None;
+        self.ml_dsa_primary = None;
+    }
+
+    /// A2 — le moteur détient-il actuellement une autorité de dépense ?
+    /// `false` == verrouillé. Lu par les commandes qui doivent refuser d'agir.
+    pub fn is_unlocked(&self) -> bool {
+        self.ml_dsa_primary.is_some()
+    }
+
     pub fn generate_keypair(&mut self) -> PublicIdentity {
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();
@@ -520,7 +550,7 @@ mod zeroize_sweep_guards {
     fn vault_create_unlock_roundtrip_after_clone_removal() {
         let pw = "correct horse battery staple";
         let mut e = CryptoEngine::new();
-        let (identity, pk_bytes, ct, nonce) =
+        let (identity, pk_bytes, ct, nonce, salt) =
             PQVault::create_identity(&mut e, "alice", pw).expect("create");
 
         // unlock now builds sk_arr from the slice (no un-wiped clone) and wipes
@@ -531,6 +561,7 @@ mod zeroize_sweep_guards {
             &pk_bytes,
             &ct,
             &nonce,
+            Some(&salt),
             pw,
             "alice",
             &identity.created_at,
@@ -544,8 +575,10 @@ mod zeroize_sweep_guards {
         // Wrong password must still fail opaquely — auth not weakened.
         let mut e3 = CryptoEngine::new();
         assert!(
-            PQVault::unlock_identity(&mut e3, &pk_bytes, &ct, &nonce, "wrong", "alice", &identity.created_at)
-                .is_err(),
+            PQVault::unlock_identity(
+                &mut e3, &pk_bytes, &ct, &nonce, Some(&salt), "wrong", "alice", &identity.created_at
+            )
+            .is_err(),
             "wrong password must fail"
         );
     }
@@ -651,11 +684,11 @@ mod pq_mig1_primary_identity {
         // ML-DSA redonne EXACTEMENT la même clé publique.
         let pw = "correct horse battery staple";
         let mut e = CryptoEngine::new();
-        let (pk_hex, ct, nonce) = PQVault::create_pq_identity(&mut e, pw).expect("create pq");
+        let (pk_hex, ct, nonce, salt) = PQVault::create_pq_identity(&mut e, pw).expect("create pq");
 
         let mut e2 = CryptoEngine::new();
-        let reloaded =
-            PQVault::unlock_pq_identity(&mut e2, &pk_hex, &ct, &nonce, pw).expect("unlock pq");
+        let reloaded = PQVault::unlock_pq_identity(&mut e2, &pk_hex, &ct, &nonce, Some(&salt), pw)
+            .expect("unlock pq");
         assert_eq!(
             reloaded, pk_hex,
             "reload must reconstruct the identical ML-DSA public key"
@@ -673,7 +706,7 @@ mod pq_mig1_primary_identity {
         // Mauvais mot de passe ⇒ échec opaque (auth non affaiblie).
         let mut e3 = CryptoEngine::new();
         assert!(
-            PQVault::unlock_pq_identity(&mut e3, &pk_hex, &ct, &nonce, "wrong").is_err(),
+            PQVault::unlock_pq_identity(&mut e3, &pk_hex, &ct, &nonce, Some(&salt), "wrong").is_err(),
             "wrong password must fail"
         );
     }

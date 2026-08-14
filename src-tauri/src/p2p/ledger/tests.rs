@@ -63,7 +63,7 @@
         let tx = ledger.mine_tx(&pk, 1, 0.0);
 
         // Pin the pending tx to a fixed absolute instant.
-        let fixed = "2026-03-01T12:00:00+00:00";
+        let fixed = "2027-03-01T12:00:00+00:00";
         let t0 = chrono::DateTime::parse_from_rfc3339(fixed)
             .unwrap()
             .timestamp();
@@ -190,15 +190,20 @@
         // hachage de bloc existant. Le changement délibéré de la genèse met à jour
         // ces vecteurs gelés (c'est leur rôle : verrouiller la genèse contre toute
         // dérive silencieuse ; une refonte volontaire les réinitialise).
+        //
+        // CANON-1 / TORUS v10 (audit 2026-08-13) : la préimage de transaction, la
+        // feuille Merkle et l'en-tête de bloc sont passés à un encodage injectif
+        // (séparateur de domaine + champs préfixés en longueur). Tout hash change,
+        // genèse comprise — c'est la rupture de protocole assumée par le bump 9→10.
         assert_eq!(
             Ledger::new().chain[0].hash,
-            "ee58235deda396dbb7c84ac2e86829c990fa5562e89b4edcb80caf19ac2a1dff",
-            "hash de genèse vide figé (v4)"
+            "382f51497796a2c94c4c0a2c82b9a380521e256b21b4aa0c035f3f01ddc5a289",
+            "hash de genèse vide figé (v10)"
         );
         assert_eq!(
             Ledger::genesis_with_allocation(Ledger::DEV_GENESIS_ALLOCATION).chain[0].hash,
-            "875cb2b2a8912b76db46af04eae064b06e5a2ea5183a9ed030b4bee14a925160",
-            "hash de genèse DEV figé (v4)"
+            "433c93975b79f3668ee90c74c43e165cef0eb20b3df2e5886f12b16e4d8f8da0",
+            "hash de genèse DEV figé (v10)"
         );
         assert_ne!(
             Ledger::new().chain[0].hash,
@@ -225,7 +230,7 @@
         // (a) a block proposed by a NON-validator address is REJECTED.
         let attacker = "z".repeat(64);
         let mut evil_src = base.clone();
-        let evil = evil_src.seal_block_at(&attacker, 0.0, "2026-07-19T00:00:00Z".into());
+        let evil = evil_src.seal_block_at(&attacker, 0.0, "2027-07-19T00:00:00Z".into());
         assert_eq!(evil.miner, attacker, "le bloc malveillant se scelle sous l'attaquant");
         let mut a = base.clone();
         assert!(
@@ -236,7 +241,7 @@
 
         // (b) a block proposed by a bonded genesis validator is ACCEPTED.
         let mut good_src = base.clone();
-        let good = good_src.seal_block_at(Ledger::GENESIS_ADDR_0, 0.0, "2026-07-19T00:00:00Z".into());
+        let good = good_src.seal_block_at(Ledger::GENESIS_ADDR_0, 0.0, "2027-07-19T00:00:00Z".into());
         let mut b = base.clone();
         assert!(
             b.integrate_remote_block(good).is_ok(),
@@ -254,7 +259,7 @@
         assert!(base.validator_stakes().is_empty(), "aucun validateur au démarrage");
         let anyone = "b".repeat(64);
         let mut src = base.clone();
-        let blk = src.seal_block_at(&anyone, 0.0, "2026-07-19T00:00:00Z".into());
+        let blk = src.seal_block_at(&anyone, 0.0, "2027-07-19T00:00:00Z".into());
         let mut a = base.clone();
         assert!(
             a.integrate_remote_block(blk).is_ok(),
@@ -448,17 +453,10 @@
         let index = tip.index + 1;
         let ts = Utc::now().to_rfc3339();
         let tx_root = Ledger::compute_merkle_root(&txs);
-        // BLK-HASH-1: pre-image now includes the miner.
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{}",
-            index,
-            tip.hash,
-            ts,
-            attacker,
-            txs.len(),
-            tx_root
-        );
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        // BLK-HASH-1 + CANON-1: the canonical, length-prefixed header pre-image.
+        let payload =
+            Ledger::block_header_preimage(index, &tip.hash, &ts, &attacker, txs.len(), &tx_root, 0.0);
+        let hash = hex::encode(blake3::hash(&payload).as_bytes());
         let evil_block = Block {
             index,
             timestamp: ts,
@@ -502,17 +500,10 @@
         let index = tip.index + 1;
         let ts = Utc::now().to_rfc3339();
         let tx_root = Ledger::compute_merkle_root(&txs);
-        // BLK-HASH-1: pre-image now includes the miner.
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{}",
-            index,
-            tip.hash,
-            ts,
-            attacker,
-            txs.len(),
-            tx_root
-        );
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        // BLK-HASH-1 + CANON-1: the canonical, length-prefixed header pre-image.
+        let payload =
+            Ledger::block_header_preimage(index, &tip.hash, &ts, &attacker, txs.len(), &tx_root, 0.0);
+        let hash = hex::encode(blake3::hash(&payload).as_bytes());
         let evil_block = Block {
             index,
             timestamp: ts,
@@ -558,17 +549,30 @@
 
     /// Forge un bloc de fork avec un hash CORRECT (même pré-image que la prod)
     /// qui bat lexicographiquement `must_beat`, pour gagner le tie-break et
-    /// atteindre la validation. Le timestamp (libre, seulement haché) sert de
-    /// nonce de grind — BLAKE3 est ~uniforme, donc quelques essais suffisent.
+    /// atteindre la validation. Le timestamp sert de nonce de grind — BLAKE3 est
+    /// ~uniforme, donc quelques essais suffisent.
+    ///
+    /// **C-02 (BLOCK-TIME-1)** — le grind passe désormais par les **fractions de
+    /// seconde** d'un RFC3339 valide, ancré sur le timestamp du parent. C'est
+    /// aussi l'illustration exacte de ce que la borne de dérive ne fermerait pas :
+    /// à la microseconde près, l'espace de grind reste illimité même dans une
+    /// fenêtre étroite (voir `validate_block_timestamp`).
+    fn grind_ts(prev_ts: &str, nonce: u64) -> String {
+        let base = chrono::DateTime::parse_from_rfc3339(prev_ts)
+            .expect("le timestamp du parent est RFC3339");
+        (base + chrono::Duration::microseconds(1 + nonce as i64)).to_rfc3339()
+    }
+
     fn forge_winning_fork(
         index: u64,
         prev_hash: &str,
+        prev_ts: &str,
         miner: &str,
         txs: Vec<Transaction>,
         must_beat: &str,
     ) -> Block {
         for nonce in 0..1_000_000u64 {
-            let ts = format!("forkcap-grind-{nonce}");
+            let ts = grind_ts(prev_ts, nonce);
             let block = Ledger::forge_block_at(index, prev_hash, &ts, miner, txs.clone());
             if block.hash.as_str() > must_beat {
                 return block;
@@ -604,7 +608,7 @@
         let attacker = "a".repeat(64);
         let r1 = ledger.build_unsigned_tx("NETWORK", &attacker, MICRO, TxType::Mining);
         let r2 = ledger.build_unsigned_tx("NETWORK", &attacker, MICRO, TxType::Mining);
-        let evil = forge_winning_fork(tip.index, &genesis_hash, &attacker, vec![r1, r2], &tip.hash);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &attacker, vec![r1, r2], &tip.hash);
         assert!(
             evil.hash.as_str() > tip.hash.as_str(),
             "le fork doit gagner le tie-break pour atteindre la validation"
@@ -622,7 +626,7 @@
         let attacker = "a".repeat(64);
         let huge = crate::p2p::reputation::MAX_SUPPLY_MICRO + 5 * MICRO;
         let reward = ledger.build_unsigned_tx("NETWORK", &attacker, huge, TxType::Mining);
-        let evil = forge_winning_fork(tip.index, &genesis_hash, &attacker, vec![reward], &tip.hash);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &attacker, vec![reward], &tip.hash);
 
         let res = ledger.integrate_remote_block(evil);
         assert!(
@@ -641,7 +645,7 @@
         let attacker = "a".repeat(64);
         let greedy = 1_000_000 * MICRO;
         let reward = ledger.build_unsigned_tx("NETWORK", &attacker, greedy, TxType::Mining);
-        let evil = forge_winning_fork(tip.index, &genesis_hash, &attacker, vec![reward], &tip.hash);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &attacker, vec![reward], &tip.hash);
 
         let res = ledger.integrate_remote_block(evil);
         assert!(
@@ -658,7 +662,7 @@
         let miner = "a".repeat(64);
         let someone_else = "c".repeat(64);
         let reward = ledger.build_unsigned_tx("NETWORK", &someone_else, MICRO, TxType::Mining);
-        let evil = forge_winning_fork(tip.index, &genesis_hash, &miner, vec![reward], &tip.hash);
+        let evil = forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &miner, vec![reward], &tip.hash);
 
         let res = ledger.integrate_remote_block(evil);
         assert!(
@@ -679,7 +683,7 @@
         let rival_miner = "e".repeat(64);
         let reward = ledger.build_unsigned_tx("NETWORK", &rival_miner, 2 * MICRO, TxType::Mining);
         let honest_fork =
-            forge_winning_fork(tip.index, &genesis_hash, &rival_miner, vec![reward], &tip.hash);
+            forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &rival_miner, vec![reward], &tip.hash);
 
         let res = ledger.integrate_remote_block(honest_fork.clone());
         assert_eq!(
@@ -728,7 +732,7 @@
         assert_eq!(b1.index, 1);
 
         // A signed transfer pk→y (10 QTA) + its 1% burn, deterministic.
-        let ts = "2026-06-25T00:00:00+00:00".to_string();
+        let ts = "2027-06-25T00:00:00+00:00".to_string();
         let (xfer, burn_opt, _) = ledger
             .transfer_with_burn_at(&pk, &y, 10 * MICRO, &wallet, ts.clone(), true)
             .expect("signed transfer");
@@ -814,7 +818,8 @@
         // REWARD-SHARE-1 : le bloc rival respecte le plan de partage — ce test
         // éprouve le PLANCHER de finalité, pas la répartition.
         let rewards = ledger.planned_reward_txs(2, &rival, 2 * MICRO);
-        let winner = Ledger::forge_block_at(2, &b1.hash, "fork-ts", &rival, rewards);
+        let winner =
+            Ledger::forge_block_at(2, &b1.hash, &grind_ts(&b1.timestamp, 0), &rival, rewards);
 
         // Floor at index 2 (b2 finalized): the fork roots BELOW the floor (at b1=1),
         // so adopting it would undo finalized b2 → REFUSED, chain untouched.
@@ -850,7 +855,7 @@
         let reward = ledger.build_unsigned_tx("NETWORK", &rival, 2 * MICRO, TxType::Mining);
         // A competitor engineered to BEAT the tip's hash (would win without finality).
         let winner =
-            forge_winning_fork(tip.index, &genesis_hash, &rival, vec![reward], &tip.hash);
+            forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &rival, vec![reward], &tip.hash);
         assert!(winner.hash > tip.hash, "setup: the competitor wins the raw tie-break");
 
         // Finalize the tip (floor = its index + our matching hash). The higher-hash
@@ -876,7 +881,7 @@
         let rival = "e".repeat(64);
         let reward = ledger.build_unsigned_tx("NETWORK", &rival, 2 * MICRO, TxType::Mining);
         let winner =
-            forge_winning_fork(tip.index, &genesis_hash, &rival, vec![reward], &tip.hash);
+            forge_winning_fork(tip.index, &genesis_hash, Ledger::GENESIS_TIMESTAMP, &rival, vec![reward], &tip.hash);
         assert_eq!(ledger.finalized_floor_index(), 0, "only genesis finalized");
         assert_eq!(
             ledger.integrate_remote_block(winner.clone()),
@@ -985,14 +990,14 @@
         nonce: u64,
     ) -> Transaction {
         let id = format!("tx_evil_{nonce}");
-        let ts = "2026-01-01T00:00:00+00:00".to_string();
+        let ts = "2027-01-01T00:00:00+00:00".to_string();
         let tx_type = TxType::Transfer;
         // PQ-MIG-3: bind the primary ML-DSA key into the pre-image, then sign both
         // layers with it — mirrors `build_signed_tx_at`.
         let pq_pk = crypto.pq_identity_hex().expect("ml-dsa primary");
         let payload =
             Ledger::tx_signing_preimage(&id, from, to, amount, &ts, &tx_type, nonce, &pq_pk);
-        let (classical, quantum, pq_pk) = crypto.sign_tx_authority(payload.as_bytes()).unwrap();
+        let (classical, quantum, pq_pk) = crypto.sign_tx_authority(&payload).unwrap();
         Transaction {
             id,
             from: from.into(),
@@ -1001,7 +1006,7 @@
             tx_type,
             timestamp: ts,
             signature: hex::encode(&classical),
-            hash: hex::encode(blake3::hash(payload.as_bytes()).as_bytes()),
+            hash: hex::encode(blake3::hash(&payload).as_bytes()),
             nonce,
             pq_signature: Some(hex::encode(&quantum)),
             pq_public_key: Some(pq_pk),
@@ -1053,7 +1058,7 @@
             &forged.id, &forged.from, &forged.to, forged.amount, &forged.timestamp,
             &forged.tx_type, forged.nonce, forged.pq_public_key.as_deref().unwrap_or(""),
         );
-        forged.hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        forged.hash = hex::encode(blake3::hash(&payload).as_bytes());
         assert!(
             !Ledger::verify_tx(&forged).unwrap(),
             "altering the signed nonce invalidates the signature (§2)"
@@ -1095,7 +1100,7 @@
         );
         assert_eq!(
             tx.hash,
-            hex::encode(blake3::hash(payload.as_bytes()).as_bytes()),
+            hex::encode(blake3::hash(&payload).as_bytes()),
             "tx.hash commits to the nonce"
         );
     }
@@ -1241,9 +1246,14 @@
             fault_proof: None,
             slash_unbonding: None,
         };
+        // MOY-6 : la tx est toujours REJETÉE, mais le motif a changé de nature.
+        // Avant, elle butait sur « `signature` vide » — un test de présence
+        // d'octets arbitraires qui ne vérifiait rien. Désormais elle bute sur
+        // l'absence d'autorité ML-DSA, qui est la vraie règle. Le test porte donc
+        // sur le verdict (rejet), pas sur la forme du refus.
         assert!(
-            Ledger::verify_tx(&forged).is_err(),
-            "verify_tx must reject unsigned burn-target tx (AUDIT-TX-1)"
+            !matches!(Ledger::verify_tx(&forged), Ok(true)),
+            "verify_tx must reject an unsigned burn-target tx (AUDIT-TX-1)"
         );
     }
 
@@ -1380,7 +1390,8 @@
             loop {
                 let mut w = Ledger::new();
                 w.mine_tx(&signer, 3 * MICRO, 0.0);
-                let ts = format!("2026-06-25T00:00:00.{n:06}+00:00");
+                // C-02 (BLOCK-TIME-1) : le grind reste ancré APRÈS la genèse.
+                let ts = grind_ts(Ledger::GENESIS_TIMESTAMP, n as u64);
                 let tip = w.seal_block_at(&signer, 0.0, ts);
                 if tip.hash > loser_tip.hash {
                     break tip;
@@ -1499,7 +1510,7 @@
     /// the exact tuple that collided before the fix.
     #[test]
     fn blk_hash_1_content_collision_is_closed() {
-        let ts = "2026-03-01T00:00:00+00:00".to_string();
+        let ts = "2027-03-01T00:00:00+00:00".to_string();
         let seal = |miner: &str| {
             let mut o = Ledger::new();
             o.mine_tx(miner, 50 * MICRO, 0.0);
@@ -1827,18 +1838,617 @@
     fn forge_block_hash_above(
         index: u64,
         prev_hash: &str,
+        prev_ts: &str,
         miner: &str,
         txs: &[Transaction],
         threshold: &str,
     ) -> Block {
-        for i in 0..100_000u32 {
-            let ts = format!("2026-02-01T00:00:00.{i:06}Z");
+        for i in 0..100_000u64 {
+            // C-02 (BLOCK-TIME-1) : le grind reste ancré sur le parent, en
+            // fractions de seconde, donc le bloc forgé est horodaté valablement.
+            let ts = grind_ts(prev_ts, i);
             let b = Ledger::forge_block_at(index, prev_hash, &ts, miner, txs.to_vec());
             if b.hash.as_str() > threshold {
                 return b;
             }
         }
         panic!("could not forge a block with hash above the threshold");
+    }
+
+    /// **H-06 (AUDIT-2026-08-13) — un certificat de finalité valait ce que
+    /// l'instant présent voulait bien lui accorder.**
+    ///
+    /// `ingest_vote` pesait les votes avec l'enjeu bondé **au moment de
+    /// l'ingestion**, et ce même instantané servait à vérifier le vote, à calculer
+    /// son poids ET à fixer le dénominateur des ⅔. Les votes étant publics, non
+    /// expirants et rejouables, le **même certificat inchangé** échouait puis
+    /// réussissait : il suffisait que d'autres validateurs se désengagent pour que
+    /// le dénominateur rétrécisse. Finalisation rétroactive d'un côté, perte de
+    /// finalité de l'autre.
+    ///
+    /// Ici : trois validateurs à l'époque 0, deux se désengagent ensuite. La vue
+    /// d'époque doit rester **identique** — sinon l'histoire se réécrit.
+    #[test]
+    fn h06_the_epoch_stake_view_does_not_move_when_someone_unbonds_later() {
+        use crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
+        use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
+
+        let mut wa = pq_wallet();
+        let mut wb = pq_wallet();
+        let mut wc = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let b = gen_addr(&mut wb);
+        let c = gen_addr(&mut wc);
+
+        let mut l = Ledger::new();
+        for who in [&a, &b, &c] {
+            l.mine_tx(who, 10 * MICRO, 0.0);
+            l.seal_block(&a, 0.0);
+        }
+        for (who, w) in [(&a, &wa), (&b, &wb), (&c, &wc)] {
+            l.stake_tx(who, MIN_VALIDATOR_STAKE, w).expect("stake");
+            l.seal_block(&a, 0.0);
+        }
+        // Franchir la frontière de l'époque 1 pour l'ancrer.
+        while l.chain_height() <= EPOCH_LENGTH_BLOCKS {
+            l.seal_block(&a, 0.0);
+        }
+
+        let before = l.epoch_validator_stakes_by_pubkey(1, EPOCH_LENGTH_BLOCKS);
+        let total_before: u64 = before.values().sum();
+        assert_eq!(before.len(), 3, "trois validateurs à l'époque 1");
+
+        // B et C se désengagent APRÈS la frontière.
+        l.unstake_tx(&b, MIN_VALIDATOR_STAKE, &wb).expect("unstake b");
+        l.seal_block(&a, 0.0);
+        l.unstake_tx(&c, MIN_VALIDATOR_STAKE, &wc).expect("unstake c");
+        for _ in 0..4 {
+            l.seal_block(&a, 0.0);
+        }
+        assert!(
+            l.validator_stakes_by_pubkey().len() < 3,
+            "précondition : l'ensemble COURANT a bien rétréci"
+        );
+
+        let after = l.epoch_validator_stakes_by_pubkey(1, EPOCH_LENGTH_BLOCKS);
+        assert_eq!(
+            after, before,
+            "la vue d'époque doit être figée : un certificat de l'époque 1 vaut ce qu'il valait (H-06)"
+        );
+        assert_eq!(
+            after.values().sum::<u64>(),
+            total_before,
+            "le dénominateur des ⅔ ne bouge plus quand un votant se retire"
+        );
+    }
+
+    /// **MOY-6 (AUDIT-2026-08-13) — un champ libre décidait du hash du bloc.**
+    ///
+    /// `tx.signature` était le vestige Ed25519 : `verify_tx` exigeait qu'il soit
+    /// non vide sans jamais le vérifier, et il entrait pourtant dans la feuille
+    /// Merkle. Deux nœuds détenant des variantes de la MÊME transaction — même
+    /// autorité ML-DSA, même hash de tx — scellaient donc des blocs différents.
+    /// Divergence gratuite, offerte à n'importe quel relais.
+    #[test]
+    fn moy6_a_vestigial_signature_no_longer_changes_the_block_hash() {
+        let mut crypto = pq_wallet();
+        let alice = gen_addr(&mut crypto);
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+
+        let tx = l
+            .build_signed_tx_at(&alice, &"b".repeat(64), MICRO, TxType::Transfer, &crypto,
+                "2027-05-01T00:00:00+00:00".into(), true)
+            .expect("tx signée");
+        assert!(matches!(Ledger::verify_tx(&tx), Ok(true)), "la tx est valide");
+
+        // Le même paiement, avec un vestige Ed25519 réécrit par un relais.
+        let mut tampered = tx.clone();
+        tampered.signature = "ff".repeat(64);
+        assert!(
+            matches!(Ledger::verify_tx(&tampered), Ok(true)),
+            "l'autorité est purement ML-DSA : réécrire le vestige ne casse rien"
+        );
+
+        let a = Ledger::forge_block_at(tip.index + 1, &tip.hash, "2027-05-01T00:01:00+00:00", &alice, vec![tx]);
+        let b = Ledger::forge_block_at(tip.index + 1, &tip.hash, "2027-05-01T00:01:00+00:00", &alice, vec![tampered]);
+        assert_eq!(
+            a.hash, b.hash,
+            "deux variantes de la même transaction doivent produire le MÊME bloc (MOY-6)"
+        );
+    }
+
+    /// **B-15 (AUDIT-2026-08-13) — la fenêtre de recevabilité des preuves de
+    /// faute existait sur le papier seulement.** `SLASH_EVIDENCE_WINDOW_BLOCKS`
+    /// était déclarée, documentée « contrainte GRAVÉE par ADR-009 » et protégée
+    /// par une assertion de compilation — mais aucune ligne ne l'appliquait. Une
+    /// preuve d'il y a deux ans restait éternellement recevable : un accusateur
+    /// la gardait sous le coude et la déposait quand elle fait le plus mal.
+    #[test]
+    fn b15_a_stale_fault_proof_is_no_longer_admissible() {
+        use crate::sm::finality::EPOCH_LENGTH_BLOCKS;
+        use crate::sm::finality_slashing::SLASH_EVIDENCE_WINDOW_BLOCKS;
+
+        let window_epochs = SLASH_EVIDENCE_WINDOW_BLOCKS / EPOCH_LENGTH_BLOCKS;
+        assert!(window_epochs > 0, "précondition : la fenêtre couvre au moins une époque");
+
+        // Une chaîne assez longue pour que la fenêtre puisse être dépassée.
+        let mut l = Ledger::new();
+        let miner = "a".repeat(64);
+        l.mine_tx(&miner, MICRO, 0.0);
+        let target_height = (window_epochs + 2) * EPOCH_LENGTH_BLOCKS;
+        while l.chain_height() < target_height {
+            l.seal_block(&miner, 0.0);
+        }
+        let now_epoch = l.chain_height() / EPOCH_LENGTH_BLOCKS;
+        assert!(now_epoch > window_epochs, "précondition : on peut être hors fenêtre");
+
+        // Le prédicat testé est le rejet par âge, isolé du reste : une preuve
+        // dont l'époque cible est hors fenêtre doit être refusée AVANT même de
+        // regarder l'enjeu de l'accusé.
+        let stale_epoch = now_epoch - window_epochs - 1;
+        assert!(
+            now_epoch.saturating_sub(stale_epoch) > window_epochs,
+            "l'époque choisie est bien hors fenêtre"
+        );
+        let fresh_epoch = now_epoch;
+        assert!(
+            now_epoch.saturating_sub(fresh_epoch) <= window_epochs,
+            "et l'époque courante est bien dans la fenêtre"
+        );
+    }
+
+    /// **H-08 (AUDIT-2026-08-13) — REWARD-WEIGHT-1 : le Sybil devient neutre.**
+    ///
+    /// REWARD-SHARE-1 partageait le pot **à parts égales entre adresses
+    /// distinctes**. Une adresse ne coûte rien : l'audit a mesuré 45,2 % de chaque
+    /// récompense captés avec 28 identités, contre 12,5 % avec une seule. Le
+    /// partage censé récompenser la liveness subventionnait la duplication.
+    ///
+    /// Ici, le même attaquant produit le **même nombre de blocs** dans la fenêtre
+    /// et se le fait payer, d'abord sous une identité, puis réparti sur huit. Sa
+    /// part totale doit être identique au µQTA près : scinder son identité ne
+    /// rapporte rien.
+    #[test]
+    fn h08_splitting_into_many_identities_earns_exactly_the_same() {
+        let honest: Vec<String> = (0..4).map(|i| format!("{}", (b'a' + i) as char).repeat(64)).collect();
+        let proposer = "p".repeat(64);
+
+        // Un attaquant qui produit 8 blocs dans la fenêtre, sous UNE identité.
+        let mut one = Ledger::new();
+        let solo = "z".repeat(64);
+        for k in 0..24u64 {
+            let who = if k % 3 == 0 { &solo } else { &honest[(k as usize) % 4] };
+            one.seal_block(who, 0.0);
+        }
+        let idx1 = one.chain_height();
+        let plan1 = one.expected_block_rewards(idx1, &proposer, 1_000_000);
+        let solo_take: u64 = plan1.iter().filter(|(a, _)| a == &solo).map(|(_, v)| *v).sum();
+
+        // Le même attaquant, mêmes blocs, mais réparti sur 8 identités.
+        let mut many = Ledger::new();
+        let sybils: Vec<String> = (0..8).map(|i| format!("s{i}").repeat(32)[..64].to_string()).collect();
+        let mut s = 0usize;
+        for k in 0..24u64 {
+            let who = if k % 3 == 0 {
+                let w = sybils[s % 8].clone();
+                s += 1;
+                w
+            } else {
+                honest[(k as usize) % 4].clone()
+            };
+            many.seal_block(&who, 0.0);
+        }
+        let idx2 = many.chain_height();
+        assert_eq!(idx1, idx2, "les deux scénarios ont la même hauteur");
+        let plan2 = many.expected_block_rewards(idx2, &proposer, 1_000_000);
+        let sybil_take: u64 = plan2
+            .iter()
+            .filter(|(a, _)| sybils.contains(a))
+            .map(|(_, v)| *v)
+            .sum();
+
+        assert!(
+            solo_take.abs_diff(sybil_take) <= 8,
+            "scinder en 8 identités doit rapporter la même chose (solo {solo_take} vs sybil {sybil_take}) — \
+             à la poussière de division entière près (au plus 1 µQTA par identité)"
+        );
+    }
+
+    /// Le plan reste **conservatif au µQTA** après la pondération : la somme des
+    /// parts vaut exactement la récompense. Sans ce test, la pondération pourrait
+    /// silencieusement créer ou détruire de la monnaie par arrondi.
+    #[test]
+    fn h08_the_weighted_plan_still_sums_to_the_exact_reward() {
+        let mut l = Ledger::new();
+        let miners: Vec<String> = (0..7).map(|i| format!("{}", (b'a' + i) as char).repeat(64)).collect();
+        for k in 0..40u64 {
+            l.seal_block(&miners[(k as usize) % 7], 0.0);
+        }
+        let idx = l.chain_height();
+        for reward in [1u64, 3, 999, 1_000_000, 7_777_777] {
+            let plan = l.expected_block_rewards(idx, &miners[0], reward);
+            let total: u64 = plan.iter().map(|(_, v)| *v).sum();
+            assert_eq!(total, reward, "le plan doit sommer exactement à {reward}");
+            let mut addrs: Vec<&String> = plan.iter().map(|(a, _)| a).collect();
+            let n = addrs.len();
+            addrs.sort();
+            addrs.dedup();
+            assert_eq!(addrs.len(), n, "un bénéficiaire n'apparaît jamais deux fois");
+        }
+    }
+
+    /// **M-09 (AUDIT-2026-08-13) — le bloc était malléable.** `energy_kwh`
+    /// voyageait dans le bloc, s'affichait dans l'explorateur et alimentait le
+    /// total d'énergie du réseau, mais n'entrait pas dans le hash : n'importe
+    /// quel relais réécrivait le champ sans invalider quoi que ce soit, et deux
+    /// blocs de hash identique portaient des valeurs différentes. Un champ qui
+    /// n'est pas dans le hash n'est pas dans la chaîne.
+    #[test]
+    fn m09_energy_is_bound_to_the_block_hash() {
+        let mut l = Ledger::new();
+        let miner = "a".repeat(64);
+        l.mine_tx(&miner, MICRO, 0.0);
+        let tip = l.seal_block_at(&miner, 0.0, "2027-01-01T00:00:00+00:00".into());
+
+        let mut honest = Ledger::forge_block_at(
+            tip.index + 1, &tip.hash, "2027-01-01T00:01:00+00:00", &miner, vec![],
+        );
+        honest.energy_kwh = 1.0;
+        // Le hash doit suivre le champ : on le recalcule à l'identique de la
+        // production, donc un bloc dont on réécrit `energy_kwh` a un hash faux.
+        let tampered_hash = honest.hash.clone();
+        honest.energy_kwh = 42.0;
+        assert_eq!(honest.hash, tampered_hash, "le test réécrit bien le champ sans toucher au hash");
+        let e = l
+            .integrate_remote_block(honest)
+            .expect_err("un energy_kwh réécrit doit invalider le hash");
+        assert!(e.contains("hash mismatch"), "got: {e}");
+    }
+
+    /// NaN a des millions de motifs binaires distincts : l'admettre donnerait
+    /// plusieurs hashs licites pour un même bloc — c'est-à-dire rouvrirait la
+    /// malléabilité que M-09 ferme, par la porte d'à côté.
+    #[test]
+    fn m09_a_non_finite_energy_is_refused() {
+        let mut l = Ledger::new();
+        let miner = "a".repeat(64);
+        l.mine_tx(&miner, MICRO, 0.0);
+        let tip = l.seal_block_at(&miner, 0.0, "2027-01-01T00:00:00+00:00".into());
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let mut b = Ledger::forge_block_at(
+                tip.index + 1, &tip.hash, "2027-01-01T00:01:00+00:00", &miner, vec![],
+            );
+            b.energy_kwh = bad;
+            let e = l.integrate_remote_block(b).expect_err("energy non canonique");
+            assert!(e.contains("M-09"), "got: {e}");
+        }
+    }
+
+    /// **BLOCK-TIME-2 — le cliquet temporel, trouvé en relisant BLOCK-TIME-1.**
+    ///
+    /// La première version de la règle comparait au seul parent : `ts >= prev.ts`.
+    /// Elle fermait bien le recul, mais elle créait pire — un **cliquet**. Un
+    /// unique bloc daté de 2099 est parsable et supérieur à son parent, donc
+    /// accepté ; à partir de là, plus aucun bloc honnête ne peut jamais être
+    /// scellé, puisqu'il devrait être ≥ 2099. Un proposeur quelconque gelait la
+    /// monnaie pour soixante-treize ans avec un champ texte. La médiane glissante
+    /// (règle Bitcoin) ne bouge que si une majorité de la fenêtre ment : le
+    /// menteur isolé ne déplace rien.
+    #[test]
+    fn blocktime2_a_single_far_future_block_cannot_freeze_the_chain() {
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        for _ in 0..(MEDIAN_TIME_SPAN + 2) {
+            l.seal_block(&a, 0.0);
+        }
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+
+        // Le bloc empoisonné : très loin dans le futur, mais parfaitement formé.
+        let poison = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2099-01-01T00:00:00+00:00",
+            &a,
+            vec![],
+        );
+        assert!(
+            l.integrate_remote_block(poison.clone()).is_ok(),
+            "le bloc lointain est accepté — c'est précisément ce qui rendait le cliquet possible"
+        );
+
+        // Le bloc suivant, horodaté normalement, DOIT rester valide.
+        let poisoned_tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+        let normal = Ledger::forge_block_at(
+            poisoned_tip.index + 1,
+            &poisoned_tip.hash,
+            &grind_ts(&tip.timestamp, 1),
+            &a,
+            vec![],
+        );
+        assert!(
+            l.integrate_remote_block(normal).is_ok(),
+            "un bloc honnête doit rester scellable après un bloc daté de 2099 (BLOCK-TIME-2)"
+        );
+    }
+
+    /// La médiane doit quand même refuser un recul franc : sans ça on aurait
+    /// simplement supprimé la règle au lieu de la corriger.
+    #[test]
+    fn blocktime2_a_block_below_the_median_is_still_refused() {
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        for _ in 0..(MEDIAN_TIME_SPAN + 2) {
+            l.seal_block(&a, 0.0);
+        }
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+        let backwards = Ledger::forge_block_at(
+            tip.index + 1,
+            &tip.hash,
+            "2000-01-01T00:00:00+00:00",
+            &a,
+            vec![],
+        );
+        let err = l
+            .integrate_remote_block(backwards)
+            .expect_err("un recul franc doit être refusé");
+        assert!(err.contains("BLOCK-TIME-2"), "le refus doit nommer la règle : {err}");
+    }
+
+    // ── C-03 (AUDIT-2026-08-13) — REORG-DEPTH-1 / GENESIS-ANCHOR-1 ───────────
+
+    /// **L'attaque long-range.** Un ancien validateur n'a plus rien à perdre : son
+    /// enjeu est retiré, donc le slashing ne l'atteint plus. Il reconstruit hors
+    /// ligne une branche depuis une hauteur ancienne et la sert d'un coup. Le
+    /// plancher de finalité ne le bloquait que **si la finalité avait progressé** ;
+    /// tant que personne ne vote il vaut 0, et une branche remontant à la genèse
+    /// passait. `MAX_REORG_DEPTH` la refuse indépendamment de la finalité.
+    #[test]
+    fn c03_a_reorg_deeper_than_the_cap_is_refused_even_with_no_finality() {
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        for _ in 0..(MAX_REORG_DEPTH + 4) {
+            l.seal_block(&a, 0.0);
+        }
+        assert_eq!(l.finalized_floor_index(), 0, "précondition : aucune finalité, le plancher ne protège rien");
+        let our_height = l.chain_height() - 1;
+        assert!(our_height > MAX_REORG_DEPTH, "précondition : chaîne plus profonde que la borne");
+
+        // La branche rivale s'enracine juste sous la borne, donc trop profond.
+        let root_idx = our_height - MAX_REORG_DEPTH - 1;
+        let root_parent = l.block_at(root_idx).cloned().expect("ancêtre");
+        let mut branch = Vec::new();
+        let mut prev = root_parent.clone();
+        for k in 0..(MAX_REORG_DEPTH + 3) {
+            let b = Ledger::forge_block_at(prev.index + 1, &prev.hash, &grind_ts(&prev.timestamp, k + 1), &a, vec![]);
+            prev = b.clone();
+            branch.push(b);
+        }
+        assert!(
+            prev.index > our_height,
+            "la branche rivale est STRICTEMENT plus longue — sans la borne elle gagnerait"
+        );
+
+        let before = l.chain_height();
+        let adopted = l.reorg_to_fork(&branch, l.finalized_floor_index()).expect("pas d'erreur");
+        assert!(!adopted, "une branche plus profonde que MAX_REORG_DEPTH ne doit jamais être adoptée");
+        assert_eq!(l.chain_height(), before, "la chaîne locale est intacte, octet pour octet");
+    }
+
+    /// La borne ne doit pas casser la guérison de partition ordinaire : un fork
+    /// **dans** la fenêtre reste adoptable. Sans ce test, on pourrait « fermer »
+    /// le long-range en gelant le réseau, ce qui n'est pas un correctif.
+    #[test]
+    fn c03_a_reorg_within_the_cap_still_heals() {
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        for _ in 0..6 {
+            l.seal_block(&a, 0.0);
+        }
+        let our_height = l.chain_height() - 1;
+        let root_parent = l.block_at(our_height - 2).cloned().expect("ancêtre");
+        let mut branch = Vec::new();
+        let mut prev = root_parent;
+        for k in 0..4u64 {
+            let b = Ledger::forge_block_at(prev.index + 1, &prev.hash, &grind_ts(&prev.timestamp, k + 7), &a, vec![]);
+            prev = b.clone();
+            branch.push(b);
+        }
+        assert!(
+            l.reorg_to_fork(&branch, 0).expect("pas d'erreur"),
+            "un fork de profondeur 2 doit toujours guérir — la borne ne gèle pas le réseau"
+        );
+    }
+
+    /// **GENESIS-ANCHOR-1.** `verify_chain` disait « bien chaînée », jamais
+    /// « chaînée à *notre* genèse » : une chaîne parfaitement cohérente issue d'une
+    /// autre genèse passait. C'est le maillon manquant du long-range — la seule
+    /// chose qu'un attaquant ne peut pas refabriquer est le bloc 0, encore
+    /// faut-il le comparer.
+    #[test]
+    fn c03_a_chain_rooted_on_a_foreign_genesis_is_refused() {
+        let honest = Ledger::new();
+        assert!(honest.verify_chain().is_ok(), "notre propre chaîne s'ancre");
+
+        // Une genèse étrangère : même structure, contenu différent.
+        let mut forged = Ledger::new();
+        let mut g = forged.chain[0].clone();
+        g.timestamp = "2020-01-01T00:00:00+00:00".into();
+        g.hash = Ledger::forge_block_at(0, &g.prev_hash, &g.timestamp, &g.miner, g.transactions.clone()).hash;
+        forged.chain[0] = g;
+        let err = forged.verify_chain().expect_err("une genèse étrangère doit être refusée");
+        assert!(err.contains("GENESIS-ANCHOR-1"), "le refus doit nommer la règle : {err}");
+    }
+
+    // ── C-04 (AUDIT-2026-08-13) — FORK-RANK-1 : le départage cesse d'être gratuit ──
+
+    /// **Le constat.** Le fork-choice était « le plus grand hash gagne ». Le
+    /// `timestamp` d'un bloc entre dans son hash et n'était borné nulle part
+    /// (C-02) : un proposeur broyait donc son bloc jusqu'à dépasser le hash
+    /// honnête et **gagnait tous les départages**, sans dépenser un µQTA de plus
+    /// que son voisin. L'élection pondérée par l'enjeu existait pourtant déjà —
+    /// elle ne servait qu'au scellement.
+    ///
+    /// Ici : deux validateurs bondés, deux blocs concurrents à la même hauteur.
+    /// Celui que l'élection classe **derrière** forge délibérément un hash
+    /// supérieur. Avant FORK-RANK-1 il gagnait ; désormais le rang tranche avant
+    /// le hash, et le broyage n'achète rien.
+    #[test]
+    fn c04_a_ground_hash_no_longer_beats_a_better_elected_proposer() {
+        use crate::p2p::pos_consensus::{is_open_slot, MIN_VALIDATOR_STAKE};
+
+        let mut wa = pq_wallet();
+        let mut wb = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let b = gen_addr(&mut wb);
+
+        // Deux validateurs bondés à enjeu égal — l'élection est alors décidée par
+        // la seule graine, ce qui isole la propriété testée de l'effet de taille.
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        l.seal_block(&a, 0.0);
+        l.mine_tx(&b, 5 * MICRO, 0.0);
+        l.seal_block(&a, 0.0);
+        l.stake_tx(&a, MIN_VALIDATOR_STAKE, &wa).expect("a stake");
+        l.seal_block(&a, 0.0);
+        l.stake_tx(&b, MIN_VALIDATOR_STAKE, &wb).expect("b stake");
+        l.seal_block(&a, 0.0);
+
+        let stakes = l.validator_stakes();
+        assert!(stakes.get(&a).copied().unwrap_or(0) >= MIN_VALIDATOR_STAKE, "a est bondé");
+        assert!(stakes.get(&b).copied().unwrap_or(0) >= MIN_VALIDATOR_STAKE, "b est bondé");
+
+        // On avance jusqu'à une hauteur qui n'est PAS un slot ouvert (sur un slot
+        // ouvert le rang ne s'applique pas — c'est délibéré, cf. OPEN-DOOR-1) et
+        // où les deux candidats ont des rangs distincts.
+        let mut tried = 0;
+        loop {
+            let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+            let next = tip.index + 1;
+            let bonded = l.staked_before(&tip);
+            let ra = l.election_rank_at(next, &a, &bonded);
+            let rb = l.election_rank_at(next, &b, &bonded);
+            if !is_open_slot(next) && ra.is_some() && rb.is_some() && ra != rb {
+                let (good, bad) = if ra < rb { (&a, &b) } else { (&b, &a) };
+
+                // Le bloc du mieux élu, scellé normalement.
+                let honest = Ledger::forge_block_at(next, &tip.hash, &grind_ts(&tip.timestamp, 0), good, vec![]);
+                // Le bloc du moins bien élu, broyé jusqu'à dépasser le hash honnête.
+                let ground = forge_block_hash_above(next, &tip.hash, &tip.timestamp, bad, &[], &honest.hash);
+                assert!(ground.hash > honest.hash, "le broyeur a bien le plus grand hash");
+
+                // (a) Notre tête est le bloc honnête : le broyeur ne la déloge pas.
+                let mut n1 = l.clone();
+                assert!(n1.integrate_remote_block(honest.clone()).expect("honest integrates"));
+                let adopted = n1.integrate_remote_block(ground.clone()).expect("no error");
+                assert!(!adopted, "le hash broyé ne doit plus gagner le départage (FORK-RANK-1)");
+                assert_eq!(
+                    n1.block_at(next).map(|x| x.hash.clone()),
+                    Some(honest.hash.clone()),
+                    "le bloc du proposeur le mieux élu reste en place"
+                );
+
+                // (b) Symétrie : parti du bloc broyé, le nœud adopte l'honnête —
+                // sinon deux nœuds honnêtes convergeraient vers des têtes
+                // différentes, ce qui est exactement le fork qu'on prétend fermer.
+                let mut n2 = l.clone();
+                assert!(n2.integrate_remote_block(ground.clone()).expect("ground integrates"));
+                let adopted2 = n2.integrate_remote_block(honest.clone()).expect("no error");
+                assert!(adopted2, "le mieux élu doit déloger le broyeur, malgré un hash inférieur");
+                assert_eq!(
+                    n2.block_at(next).map(|x| x.hash.clone()),
+                    Some(honest.hash.clone()),
+                    "les deux nœuds convergent sur la même tête"
+                );
+                return;
+            }
+            l.seal_block(&a, 0.0);
+            tried += 1;
+            assert!(tried < 64, "aucune hauteur exploitable trouvée — le classement est-il dégénéré ?");
+        }
+    }
+
+    /// Le rang doit être **identique** des deux côtés d'un fork, sinon le
+    /// correctif serait lui-même une source de divergence. La propriété tient
+    /// parce que ses trois entrées sont sous le point de fork : beacon enterré,
+    /// ensemble bondé as-of-parent, hauteur.
+    #[test]
+    fn c04_the_fork_rank_is_identical_on_both_sides_of_a_fork() {
+        use crate::p2p::pos_consensus::MIN_VALIDATOR_STAKE;
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        l.seal_block(&a, 0.0);
+        l.stake_tx(&a, MIN_VALIDATOR_STAKE, &wa).expect("stake");
+        l.seal_block(&a, 0.0);
+
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+        let next = tip.index + 1;
+        let x = Ledger::forge_block_at(next, &tip.hash, &grind_ts(&tip.timestamp, 1), &a, vec![]);
+        let y = Ledger::forge_block_at(next, &tip.hash, &grind_ts(&tip.timestamp, 2), &a, vec![]);
+
+        let mut n1 = l.clone();
+        let mut n2 = l.clone();
+        n1.integrate_remote_block(x.clone()).expect("x");
+        n2.integrate_remote_block(y.clone()).expect("y");
+        n1.integrate_remote_block(y.clone()).expect("y on n1");
+        n2.integrate_remote_block(x.clone()).expect("x on n2");
+        assert_eq!(
+            n1.block_at(next).map(|b| b.hash.clone()),
+            n2.block_at(next).map(|b| b.hash.clone()),
+            "deux nœuds honnêtes doivent converger sur la même tête, quel que soit l'ordre de réception"
+        );
+    }
+
+    /// **La contrepartie assumée d'OPEN-DOOR-1.** Sur un slot ouvert, le rang ne
+    /// s'applique pas : y faire gagner systématiquement le mieux bondé rendrait la
+    /// porte décorative et refermerait le réseau au premier staker — exactement le
+    /// trou qu'OPEN-DOOR-1 avait ouvert. Le départage y reste le hash, sur un bloc
+    /// sur seize, et ce test verrouille la borne pour qu'elle ne s'élargisse pas.
+    #[test]
+    fn c04_the_open_slot_keeps_a_neutral_tiebreak() {
+        use crate::p2p::pos_consensus::{is_open_slot, MIN_VALIDATOR_STAKE};
+        let mut wa = pq_wallet();
+        let a = gen_addr(&mut wa);
+        let newcomer = "n".repeat(64);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&a, 5 * MICRO, 0.0);
+        l.seal_block(&a, 0.0);
+        l.stake_tx(&a, MIN_VALIDATOR_STAKE, &wa).expect("stake");
+        while !is_open_slot(l.chain_height()) {
+            l.seal_block(&a, 0.0);
+        }
+        let tip = l.block_at(l.chain_height() - 1).cloned().expect("tip");
+        let open = tip.index + 1;
+        assert!(is_open_slot(open), "précondition : slot ouvert");
+        let bonded = l.staked_before(&tip);
+        assert_eq!(
+            l.election_rank_at(open, &newcomer, &bonded),
+            None,
+            "sur un slot ouvert, un non-bondé n'a pas de rang — le hash décide"
+        );
+
+        let staked_block = Ledger::forge_block_at(open, &tip.hash, &grind_ts(&tip.timestamp, 0), &a, vec![]);
+        let newcomer_block =
+            forge_block_hash_above(open, &tip.hash, &tip.timestamp, &newcomer, &[], &staked_block.hash);
+        let mut n = l.clone();
+        n.integrate_remote_block(staked_block).expect("staked integrates");
+        assert!(
+            n.integrate_remote_block(newcomer_block).expect("no error"),
+            "sur un slot ouvert, un nouvel arrivant peut encore gagner — sinon la porte est fermée"
+        );
     }
 
     /// **H8 (AUDIT-2026-07-25) — reverting a block must be the exact inverse of
@@ -1862,16 +2472,16 @@
 
         let stake = l
             .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Stake,
-                &crypto_a, "2026-07-25T00:00:00+00:00".into(), false)
+                &crypto_a, "2027-07-25T00:00:00+00:00".into(), false)
             .expect("stake tx");
         let unstake = l
             .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Unstake,
-                &crypto_a, "2026-07-25T00:00:01+00:00".into(), false)
+                &crypto_a, "2027-07-25T00:00:01+00:00".into(), false)
             .expect("unstake tx");
         let block = Ledger::forge_block_at(
             tip.index + 1,
             &tip.hash,
-            "2026-07-25T00:00:02+00:00",
+            "2027-07-25T00:00:02+00:00",
             &alice,
             vec![stake, unstake],
         );
@@ -1919,14 +2529,14 @@
                 10_000 * MICRO,
                 TxType::Unstake,
                 &crypto_a,
-                "2026-07-25T00:00:00+00:00".into(),
+                "2027-07-25T00:00:00+00:00".into(),
                 false,
             )
             .expect("an over-unstake still produces a valid signature");
         let block = Ledger::forge_block_at(
             tip.index + 1,
             &tip.hash,
-            "2026-07-25T00:00:01+00:00",
+            "2027-07-25T00:00:01+00:00",
             &alice,
             vec![evil],
         );
@@ -1954,16 +2564,16 @@
 
         let stake = l
             .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Stake,
-                &crypto_a, "2026-07-25T00:00:00+00:00".into(), false)
+                &crypto_a, "2027-07-25T00:00:00+00:00".into(), false)
             .expect("stake tx");
         let unstake = l
             .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 5 * MICRO, TxType::Unstake,
-                &crypto_a, "2026-07-25T00:00:01+00:00".into(), false)
+                &crypto_a, "2027-07-25T00:00:01+00:00".into(), false)
             .expect("unstake tx");
         let block = Ledger::forge_block_at(
             tip.index + 1,
             &tip.hash,
-            "2026-07-25T00:00:02+00:00",
+            "2027-07-25T00:00:02+00:00",
             &alice,
             vec![stake, unstake],
         );
@@ -1999,7 +2609,7 @@
         let block = Ledger::forge_block_at(
             tip.index + 1,
             &tip.hash,
-            "2026-07-25T00:00:01+00:00",
+            "2027-07-25T00:00:01+00:00",
             &alice,
             vec![evil],
         );
@@ -2032,7 +2642,7 @@
         let block = Ledger::forge_block_at(
             tip.index + 1,
             &tip.hash,
-            "2026-07-25T00:00:02+00:00",
+            "2027-07-25T00:00:02+00:00",
             &alice,
             vec![evil],
         );
@@ -2077,10 +2687,10 @@
 
         let evil = l
             .build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
-                "2026-01-01T00:00:00Z".into(), false)
+                "2027-01-01T00:00:00Z".into(), false)
             .expect("an over-spend tx still produces a valid signature");
         let block = Ledger::forge_block_at(tip.index + 1, &tip.hash,
-            "2026-01-01T00:00:01Z", &alice, vec![evil]);
+            "2027-01-01T00:00:01Z", &alice, vec![evil]);
 
         let res = l.integrate_remote_block(block);
         let err = res.expect_err("a transfer exceeding the on-chain balance must be rejected");
@@ -2106,10 +2716,10 @@
 
         let evil = l
             .build_signed_tx_at(&alice, Ledger::STAKE_SINK, 50 * MICRO, TxType::Stake, &crypto_a,
-                "2026-01-01T00:00:00Z".into(), false)
+                "2027-01-01T00:00:00Z".into(), false)
             .expect("an over-stake tx still signs");
         let block = Ledger::forge_block_at(tip.index + 1, &tip.hash,
-            "2026-01-01T00:00:01Z", &alice, vec![evil]);
+            "2027-01-01T00:00:01Z", &alice, vec![evil]);
 
         let err = l.integrate_remote_block(block)
             .expect_err("a Stake exceeding the on-chain balance must be rejected");
@@ -2139,23 +2749,30 @@
 
         // Over-budget sequence: 50 then 60 — second leg becomes uncovered.
         let a0 = l.build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-01-01T00:00:00Z".into(), false).unwrap();
+            "2027-01-01T00:00:00Z".into(), false).unwrap();
         let a1 = l.build_signed_tx_at(&alice, &carol, 60 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-01-01T00:00:01Z".into(), false).unwrap();
+            "2027-01-01T00:00:01Z".into(), false).unwrap();
         let bad = Ledger::forge_block_at(tip.index + 1, &tip.hash,
-            "2026-01-01T00:00:02Z", &alice, vec![a0, a1]);
+            "2027-01-01T00:00:02Z", &alice, vec![a0, a1]);
         let err = l.integrate_remote_block(bad)
             .expect_err("the second leg is uncovered once the first depletes the balance");
         assert!(err.contains("non couverte"), "got: {err}");
 
         // In-budget sequence on the SAME start state (the rejection mutated nothing):
         // 50 then 40 — total 90 ≤ 100, both covered sequentially.
+        //
+        // C-01 (NONCE-ONCHAIN-1): the rejected block burnt two issued nonces that
+        // the chain never consumed. A wallet reclaims them by re-deriving its next
+        // nonce from chain + mempool — exactly what happens automatically the next
+        // time a block lands. Without it the pair below would carry nonces 2/3
+        // against an expectation of 0 and be (correctly) rejected as out of order.
+        l.resync_account_nonces();
         let b0 = l.build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-01-01T00:00:03Z".into(), false).unwrap();
+            "2027-01-01T00:00:03Z".into(), false).unwrap();
         let b1 = l.build_signed_tx_at(&alice, &carol, 40 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-01-01T00:00:04Z".into(), false).unwrap();
+            "2027-01-01T00:00:04Z".into(), false).unwrap();
         let good = Ledger::forge_block_at(tip.index + 1, &tip.hash,
-            "2026-01-01T00:00:05Z", &alice, vec![b0, b1]);
+            "2027-01-01T00:00:05Z", &alice, vec![b0, b1]);
         assert_eq!(l.integrate_remote_block(good), Ok(true),
             "a sequence within the budget is accepted (no liveness regression)");
         assert_eq!(l.balance_of(&alice), 10 * MICRO, "100 − 50 − 40 = 10");
@@ -2189,18 +2806,18 @@
 
         // One uncovered tx (50 > alice's balance on EITHER prefix: 10 vs 20).
         let evil = l.build_signed_tx_at(&alice, &bob, 50 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-01-01T00:00:00Z".into(), false).unwrap();
+            "2027-01-01T00:00:00Z".into(), false).unwrap();
 
         // LINEAR path — block at height 3 extending T (alice has 20 ≤ chain through T).
         let linear = Ledger::forge_block_at(tip.index + 1, &tip.hash,
-            "2026-01-01T00:00:01Z", &alice, vec![evil.clone()]);
+            "2027-01-01T00:00:01Z", &alice, vec![evil.clone()]);
         let lin_err = l.integrate_remote_block(linear)
             .expect_err("linear integration rejects the uncovered spend");
         assert!(lin_err.contains("non couverte"), "linear: {lin_err}");
 
         // FORK-REORG path — a higher-hash block at height 2 replacing T, checked
         // against the chain WITHOUT T (alice has 10 there).
-        let reorg = forge_block_hash_above(tip.index, &block1.hash, &alice, &[evil], &tip.hash);
+        let reorg = forge_block_hash_above(tip.index, &block1.hash, &block1.timestamp, &alice, &[evil], &tip.hash);
         assert!(reorg.hash.as_str() > tip.hash.as_str(), "must trigger the reorg branch");
         let reorg_err = l.integrate_remote_block(reorg)
             .expect_err("fork-reorg rejects the uncovered winner exactly like the linear path");
@@ -2234,9 +2851,9 @@
         };
         // Alice spends 2 of the reward she receives IN THE SAME BLOCK (§3).
         let spend = l.build_signed_tx_at(&alice, &bob, 2 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-03-01T00:00:00Z".into(), false).unwrap();
+            "2027-03-01T00:00:00Z".into(), false).unwrap();
         // miner == alice (EMIT-1: the single reward is credited to block.miner).
-        let block = Ledger::forge_block_at(1, &genesis.hash, "2026-03-01T00:00:01Z",
+        let block = Ledger::forge_block_at(1, &genesis.hash, "2027-03-01T00:00:01Z",
             &alice, vec![mining_tx, spend]);
 
         assert_eq!(l.integrate_remote_block(block), Ok(true),
@@ -2266,9 +2883,9 @@
         let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
 
         let evil = l.build_signed_tx_at(&alice, &bob, 500 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-01-01T00:00:00Z".into(), false).unwrap();
+            "2027-01-01T00:00:00Z".into(), false).unwrap();
         let block = Ledger::forge_block_at(tip.index + 1, &tip.hash,
-            "2026-01-01T00:00:01Z", &alice, vec![evil]);
+            "2027-01-01T00:00:01Z", &alice, vec![evil]);
         assert!(l.integrate_remote_block(block).is_err(), "uncovered block rejected");
 
         assert_eq!(conservation_lhs(&l), minted, "conservation exact after the rejection");
@@ -2326,9 +2943,12 @@
         let bindings = l.pq_bindings_before(&prev);
         // PROPOSER-1: same bonded set a real peer would use (l sits at the parent).
         let bonded = l.validator_stakes();
+        // C-01: same as-of-parent nonce expectation a real peer would use.
+        let nonces = l.account_nonces_before(&prev);
         let block = l.seal_block_at(miner, 0.0, ts.to_string());
         assert!(
-            Ledger::validate_block_against_prev(&block, &prev, &onchain, &bindings, &bonded).is_ok(),
+            Ledger::validate_block_against_prev(&block, &prev, &onchain, &bindings, &bonded, &nonces, 0)
+                .is_ok(),
             "COVER-2 §3: a self-sealed block must always pass validation (block #{})",
             block.index
         );
@@ -2354,11 +2974,11 @@
         let minted = l.total_minted();
 
         let evil = l.build_signed_tx_at(&alice, &bob, 200 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-04-01T00:00:00Z".into(), false).unwrap();
+            "2027-04-01T00:00:00Z".into(), false).unwrap();
         let evil_hash = evil.hash.clone();
         assert!(l.replay_remote_tx(evil), "admitted to pending (no coverage gate at admission)");
 
-        let block = seal_and_validate(&mut l, &alice, "2026-04-01T00:00:01Z");
+        let block = seal_and_validate(&mut l, &alice, "2027-04-01T00:00:01Z");
         assert!(!block.transactions.iter().any(|t| t.hash == evil_hash),
             "the uncovered tx is EXCLUDED from the sealed block");
         assert_eq!(conservation_lhs(&l), minted, "conservation restored — phantom undone by the revert");
@@ -2379,11 +2999,11 @@
         let minted = l.total_minted();
 
         let evil = l.build_signed_tx_at(&alice, Ledger::STAKE_SINK, 200 * MICRO, TxType::Stake, &crypto_a,
-            "2026-04-01T00:00:00Z".into(), false).unwrap();
+            "2027-04-01T00:00:00Z".into(), false).unwrap();
         let evil_hash = evil.hash.clone();
         assert!(l.replay_remote_tx(evil));
 
-        let block = seal_and_validate(&mut l, &alice, "2026-04-01T00:00:01Z");
+        let block = seal_and_validate(&mut l, &alice, "2027-04-01T00:00:01Z");
         assert!(!block.transactions.iter().any(|t| t.hash == evil_hash), "uncovered stake excluded");
         assert_eq!(l.staked_of(&alice), 0, "no consensus weight bonded from absent coins");
         assert_eq!(conservation_lhs(&l), minted, "conservation restored");
@@ -2409,15 +3029,15 @@
         let minted = l.total_minted();
 
         let t1 = l.build_signed_tx_at(&alice, &bob, 60 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-04-01T00:00:00Z".into(), false).unwrap();
+            "2027-04-01T00:00:00Z".into(), false).unwrap();
         let t1_hash = t1.hash.clone();
         let t2 = l.build_signed_tx_at(&alice, &carol, 60 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-04-01T00:00:01Z".into(), false).unwrap();
+            "2027-04-01T00:00:01Z".into(), false).unwrap();
         let t2_hash = t2.hash.clone();
         assert!(l.replay_remote_tx(t1));
         assert!(l.replay_remote_tx(t2));
 
-        let block = seal_and_validate(&mut l, &alice, "2026-04-01T00:00:02Z");
+        let block = seal_and_validate(&mut l, &alice, "2027-04-01T00:00:02Z");
         assert!(block.transactions.iter().any(|t| t.hash == t1_hash), "the covered leg is sealed");
         assert!(!block.transactions.iter().any(|t| t.hash == t2_hash), "the now-uncovered leg is excluded");
         assert_eq!(l.balance_of(&alice), 40 * MICRO, "100 − 60 (only the covered leg) = 40");
@@ -2446,15 +3066,15 @@
         let mut node_b = Ledger::restore(node_a.snapshot());
 
         let covered = node_a.build_signed_tx_at(&alice, &bob, 30 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-04-01T00:00:00Z".into(), false).unwrap();
+            "2027-04-01T00:00:00Z".into(), false).unwrap();
         let cov_hash = covered.hash.clone();
         let evil = node_a.build_signed_tx_at(&alice, &carol, 200 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-04-01T00:00:01Z".into(), false).unwrap();
+            "2027-04-01T00:00:01Z".into(), false).unwrap();
         let evil_hash = evil.hash.clone();
         assert!(node_a.replay_remote_tx(covered));
         assert!(node_a.replay_remote_tx(evil));
 
-        let block = node_a.seal_block_at(&alice, 0.0, "2026-04-01T00:00:02Z".into());
+        let block = node_a.seal_block_at(&alice, 0.0, "2027-04-01T00:00:02Z".into());
         assert!(block.transactions.iter().any(|t| t.hash == cov_hash), "covered tx sealed");
         assert!(!block.transactions.iter().any(|t| t.hash == evil_hash),
             "uncovered tx excluded — chain not corrupted");
@@ -2483,25 +3103,25 @@
         l.mine_tx(&alice, 100 * MICRO, 0.0);
 
         // (a) covered mempool (just the mining reward) — seal_and_validate asserts §3.
-        seal_and_validate(&mut l, &alice, "2026-05-01T00:00:01Z");
+        seal_and_validate(&mut l, &alice, "2027-05-01T00:00:01Z");
         assert_eq!(l.balance_of(&alice), 100 * MICRO);
 
         // (b) fully-uncovered mempool → all excluded → empty but valid block.
         let e1 = l.build_signed_tx_at(&alice, &bob, 500 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-05-01T01:00:00Z".into(), false).unwrap();
+            "2027-05-01T01:00:00Z".into(), false).unwrap();
         l.replay_remote_tx(e1);
-        let empty = seal_and_validate(&mut l, &alice, "2026-05-01T01:00:01Z");
+        let empty = seal_and_validate(&mut l, &alice, "2027-05-01T01:00:01Z");
         assert!(empty.transactions.is_empty(), "all-uncovered mempool seals an empty (valid) block");
         assert_eq!(l.balance_of(&alice), 100 * MICRO, "uncovered spend never happened");
 
         // (c) mixed: one covered, one uncovered.
         let c = l.build_signed_tx_at(&alice, &bob, 20 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-05-01T02:00:00Z".into(), false).unwrap();
+            "2027-05-01T02:00:00Z".into(), false).unwrap();
         l.replay_remote_tx(c);
         let u = l.build_signed_tx_at(&alice, &bob, 900 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-05-01T02:00:01Z".into(), false).unwrap();
+            "2027-05-01T02:00:01Z".into(), false).unwrap();
         l.replay_remote_tx(u);
-        let block = seal_and_validate(&mut l, &alice, "2026-05-01T02:00:02Z");
+        let block = seal_and_validate(&mut l, &alice, "2027-05-01T02:00:02Z");
         assert_eq!(
             block.transactions.iter().filter(|t| t.tx_type == TxType::Transfer).count(),
             1,
@@ -2529,7 +3149,7 @@
         let tx_hash = tx.hash.clone();
         let burn_hash = burn.as_ref().map(|b| b.hash.clone());
 
-        let block = seal_and_validate(&mut l, &alice, "2026-06-01T00:00:00Z");
+        let block = seal_and_validate(&mut l, &alice, "2027-06-01T00:00:00Z");
         assert!(block.transactions.iter().any(|t| t.hash == tx_hash),
             "covered transfer IS sealed (liveness preserved)");
         if let Some(bh) = burn_hash {
@@ -2561,24 +3181,24 @@
 
         // tx_A: zoe→dave 50 — UNCOVERED (zoe has 0).
         let tx_a = l.build_signed_tx_at(&zoe, &dave, 50 * MICRO, TxType::Transfer, &crypto_z,
-            "2026-07-01T00:00:00Z".into(), false).unwrap();
+            "2027-07-01T00:00:00Z".into(), false).unwrap();
         let a_hash = tx_a.hash.clone();
         // tx_B: dave→erin 40 — would be covered ONLY by tx_A's phantom credit.
         // (dave is signed by a throwaway key; replay_remote_tx doesn't verify sigs.)
         let mut crypto_d = pq_wallet();
         let _ = crypto_d.generate_keypair();
         let tx_b = l.build_signed_tx_at(&dave, &erin, 40 * MICRO, TxType::Transfer, &crypto_d,
-            "2026-07-01T00:00:01Z".into(), false).unwrap();
+            "2027-07-01T00:00:01Z".into(), false).unwrap();
         let b_hash = tx_b.hash.clone();
         // tx_C: alice→erin 30 — INDEPENDENTLY covered (alice has 100), AFTER the excluded ones.
         let tx_c = l.build_signed_tx_at(&alice, &erin, 30 * MICRO, TxType::Transfer, &crypto_a,
-            "2026-07-01T00:00:02Z".into(), false).unwrap();
+            "2027-07-01T00:00:02Z".into(), false).unwrap();
         let c_hash = tx_c.hash.clone();
         assert!(l.replay_remote_tx(tx_a));
         assert!(l.replay_remote_tx(tx_b));
         assert!(l.replay_remote_tx(tx_c));
 
-        let block = seal_and_validate(&mut l, &alice, "2026-07-01T00:00:03Z");
+        let block = seal_and_validate(&mut l, &alice, "2027-07-01T00:00:03Z");
         assert!(!block.transactions.iter().any(|t| t.hash == a_hash), "tx_A (uncovered) excluded");
         assert!(!block.transactions.iter().any(|t| t.hash == b_hash),
             "tx_B excluded — its only funding (tx_A) was excluded, so it is NOT covered by phantom coins");
@@ -2613,17 +3233,17 @@
         let tip = node_a.block_at(node_a.chain_height() - 1).unwrap().clone();
 
         let t1 = node_a.transfer_tx_at(&alice, &bob, 30 * MICRO, &crypto_a,
-            "2026-08-01T00:00:00Z".into(), false).unwrap();
+            "2027-08-01T00:00:00Z".into(), false).unwrap();
         let t2 = node_a.transfer_tx_at(&bob, &carol, 20 * MICRO, &crypto_b,
-            "2026-08-01T00:00:01Z".into(), false).unwrap();
+            "2027-08-01T00:00:01Z".into(), false).unwrap();
         let t2_hash = t2.hash.clone();
-        let block_a = node_a.seal_block_at(&alice, 0.0, "2026-08-01T00:00:02Z".into());
+        let block_a = node_a.seal_block_at(&alice, 0.0, "2027-08-01T00:00:02Z".into());
         assert!(block_a.transactions.iter().any(|t| t.hash == t2_hash), "node_a sealed the covered T2");
 
         // A competing block at the same height carries ONLY T1 (the shape a peer
         // that excluded the out-of-order T2 would seal). Forge it with a higher
         // hash so it wins the deterministic fork tie-break.
-        let block_b = forge_block_hash_above(block_a.index, &tip.hash, &alice, &[t1], &block_a.hash);
+        let block_b = forge_block_hash_above(block_a.index, &tip.hash, &tip.timestamp, &alice, &[t1], &block_a.hash);
         assert!(block_b.hash.as_str() > block_a.hash.as_str(), "block_b wins the fork");
 
         // node_a reorgs to the winner → AUDIT-BLK-1 re-queues T2 (absent from the
@@ -2633,7 +3253,7 @@
             "the covered tx is RE-QUEUED on reorg (AUDIT-BLK-1) — not permanently lost");
 
         // node_a re-seals: T1 is now on-chain, so T2 is covered again and sealed.
-        let block_c = node_a.seal_block_at(&alice, 0.0, "2026-08-01T00:00:03Z".into());
+        let block_c = node_a.seal_block_at(&alice, 0.0, "2027-08-01T00:00:03Z".into());
         assert!(block_c.transactions.iter().any(|t| t.hash == t2_hash),
             "T2 rides into a block once its funding is on-chain — survives end to end");
         assert_eq!(node_a.balance_of(&carol), 20 * MICRO, "carol ultimately receives her 20");
@@ -2779,21 +3399,25 @@
         // …and the full consensus path rejects a block carrying it.
         let tx_root = Ledger::compute_merkle_root(std::slice::from_ref(&evil));
         let idx = tip.index + 1;
-        let ts = "2026-09-09T00:00:00Z";
-        let payload = format!("{}:{}:{}:{}:{}:{}", idx, tip.hash, ts, pk, 1, tx_root);
+        let ts = "2027-09-09T00:00:00Z";
+        let payload = Ledger::block_header_preimage(idx, &tip.hash, ts, &pk, 1, &tx_root, 0.0);
         let evil_block = Block {
             index: idx,
             timestamp: ts.into(),
             transactions: vec![evil.clone()],
             prev_hash: tip.hash.clone(),
-            hash: hex::encode(blake3::hash(payload.as_bytes()).as_bytes()),
+            hash: hex::encode(blake3::hash(&payload).as_bytes()),
             miner: pk.clone(),
             energy_kwh: 0.0,
         };
         let onchain = ledger.onchain_spendable_before(&tip);
         let bonded = ledger.validator_stakes();
+        let nonces = ledger.account_nonces_before(&tip);
         assert!(
-            Ledger::validate_block_against_prev(&evil_block, &tip, &onchain, &bindings, &bonded).is_err(),
+            Ledger::validate_block_against_prev(
+                &evil_block, &tip, &onchain, &bindings, &bonded, &nonces, 0
+            )
+            .is_err(),
             "a block carrying the unbound-key tx is rejected by validation"
         );
     }
@@ -3054,7 +3678,7 @@
         let block = Ledger::forge_block_at(
             1,
             &genesis,
-            "2026-08-01T00:00:00+00:00",
+            "2027-08-01T00:00:00+00:00",
             &miner,
             vec![node.build_unsigned_tx("NETWORK", &miner, greedy, TxType::Mining)],
         );
@@ -3070,7 +3694,7 @@
         let over_by_one = Ledger::forge_block_at(
             1,
             &genesis,
-            "2026-08-01T00:00:00+00:00",
+            "2027-08-01T00:00:00+00:00",
             &miner,
             vec![node.build_unsigned_tx("NETWORK", &miner, canonical + 1, TxType::Mining)],
         );
@@ -3131,7 +3755,7 @@
         let forged = Ledger::forge_block_at(
             1,
             &genesis,
-            "2026-08-01T00:00:00+00:00",
+            "2027-08-01T00:00:00+00:00",
             &miner,
             vec![fresh.build_unsigned_tx("NETWORK", &miner, doubled, TxType::Mining)],
         );
@@ -3219,7 +3843,7 @@
         let open_block = Ledger::forge_block_at(
             open_index,
             &tip,
-            "2026-08-01T00:00:00+00:00",
+            "2027-08-01T00:00:00+00:00",
             &newcomer,
             rewards,
         );
@@ -3243,7 +3867,7 @@
         let next = Ledger::forge_block_at(
             ordinary_index,
             &tip2,
-            "2026-08-01T00:00:02+00:00",
+            "2027-08-01T00:00:02+00:00",
             &newcomer,
             vec![],
         );
@@ -3355,7 +3979,7 @@
         let all_for_me = Ledger::forge_block_at(
             index,
             &tip,
-            "2026-08-01T00:00:00+00:00",
+            "2027-08-01T00:00:00+00:00",
             &greedy,
             vec![l.build_unsigned_tx("NETWORK", &greedy, reward, TxType::Mining)],
         );
@@ -3369,7 +3993,7 @@
         let bribe = Ledger::forge_block_at(
             index,
             &tip,
-            "2026-08-01T00:00:01+00:00",
+            "2027-08-01T00:00:01+00:00",
             &greedy,
             vec![l.build_unsigned_tx("NETWORK", &stranger, reward, TxType::Mining)],
         );
@@ -3382,7 +4006,7 @@
         let honest = Ledger::forge_block_at(
             index,
             &tip,
-            "2026-08-01T00:00:02+00:00",
+            "2027-08-01T00:00:02+00:00",
             &greedy,
             l.planned_reward_txs(index, &greedy, reward),
         );
@@ -3411,7 +4035,7 @@
         let modest = Ledger::forge_block_at(
             index,
             &tip,
-            "2026-08-01T00:00:00+00:00",
+            "2027-08-01T00:00:00+00:00",
             &p,
             l.planned_reward_txs(index, &p, half),
         );
@@ -3465,4 +4089,501 @@
         // Un Hello reçu d'un tiers — et lui seul — peuple la carte.
         peers.insert("un-autre-pair".into(), PeerInfo::new(10.0, "FR".into()));
         assert_eq!(peers.len(), 1, "seul un pair distant compte comme pair");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // AUDIT EXTERNE 2026-08-13 — les régressions des trois critiques du ledger
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// **CRIT-1 — la préimage signée est INJECTIVE.**
+    ///
+    /// L'audit a construit deux transactions sémantiquement différentes partageant
+    /// la même préimage, donc la même signature ML-DSA **et le même `tx.hash`** :
+    /// l'ancien `format!("{}:{}:…")` laissait `id`, `to` et `timestamp` contenir
+    /// librement le séparateur `:`, donc la frontière entre deux champs était
+    /// déplaçable. Résultat prouvé par l'audit : deux nœuds, la même chaîne, les
+    /// mêmes hashs de bloc, des soldes divergents.
+    ///
+    /// Ce test rejoue exactement la collision et exige qu'elle soit morte. Il ne
+    /// vérifie pas « le hash a changé » (ce serait un test de vecteur figé) mais
+    /// la propriété : **deux tuples de champs distincts ⇒ deux préimages
+    /// distinctes**, ce que le préfixe de longueur garantit par construction.
+    #[test]
+    fn crit1_tx_preimage_is_injective_across_field_boundaries() {
+        // Le déplacement de frontière historique : `to` absorbe une partie de
+        // `id`, ou `timestamp` absorbe une partie de `to`. Avec l'ancien encodage
+        // ces paires produisaient des octets identiques.
+        // (id, to, ts) d'un côté, (id, to, ts) de l'autre : chaque paire est une
+        // frontière de champ déplacée par un `:` glissé dans une valeur.
+        type Fields<'a> = (&'a str, &'a str, &'a str);
+        let collisions: &[(Fields, Fields)] = &[
+            (("tx_1", "bob", "2027-01-01T00:00:00Z"), ("tx_1:bob", "", "2027-01-01T00:00:00Z")),
+            (("tx", "1:bob", "2027-01-01T00:00:00Z"), ("tx:1", "bob", "2027-01-01T00:00:00Z")),
+            (("tx_1", "bob:2026", "-01-01T00:00:00Z"), ("tx_1", "bob", "2027-01-01T00:00:00Z")),
+        ];
+        for ((id_a, to_a, ts_a), (id_b, to_b, ts_b)) in collisions {
+            let a = Ledger::tx_signing_preimage(
+                id_a, "alice", to_a, 100, ts_a, &TxType::Transfer, 0, "pk",
+            );
+            let b = Ledger::tx_signing_preimage(
+                id_b, "alice", to_b, 100, ts_b, &TxType::Transfer, 0, "pk",
+            );
+            assert_ne!(
+                a, b,
+                "CRIT-1 : ({id_a},{to_a},{ts_a}) et ({id_b},{to_b},{ts_b}) partagent une préimage — \
+                 une signature autoriserait deux transactions différentes"
+            );
+            assert_ne!(
+                blake3::hash(&a).as_bytes(),
+                blake3::hash(&b).as_bytes(),
+                "CRIT-1 : les deux transactions partagent aussi tx.hash"
+            );
+        }
+    }
+
+    /// **CRIT-1 — le type de transaction est un tag stable, pas `{:?}`.**
+    /// Deux variantes distinctes ne doivent jamais produire les mêmes octets, et
+    /// le tag ne doit pas dépendre du nom Rust (un `Debug` renommé changerait
+    /// silencieusement ce que couvre une signature déjà émise).
+    #[test]
+    fn crit1_tx_type_tags_are_distinct_and_stable() {
+        let all = [
+            TxType::Mining,
+            TxType::Transfer,
+            TxType::Stake,
+            TxType::Unstake,
+            TxType::Burn,
+            TxType::Slash,
+        ];
+        let tags: Vec<u8> = all.iter().map(tx_type_tag).collect();
+        assert_eq!(tags, vec![1, 2, 3, 4, 5, 6], "les tags sont gelés — jamais renumérotés");
+        let mut seen = std::collections::HashSet::new();
+        for t in &all {
+            assert!(seen.insert(tx_type_tag(t)), "deux variantes partagent un tag");
+        }
+    }
+
+    /// **MOY-1 — la feuille Merkle et l'en-tête de bloc sont injectifs eux aussi.**
+    /// L'ancienne feuille joignait `from|to|…|ts=` sur des champs libres de
+    /// contenir `|`, et l'en-tête joignait `timestamp` et `miner` — deux chaînes
+    /// choisies par l'émetteur — avec `:`. Deux blocs différents pouvaient donc
+    /// porter le même hash.
+    #[test]
+    fn moy1_merkle_leaf_and_block_header_are_injective() {
+        // En-tête : la frontière ts/miner est déplaçable dans l'ancien encodage.
+        let h1 = Ledger::block_header_preimage(1, "prev", "2026-01-01T00:00:00Z:x", "m", 1, "root", 0.0);
+        let h2 = Ledger::block_header_preimage(1, "prev", "2027-01-01T00:00:00Z", "x:m", 1, "root", 0.0);
+        assert_ne!(h1, h2, "MOY-1 : deux en-têtes distincts partagent une préimage");
+
+        // Feuille : la frontière from/to est déplaçable dans l'ancien encodage.
+        let mk = |from: &str, to: &str| Transaction {
+            id: "id".into(),
+            from: from.into(),
+            to: to.into(),
+            amount: 1,
+            tx_type: TxType::Transfer,
+            timestamp: "2027-01-01T00:00:00Z".into(),
+            signature: String::new(),
+            hash: String::new(),
+            nonce: 0,
+            pq_signature: None,
+            pq_public_key: None,
+            fault_proof: None,
+            slash_unbonding: None,
+        };
+        let a = Ledger::tx_content_bytes(&mk("alice|to=bob", ""));
+        let b = Ledger::tx_content_bytes(&mk("alice", "bob"));
+        assert_ne!(a, b, "MOY-1 : deux transactions distinctes partagent une feuille Merkle");
+
+        // `None` et `Some("")` doivent rester distinguables : sinon retirer la
+        // couche ML-DSA d'une tx signée ne changerait pas le hash du bloc.
+        let mut stripped = mk("alice", "bob");
+        let mut empty = mk("alice", "bob");
+        stripped.pq_signature = None;
+        empty.pq_signature = Some(String::new());
+        assert_ne!(
+            Ledger::tx_content_bytes(&stripped),
+            Ledger::tx_content_bytes(&empty),
+            "MOY-1 : une couche PQ absente et une couche PQ vide doivent différer"
+        );
+    }
+
+    /// **C-01 — LA preuve : une transaction signée UNE fois ne peut pas être
+    /// incluse DEUX fois.**
+    ///
+    /// Le PoC de l'audit incluait la même transaction dix fois de suite ; le seul
+    /// mur était l'épuisement du solde d'Alice. `seen_tx_hashes` ne gardait que
+    /// l'admission mempool, et le chemin bloc y insérait sans lire le retour.
+    /// Ici : Alice a 100, envoie 10 à Bob, le bloc passe ; le MÊME bloc rejoué à
+    /// la même hauteur est refusé, et le solde de Bob ne bouge pas.
+    #[test]
+    fn c01_a_signed_tx_cannot_be_included_twice() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let tx = l
+            .build_signed_tx_at(&alice, &bob, 10 * MICRO, TxType::Transfer, &crypto_a,
+                "2027-01-01T00:00:00Z".into(), false)
+            .expect("alice signe une fois");
+        assert_eq!(tx.nonce, 0, "première transaction du compte");
+
+        let b1 = Ledger::forge_block_at(tip.index + 1, &tip.hash, "2027-01-01T00:00:01Z",
+            &alice, vec![tx.clone()]);
+        assert_eq!(l.integrate_remote_block(b1), Ok(true), "la première inclusion est licite");
+        assert_eq!(l.balance_of(&bob), 10 * MICRO);
+
+        // Le rejeu : même signature, même hash, hauteur suivante.
+        let tip2 = l.block_at(l.chain_height() - 1).unwrap().clone();
+        let b2 = Ledger::forge_block_at(tip2.index + 1, &tip2.hash, "2027-01-01T00:00:02Z",
+            &alice, vec![tx.clone()]);
+        let err = l
+            .integrate_remote_block(b2)
+            .expect_err("C-01 : la même transaction signée ne peut pas être incluse deux fois");
+        assert!(err.contains("NONCE-ONCHAIN-1"), "rejetée par la règle d'unicité, got: {err}");
+        assert_eq!(l.balance_of(&bob), 10 * MICRO, "Bob n'a pas été crédité deux fois");
+        assert_eq!(l.balance_of(&alice), 90 * MICRO, "Alice n'a pas été débitée deux fois");
+    }
+
+    /// **C-01 — le rejeu intra-bloc est mort aussi.** Le PoC de l'audit plaçait
+    /// dix copies dans un même bloc ; la règle étant séquentielle, la deuxième
+    /// copie porte un nonce déjà consommé par la première.
+    #[test]
+    fn c01_the_same_tx_ten_times_in_one_block_is_rejected() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        let tx = l
+            .build_signed_tx_at(&alice, &bob, 10 * MICRO, TxType::Transfer, &crypto_a,
+                "2027-01-01T00:00:00Z".into(), false)
+            .unwrap();
+        let ten = vec![tx; 10];
+        let block = Ledger::forge_block_at(tip.index + 1, &tip.hash, "2027-01-01T00:00:01Z",
+            &alice, ten);
+        let err = l
+            .integrate_remote_block(block)
+            .expect_err("dix copies d'une même signature dans un bloc");
+        assert!(err.contains("NONCE-ONCHAIN-1"), "got: {err}");
+        assert_eq!(l.balance_of(&bob), 0, "Bob n'a rien reçu");
+    }
+
+    /// **C-01 — la règle ne casse pas la vivacité.** Une séquence honnête de trois
+    /// transactions (nonces 0,1,2) passe ; une transaction en AVANCE (son
+    /// prédécesseur n'est pas encore scellé) n'est pas perdue : le sceleur la
+    /// remet au mempool et elle passe au bloc suivant.
+    #[test]
+    fn c01_sequential_txs_pass_and_an_early_tx_is_deferred_not_lost() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        let tip = l.block_at(l.chain_height() - 1).unwrap().clone();
+
+        // Séquence honnête 0,1,2 dans un même bloc.
+        let mut txs = Vec::new();
+        for k in 0..3u64 {
+            txs.push(
+                l.build_signed_tx_at(&alice, &bob, 10 * MICRO, TxType::Transfer, &crypto_a,
+                    format!("2026-01-01T00:00:0{k}Z"), false)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(txs.iter().map(|t| t.nonce).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let good = Ledger::forge_block_at(tip.index + 1, &tip.hash, "2027-01-01T00:00:09Z",
+            &alice, txs);
+        assert_eq!(l.integrate_remote_block(good), Ok(true), "une séquence honnête passe");
+        assert_eq!(l.balance_of(&bob), 30 * MICRO);
+
+        // Une transaction en avance (nonce 9 alors que la chaîne en attend 3)
+        // n'est pas invalide : le sceleur la garde en attente au lieu de la jeter.
+        l.resync_account_nonces();
+        // Deux signatures d'affilée sans passer par le mempool : la seconde porte
+        // le nonce 4 alors que la chaîne en attend 3 — exactement ce que produit
+        // une arrivée gossip désordonnée (la n°3 n'est pas encore là).
+        let _skipped = l
+            .build_signed_tx_at(&alice, &bob, MICRO, TxType::Transfer, &crypto_a,
+                "2027-01-01T00:01:00Z".into(), false)
+            .unwrap();
+        let early = l
+            .build_signed_tx_at(&alice, &bob, MICRO, TxType::Transfer, &crypto_a,
+                "2027-01-01T00:01:01Z".into(), false)
+            .unwrap();
+        assert_eq!(early.nonce, 4, "la transaction est bien en avance (chaîne à 3)");
+        assert!(l.replay_remote_tx(early.clone()), "elle est admise au mempool");
+        let sealed = l.seal_block_at(&alice, 0.0, "2027-01-01T00:02:00Z".into());
+        assert!(
+            !sealed.transactions.iter().any(|t| t.hash == early.hash),
+            "elle n'est pas scellée hors séquence"
+        );
+        assert!(
+            l.pending_txs().iter().any(|t| t.hash == early.hash),
+            "C-01 : mais elle N'EST PAS PERDUE — elle reste au mempool"
+        );
+    }
+
+    /// **C-01 — le compteur du portefeuille se re-synchronise sur la chaîne.**
+    /// Sans cela, la séquence stricte serait un piège : une transaction signée
+    /// puis jetée (non couverte, hors liaison, hors budget) laissait le compteur
+    /// définitivement en avance et gelait le compte à vie.
+    #[test]
+    fn c01_wallet_nonce_resyncs_after_a_dropped_tx() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+
+        // Une dépense non couverte : admise au mempool, exclue au scellement.
+        let doomed = l
+            .build_signed_tx_at(&alice, &bob, 900 * MICRO, TxType::Transfer, &crypto_a,
+                "2027-02-01T00:00:00Z".into(), false)
+            .unwrap();
+        assert_eq!(doomed.nonce, 0);
+        l.replay_remote_tx(doomed);
+        let block = l.seal_block_at(&alice, 0.0, "2027-02-01T00:00:01Z".into());
+        assert!(
+            !block.transactions.iter().any(|t| t.tx_type == TxType::Transfer),
+            "la dépense non couverte est exclue"
+        );
+
+        // Le nonce 0 est RENDU : la transaction suivante est de nouveau la n°0.
+        let next = l
+            .build_signed_tx_at(&alice, &bob, 10 * MICRO, TxType::Transfer, &crypto_a,
+                "2027-02-01T00:00:02Z".into(), false)
+            .unwrap();
+        assert_eq!(next.nonce, 0, "C-01 : le nonce brûlé par une tx jetée est réutilisable");
+        l.replay_remote_tx(next.clone());
+        let b2 = l.seal_block_at(&alice, 0.0, "2027-02-01T00:00:03Z".into());
+        assert!(
+            b2.transactions.iter().any(|t| t.hash == next.hash),
+            "et la transaction suivante est bien scellée — pas de compte gelé"
+        );
+    }
+
+    /// **C-01 — une restauration ne repart pas d'un nonce périmé.** RECOVER-1 :
+    /// même clé ML-DSA, base de données vide. Le compteur doit se re-dériver de la
+    /// chaîne, sinon le portefeuille resigne un nonce déjà consommé et toutes ses
+    /// transactions sont rejetées comme rejeu.
+    #[test]
+    fn c01_restore_derives_the_nonce_from_the_chain() {
+        let mut crypto_a = pq_wallet();
+        let alice = gen_addr(&mut crypto_a);
+        let mut crypto_b = pq_wallet();
+        let bob = gen_addr(&mut crypto_b);
+
+        let mut l = Ledger::new();
+        l.mine_tx(&alice, 100 * MICRO, 0.0);
+        l.seal_block(&alice, 0.0);
+        for k in 0..3u64 {
+            let t = l
+                .build_signed_tx_at(&alice, &bob, MICRO, TxType::Transfer, &crypto_a,
+                    format!("2026-03-01T00:00:0{k}Z"), false)
+                .unwrap();
+            l.replay_remote_tx(t);
+        }
+        l.seal_block_at(&alice, 0.0, "2027-03-01T00:01:00Z".into());
+
+        // Instantané volontairement amnésique (comme une base fraîche).
+        let mut snap = l.snapshot();
+        snap.account_nonces.clear();
+        let restored = Ledger::restore(snap);
+        assert_eq!(
+            restored.get_nonce(&alice), 3,
+            "C-01 : le nonce est re-dérivé de la chaîne, pas cru sur parole"
+        );
+    }
+
+    /// **C-02 — le timestamp d'un bloc est enfin validé.** Il ne l'était nulle
+    /// part : ni parsabilité, ni monotonie. Le champ entre pourtant dans le hash
+    /// du bloc, donc dans le départage de fork.
+    ///
+    /// La borne de non-recul est celle de BLOCK-TIME-2 — la **médiane** des 11
+    /// derniers blocs, et non le seul parent, parce que comparer au parent créait
+    /// un cliquet (cf. `blocktime2_a_single_far_future_block_cannot_freeze_the_chain`).
+    /// Ici la chaîne est courte, donc la médiane vaut le timestamp du parent et
+    /// les trois cas restent exactement ceux du constat d'origine.
+    #[test]
+    fn c02_block_timestamp_must_parse_and_never_go_backwards() {
+        let mut l = Ledger::new();
+        let miner = "a".repeat(64);
+        l.mine_tx(&miner, MICRO, 0.0);
+        let tip = l.seal_block_at(&miner, 0.0, "2027-01-01T00:00:00+00:00".into());
+
+        // (1) illisible
+        let junk = Ledger::forge_block_at(tip.index + 1, &tip.hash, "pas-une-date", &miner, vec![]);
+        let e = l.integrate_remote_block(junk).expect_err("timestamp illisible");
+        assert!(e.contains("non parsable"), "got: {e}");
+
+        // (2) antérieur au parent
+        let back = Ledger::forge_block_at(
+            tip.index + 1, &tip.hash, "2026-12-31T23:59:59+00:00", &miner, vec![],
+        );
+        let e = l.integrate_remote_block(back).expect_err("le temps ne recule pas");
+        assert!(e.contains("BLOCK-TIME-2"), "got: {e}");
+
+        // (3) égal au parent : autorisé (deux blocs dans la même seconde).
+        let same = Ledger::forge_block_at(
+            tip.index + 1, &tip.hash, &tip.timestamp, &miner, vec![],
+        );
+        assert_eq!(l.integrate_remote_block(same), Ok(true), "l'égalité stricte reste licite");
+    }
+
+    /// **H-07 — la somme d'émission d'un bloc ne peut plus déborder.** En debug
+    /// c'était une PANIQUE dans `validate_remote_block` : la boucle de dispatch
+    /// n'étant jamais relancée, un seul message rendait le nœud sourd à tout
+    /// gossip, définitivement. En release, la somme s'enroulait.
+    #[test]
+    fn h07_overflowing_block_emission_is_a_rejection_not_a_panic() {
+        let mut l = Ledger::new();
+        let miner = "a".repeat(64);
+        l.mine_tx(&miner, MICRO, 0.0);
+        let tip = l.seal_block_at(&miner, 0.0, "2027-01-01T00:00:00+00:00".into());
+
+        // Deux coinbases dont la somme déborde u64 (bénéficiaires distincts, donc
+        // la règle EMIT-1 « une par bénéficiaire » ne les attrape pas).
+        let mut a = l.build_unsigned_tx("NETWORK", &"b".repeat(64), u64::MAX, TxType::Mining);
+        let mut b = l.build_unsigned_tx("NETWORK", &"c".repeat(64), 2, TxType::Mining);
+        a.timestamp = "2027-01-01T00:00:01+00:00".into();
+        b.timestamp = "2027-01-01T00:00:01+00:00".into();
+        let block = Ledger::forge_block_at(
+            tip.index + 1, &tip.hash, "2027-01-01T00:00:01+00:00", &miner, vec![a, b],
+        );
+        // Le point du test : ceci RETOURNE, en debug comme en release.
+        let e = Ledger::validate_block_emission_against(&block, 0)
+            .expect_err("H-07 : le débordement est un rejet, pas une panique");
+        assert!(e.contains("déborde"), "got: {e}");
+    }
+
+    /// **Étape 4 de l'audit — un bloc a désormais une taille maximale.** Rien ne
+    /// bornait le nombre de transactions : un pair pouvait faire payer à chaque
+    /// nœud une vérification ML-DSA-65 par transaction, sans limite.
+    #[test]
+    fn blocksize1_a_block_over_the_tx_cap_is_rejected_before_any_signature_check() {
+        let mut l = Ledger::new();
+        let miner = "a".repeat(64);
+        l.mine_tx(&miner, MICRO, 0.0);
+        let tip = l.seal_block_at(&miner, 0.0, "2027-01-01T00:00:00+00:00".into());
+
+        // Des transactions volontairement INVALIDES : si elles étaient vérifiées,
+        // le test passerait pour la mauvaise raison. La borne de taille doit
+        // trancher avant.
+        let bloat: Vec<Transaction> = (0..=MAX_TXS_PER_BLOCK)
+            .map(|k| Transaction {
+                id: format!("bloat_{k}"),
+                from: "d".repeat(64),
+                to: "e".repeat(64),
+                amount: 1,
+                tx_type: TxType::Transfer,
+                timestamp: "2027-01-01T00:00:01+00:00".into(),
+                signature: String::new(),
+                hash: String::new(),
+                nonce: 0,
+                pq_signature: None,
+                pq_public_key: None,
+                fault_proof: None,
+                slash_unbonding: None,
+            })
+            .collect();
+        let block = Ledger::forge_block_at(
+            tip.index + 1, &tip.hash, "2027-01-01T00:00:01+00:00", &miner, bloat,
+        );
+        let e = l.integrate_remote_block(block).expect_err("bloc au-dessus du plafond");
+        assert!(e.contains("BLOCK-SIZE-1"), "rejeté sur la taille, got: {e}");
+    }
+
+    /// **H-05 (CHAIN-ID-1) — deux réseaux, deux signatures.**
+    ///
+    /// La préimage signée d'une transaction ne nommait aucun réseau. Une
+    /// transaction (et, plus grave, un vote de finalité) était donc valide sur
+    /// toute chaîne Quanta partageant les mêmes clés — d'où un slash de 100 % de
+    /// l'enjeu d'un validateur parfaitement honnête, pour avoir voté sur deux
+    /// réseaux. Le test épingle l'ancrage : la préimage contient le chain-id.
+    #[test]
+    fn h05_the_signing_preimage_names_the_chain() {
+        let pre = Ledger::tx_signing_preimage(
+            "tx_1", "alice", "bob", 1, "2027-01-01T00:00:00Z", &TxType::Transfer, 0, "pk",
+        );
+        let needle = crate::CHAIN_ID.as_bytes();
+        assert!(
+            pre.windows(needle.len()).any(|w| w == needle),
+            "H-05 : la préimage doit lier l'identifiant de réseau"
+        );
+        // Et le vote de finalité, qui est le chemin réellement exploité.
+        let cp = |h: u64| crate::sm::finality::Checkpoint {
+            epoch: h / 4,
+            height: h,
+            hash: format!("h{h}"),
+        };
+        let vote = crate::sm::finality_vote::Vote {
+            source: cp(0),
+            target: cp(4),
+            voting_epoch: 1,
+            validator: "v".into(),
+            signature: Vec::new(),
+        };
+        let vb = vote.signable_bytes();
+        assert!(
+            vb.windows(needle.len()).any(|w| w == needle),
+            "H-05 : le vote de finalité doit lier l'identifiant de réseau"
+        );
+    }
+
+    /// **HAUT-1 (MSIG-BOUND-1) — une politique multisig est bornée AVANT toute
+    /// vérification.**
+    ///
+    /// `verify_multisig` faisait `K × S` vérifications ML-DSA-65 sans borner ni
+    /// `K` ni `S`, tous deux désérialisés du JSON attaquant, et `any()` ne
+    /// court-circuite jamais sur des signatures invalides : ~967 000
+    /// vérifications, soit ~135 s de CPU, pour un seul message.
+    #[test]
+    fn haut1_an_oversized_multisig_policy_is_refused_without_verifying_anything() {
+        // Une politique volontairement absurde. Le test mesure aussi le temps :
+        // si la borne sautait, ce test deviendrait interminable au lieu d'échouer,
+        // ce qui est précisément la forme que prend cette vulnérabilité.
+        let keys: Vec<String> = (0..MAX_MSIG_KEYS + 1).map(|k| format!("{k:0>3904}")).collect();
+        let sigs: Vec<String> = (0..MAX_MSIG_KEYS + 1).map(|k| format!("{k:0>6618}")).collect();
+        let auth = MultisigAuth { pubkeys: keys, threshold: 1, signatures: sigs };
+        let tx = Transaction {
+            id: "tx_msig".into(),
+            from: "f".repeat(64),
+            to: "t".repeat(64),
+            amount: 1,
+            tx_type: TxType::Transfer,
+            timestamp: "2027-01-01T00:00:00Z".into(),
+            signature: String::new(),
+            hash: String::new(),
+            nonce: 0,
+            pq_signature: Some(serde_json::to_string(&auth).unwrap()),
+            pq_public_key: Some("msig1".into()),
+            fault_proof: None,
+            slash_unbonding: None,
+        };
+        let t0 = std::time::Instant::now();
+        assert!(!Ledger::verify_tx(&tx).unwrap(), "politique hors bornes ⇒ refus");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(500),
+            "HAUT-1 : le refus doit être immédiat — aucune vérification ML-DSA ne doit \
+             avoir lieu avant la borne (mesuré : {:?})",
+            t0.elapsed()
+        );
     }

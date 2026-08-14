@@ -5,6 +5,11 @@ on:
   issue_comment:
     types: [created]
 
+# AUDIT SC-01/SC-10 — aucun droit par defaut au niveau du workflow : ce workflow
+# tourne dans le contexte du depot de base avec les secrets, sur du contenu
+# controle par l'exterieur. Chaque job doit declarer ses droits explicitement.
+permissions: {}
+
 jobs:
   review:
     # AUDIT-2026-07-25 — `issue_comment` runs in the BASE repo context, with the
@@ -26,7 +31,10 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      # AUDIT SC-01 — actions epinglees par SHA de commit complet : ce job recoit
+      # ANTHROPIC_API_KEY et des droits d'ecriture sur les PR/issues ; un tag
+      # mutable repointe en amont s'executerait avec ces droits.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       # The review needs the ANTHROPIC_API_KEY repo secret. When it is absent,
@@ -44,7 +52,7 @@ jobs:
           fi
       - name: Claude Code Review
         if: steps.key.outputs.present == 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Sonnet pour les reviews de routine (rapide + économique)

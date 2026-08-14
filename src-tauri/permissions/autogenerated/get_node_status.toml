@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-node-status"
+description = "Enables the get_node_status command without any pre-configured scope."
+commands.allow = ["get_node_status"]
+
+[[permission]]
+identifier = "deny-get-node-status"
+description = "Denies the get_node_status command without any pre-configured scope."
+commands.deny = ["get_node_status"]

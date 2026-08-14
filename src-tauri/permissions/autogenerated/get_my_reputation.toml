@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-my-reputation"
+description = "Enables the get_my_reputation command without any pre-configured scope."
+commands.allow = ["get_my_reputation"]
+
+[[permission]]
+identifier = "deny-get-my-reputation"
+description = "Denies the get_my_reputation command without any pre-configured scope."
+commands.deny = ["get_my_reputation"]

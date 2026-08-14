@@ -87,6 +87,13 @@ impl Vote {
     pub fn signable_bytes(&self) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(VOTE_DOMAIN);
+        // **H-05 (CHAIN-ID-1)** — le vote nomme son réseau. Sans cela, deux votes
+        // honnêtes émis par la même clé sur deux réseaux Quanta se lisaient comme
+        // une équivocation : `detect_fault` renvoyait `DoubleVote`, `verify_proof`
+        // passait, et le validateur honnête perdait 100 % de son enjeu. Le
+        // séparateur de domaine seul ne suffisait pas — il distingue les *usages*
+        // d'une clé, pas les *chaînes*.
+        push_bytes(&mut b, crate::CHAIN_ID.as_bytes());
         push_checkpoint(&mut b, &self.source);
         push_checkpoint(&mut b, &self.target);
         b.extend_from_slice(&self.voting_epoch.to_le_bytes());

@@ -34,6 +34,13 @@ pub fn spawn_outgoing_drain(state: Arc<AppState>) {
                 }
                 msg = rx.recv() => {
                     let Some(env) = msg else { break; };
+                    // **R12 (AUDIT-2026-08-13)** — la place occupée dans la file est
+                    // rendue ICI, au dépilage, et non après l'émission réseau : la
+                    // borne de `dispatcher::broadcast` compte ce qui attend en
+                    // mémoire, pas ce qui est en vol. La rendre plus tard ferait
+                    // dépendre le plafond de la latence du lien, c'est-à-dire
+                    // exactement de ce que l'attaquant cherche à dégrader.
+                    state.node.gossip.write().await.note_egress_drained(&env.payload);
                     let bytes = serde_json::to_vec(&env).unwrap_or_default();
                     let len = bytes.len();
                     let topic_sender = state.node.gossip_topic_sender.read().await.clone();

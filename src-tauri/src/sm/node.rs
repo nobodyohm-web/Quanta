@@ -848,7 +848,7 @@ mod tests {
 
         // Wrap the tx in a freshly-signed gossip envelope (sender's key).
         let msg = GossipMessage::BroadcastTx { tx_json };
-        let timestamp = "2026-03-01T12:00:00+00:00".to_string();
+        let timestamp = "2027-03-01T12:00:00+00:00".to_string();
         let nonce = 0_u64;
         let signable = GossipRouter::signable_envelope_bytes(&sender, nonce, &timestamp, &msg);
         let sig = crypto.sign_pq_det(&signable).unwrap();
@@ -1852,7 +1852,7 @@ mod tests {
             reputation: 0,
         }];
         // Just after genesis → small elapsed → no fallback / after-timeout path.
-        let genesis_secs = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
+        let genesis_secs = chrono::DateTime::parse_from_rfc3339("2027-01-01T00:00:00+00:00")
             .unwrap()
             .timestamp() as u64;
         let now_ms = (genesis_secs + 5) * 1_000;

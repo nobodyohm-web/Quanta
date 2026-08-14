@@ -1,0 +1,35 @@
+# AUDIT SC-01 — corollaire obligatoire de l'epinglage par SHA : un SHA fige ne
+# recoit plus les correctifs amont. Dependabot ouvre la PR de bump (SHA + tag en
+# commentaire) pour que la mise a jour soit une decision revue, jamais un
+# glissement silencieux de tag mutable.
+version: 2
+updates:
+  # Actions GitHub : elles s'executent avec les secrets du depot, dont la cle de
+  # signature updater sur le workflow de release. Priorite la plus haute.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci"
+
+  # Crates Rust : la porte cargo-deny/cargo-audit signale les advisories, ce flux
+  # fournit le correctif. Le manifeste vit dans src-tauri/.
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+
+  # Chaine de build npm (SC-08) : elle tourne sur la machine qui detient la cle
+  # de signature, une dependance de build compromise y est critique.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"

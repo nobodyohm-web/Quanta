@@ -6,7 +6,7 @@
   import {
     getNodeMode, getReceiveAddress, getDisplayName, setDisplayName,
     biometricStatus, enableBiometricUnlock, disableBiometricUnlock,
-    unlockIdentity, getRecoveryKey,
+    getRecoveryPhrase,
   } from "./api";
   import { myReputation, myUsername, myConnectionCode, finalityStatus, walletOverview } from "./stores.svelte";
 
@@ -100,8 +100,15 @@
     if (!recoveryPass.trim()) { recoveryErr = t('pf.recoveryErr.required'); return; }
     revealing = true;
     try {
-      await unlockIdentity(recoveryPass);   // re-vérifie le mot de passe
-      recoveryPhrase = await getRecoveryKey();
+      // A2 (audit 2026-08-13) : la vérification du mot de passe se fait DANS la
+      // commande Rust, pas ici. L'ancien enchaînement `unlockIdentity()` puis
+      // `getRecoveryKey()` laissait la seconde commande sans aucune exigence — un
+      // appel `invoke` direct sautait la première.
+      //
+      // Et ce n'était pas la bonne clé : `getRecoveryKey` exporte la graine
+      // Ed25519 de *transport*, qui ne récupère AUCUN fonds. Le secret qui
+      // restaure le portefeuille est la phrase BIP39 de la graine ML-DSA.
+      recoveryPhrase = await getRecoveryPhrase(recoveryPass);
       recoveryPass = "";
     } catch (e) {
       recoveryErr = translateError(e, t('pf.recoveryErr.invalid'));

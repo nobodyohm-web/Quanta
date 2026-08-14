@@ -1919,7 +1919,7 @@ fn emit_1_emission_invariant_has_teeth() {
     let m1 = o.mine_tx(&pk, 5 * MICRO, 0.0);
     let m2 = o.mine_tx(&pk, 5 * MICRO, 0.0);
     let genesis_hash = o.block_at(0).unwrap().hash.clone();
-    let bad = Ledger::forge_block_at(1, &genesis_hash, "2026-01-01T00:00:00+00:00", &pk, vec![m1, m2]);
+    let bad = Ledger::forge_block_at(1, &genesis_hash, "2027-01-01T00:00:00+00:00", &pk, vec![m1, m2]);
     sim.node_mut(&n).ledger_mut().chain.push(bad);
 
     match sim.check_invariants() {
@@ -1960,7 +1960,7 @@ fn forkcap_emission_amount_invariant_has_teeth() {
     let evil = o.mine_tx(&pk, 1_000_000 * MICRO, 0.0);
     let genesis_hash = o.block_at(0).unwrap().hash.clone();
     let bad =
-        Ledger::forge_block_at(1, &genesis_hash, "2026-01-01T00:00:00+00:00", &pk, vec![evil]);
+        Ledger::forge_block_at(1, &genesis_hash, "2027-01-01T00:00:00+00:00", &pk, vec![evil]);
     sim.node_mut(&n).ledger_mut().chain.push(bad);
 
     match sim.check_invariants() {

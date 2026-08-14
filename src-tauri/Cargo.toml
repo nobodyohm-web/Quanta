@@ -1,6 +1,6 @@
 [package]
 name = "quanta-protocol"
-version = "3.15.1"
+version = "3.16.0"
 # Two binaries live in this package: the Tauri desktop app (`quanta-protocol`,
 # from src/main.rs) and the headless daemon (`quanta-node`, src/bin/quanta-node.rs).
 # `default-run` tells a bare `cargo run` (used by `tauri dev`) which one to launch,
@@ -162,3 +162,12 @@ objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
 
 [dev-dependencies]
 proptest = "1"     # Property-based testing for invariants (Shapley, ledger overflow)
+
+# ─── AUDIT SC-07 — arithmétique du binaire livré ───
+[profile.release]
+# Cargo met `overflow-checks = false` en release et `true` en dev : `cargo test`
+# compilant en dev, les tests valident une arithmétique DIFFÉRENTE de celle du
+# binaire distribué. Pour une monnaie en u64 µQTA, un dépassement doit arrêter
+# net le processus plutôt que wrapper en silence sur un solde faux — l'invariant
+# de conservation ne vaut que s'il tient aussi en release. Coût : 1–3 % CPU.
+overflow-checks = true

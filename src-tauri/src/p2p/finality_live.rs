@@ -273,7 +273,12 @@ impl FinalityTracker {
     /// A vote that fails verification (forged signature, non-validator,
     /// malformed link) changes **nothing** — `accepted == false`.
     pub fn ingest_vote(&mut self, vote: Vote, ledger: &Ledger) -> IngestOutcome {
-        let stakes = ledger.validator_stakes_by_pubkey();
+        // **H-06 (AUDIT-2026-08-13)** — l'ensemble d'enjeu est figé à la frontière
+        // de l'époque VISÉE par le vote, pas lu à l'instant de l'ingestion. Sans
+        // ça, le même certificat inchangé finalisait ou non selon qui s'était
+        // désengagé entre-temps : finalisation rétroactive d'un côté, perte de
+        // finalité de l'autre. Voir `epoch_validator_stakes_by_pubkey`.
+        let stakes = ledger.epoch_validator_stakes_by_pubkey(vote.target.epoch, self.epoch_len);
         // GADGET-2 gate: only a well-formed, staked, correctly-signed vote counts.
         if !vote.verify(&stakes, self.epoch_len) {
             return IngestOutcome::default();
@@ -566,12 +571,12 @@ mod tests {
         let mut ledger = Ledger::genesis_with_allocation(&alloc);
         for ((crypto, stake), addr) in validators.iter().zip(&addrs) {
             ledger
-                .stake_tx_at(addr, *stake, crypto, "2026-07-01T00:00:00+00:00".into(), true)
+                .stake_tx_at(addr, *stake, crypto, "2027-07-01T00:00:00+00:00".into(), true)
                 .expect("stake tx");
         }
         // Seal the stakes into block 1 (miner = first validator's address).
         ledger
-            .seal_if_pending_at(&addrs[0], 0.0, "2026-07-01T00:01:00+00:00".to_string())
+            .seal_if_pending_at(&addrs[0], 0.0, "2027-07-01T00:01:00+00:00".to_string())
             .expect("seal block with stakes");
         ledger
     }
@@ -652,7 +657,7 @@ mod tests {
         // tree, i.e. the incremental path folds in exactly what the full walk would.
         ledger.mine_tx(&addr, MICRO, 0.0);
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:00:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-25T00:00:00+00:00".into())
             .expect("seal one more block");
         tracker.observe_chain(&ledger);
         assert_eq!(
@@ -689,7 +694,7 @@ mod tests {
         let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
         let tx = ledger.queue_slash(&proof).expect("a bonded offender is slashable");
         assert_eq!(tx.amount, 5 * MICRO, "the slash destroys the full bonded stake (ADR-009)");
-        let block = ledger.seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into())
+        let block = ledger.seal_if_pending_at(&addr, 0.0, "2027-07-12T00:00:00+00:00".into())
             .expect("seal the slash block");
         assert!(
             block.transactions.iter().any(|t| t.tx_type == crate::p2p::ledger::TxType::Slash),
@@ -860,7 +865,7 @@ mod tests {
         let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
         let addr = a.pq_address_hex().unwrap();
         ledger.queue_slash(&double_vote_proof(&a, ledger.genesis_hash().as_str())).unwrap();
-        ledger.seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into()).unwrap();
+        ledger.seal_if_pending_at(&addr, 0.0, "2027-07-12T00:00:00+00:00".into()).unwrap();
 
         let live_staked = ledger.staked_of(&addr);
         let live_spendable = ledger.balance_of(&addr);
@@ -1013,7 +1018,7 @@ mod tests {
 
         // And sealing applies it once — conservation intact end to end.
         let addr = a.pq_address_hex().unwrap();
-        ledger.seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into()).unwrap();
+        ledger.seal_if_pending_at(&addr, 0.0, "2027-07-12T00:00:00+00:00".into()).unwrap();
         assert_eq!(ledger.staked_of(&addr), 0, "offender slashed once");
         assert!(conserves(&ledger), "conserves after seal");
     }
@@ -1048,7 +1053,7 @@ mod tests {
 
         // And it still seals — slashing is operative end to end.
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-12T00:00:00+00:00".into())
             .expect("seal after the late prune");
         assert_eq!(ledger.staked_of(&addr), 0, "the slash still seals after a late prune");
         assert!(conserves(&ledger), "conserves end to end");
@@ -1071,7 +1076,7 @@ mod tests {
         let p1 = double_vote_proof(&o, sealer.genesis_hash().as_str());
         sealer.queue_slash(&p1).expect("p1 queued on the sealer");
         let slash_block = sealer
-            .seal_if_pending_at(&addr, 0.0, "2026-07-12T00:00:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-12T00:00:00+00:00".into())
             .expect("sealer seals the slash block");
         assert!(
             slash_block
@@ -1128,7 +1133,7 @@ mod tests {
         let loser = Ledger::forge_block_at(
             2,
             &b1_hash,
-            "2026-07-12T00:00:00+00:00",
+            "2027-07-12T00:00:00+00:00",
             &addr,
             vec![loser_reward, slash_tx],
         );
@@ -1145,7 +1150,7 @@ mod tests {
         let winner = Ledger::forge_block_at(
             2,
             &b1_hash,
-            "2026-07-12T00:00:00+00:00",
+            "2027-07-12T00:00:00+00:00",
             &addr,
             vec![winner_reward],
         );
@@ -1185,10 +1190,10 @@ mod tests {
         let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
         let addr = a.pq_address_hex().unwrap();
         ledger
-            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2027-07-13T00:00:00+00:00".into(), true)
             .expect("full unstake");
         let unstake_block = ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:01:00+00:00".into())
             .expect("seal the unstake");
         assert_eq!(ledger.staked_of(&addr), 0, "fully unbonded — the pre-3B blind spot");
         assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "coins in flight");
@@ -1211,7 +1216,7 @@ mod tests {
 
         let burned_before = ledger.total_burned();
         let slash_block = ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:02:00+00:00".into())
             .expect("seal the slash");
         assert_eq!(ledger.unbonding_of(&addr), 0, "the in-flight coins are DESTROYED");
         assert_eq!(ledger.staked_of(&addr), 0);
@@ -1239,7 +1244,7 @@ mod tests {
         // tip index is 2 — a boundary for epoch_len = 2.
         ledger.mine_tx(&addr, MICRO, 0.0);
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:05:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-25T00:05:00+00:00".into())
             .expect("seal to reach the boundary");
         let tracker = FinalityTracker::with_epoch_len(ledger.genesis_hash(), 2);
         (ledger, a, tracker)
@@ -1317,17 +1322,17 @@ mod tests {
         let addr = a.pq_address_hex().unwrap();
 
         ledger
-            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-25T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2027-07-25T00:00:00+00:00".into(), true)
             .expect("full unstake");
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-25T00:01:00+00:00".into())
             .expect("seal the unstake");
         assert_eq!(ledger.unbonding_of(&addr), 5 * MICRO, "coins in flight");
 
         let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
         ledger.queue_slash(&proof).expect("an unbonding offender is slashable");
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-25T00:02:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-25T00:02:00+00:00".into())
             .expect("seal the slash");
         assert_eq!(ledger.unbonding_of(&addr), 0, "the chain destroyed the entry");
         assert_eq!(ledger.pending_count(), 0, "cache is chain-only");
@@ -1359,10 +1364,10 @@ mod tests {
         let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
         let addr = a.pq_address_hex().unwrap();
         ledger
-            .unstake_tx_at(&addr, 2 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 2 * MICRO, &a, "2027-07-13T00:00:00+00:00".into(), true)
             .expect("partial unstake");
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:01:00+00:00".into())
             .expect("seal the unstake");
         assert_eq!(ledger.staked_of(&addr), 3 * MICRO);
         assert_eq!(ledger.unbonding_of(&addr), 2 * MICRO);
@@ -1375,7 +1380,7 @@ mod tests {
         assert_eq!(carried[0].amount, 2 * MICRO, "exactly the unbonding part");
 
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:02:00+00:00".into())
             .expect("seal the slash");
         assert_eq!(ledger.staked_of(&addr), 0, "bonded destroyed");
         assert_eq!(ledger.unbonding_of(&addr), 0, "unbonding destroyed");
@@ -1395,10 +1400,10 @@ mod tests {
         let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
         let addr = a.pq_address_hex().unwrap();
         ledger
-            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2027-07-13T00:00:00+00:00".into(), true)
             .expect("unstake");
         let unstake_block = ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:01:00+00:00".into())
             .expect("seal unstake");
         let unlock = unstake_block.index + UNBONDING_PERIOD_BLOCKS;
         let spendable_before = ledger.balance_of(&addr);
@@ -1407,7 +1412,7 @@ mod tests {
         let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
         ledger.queue_slash(&proof).expect("queued");
         let slash_block = ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:02:00+00:00".into())
             .expect("seal slash");
         assert_eq!(ledger.unbonding_of(&addr), 0, "entry consumed on this branch");
         assert_eq!(ledger.total_burned(), 5 * MICRO);
@@ -1416,7 +1421,7 @@ mod tests {
         let winner = Ledger::forge_block_at(
             slash_block.index,
             &unstake_block.hash,
-            "2026-07-13T00:02:30+00:00",
+            "2027-07-13T00:02:30+00:00",
             &addr,
             vec![],
         );
@@ -1455,10 +1460,10 @@ mod tests {
         let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
         let addr = a.pq_address_hex().unwrap();
         ledger
-            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2027-07-13T00:00:00+00:00".into(), true)
             .expect("unstake");
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:01:00+00:00".into())
             .expect("seal unstake");
         let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
         let good = ledger.build_slash_tx(&proof).expect("valid slash");
@@ -1509,10 +1514,10 @@ mod tests {
         let mut ledger = staked_ledger(&[(&a, 5 * MICRO)]);
         let addr = a.pq_address_hex().unwrap();
         ledger
-            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2027-07-13T00:00:00+00:00".into(), true)
             .expect("unstake");
         let unstake_block = ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:01:00+00:00".into())
             .expect("seal unstake");
         let proof = double_vote_proof(&a, ledger.genesis_hash().as_str());
         ledger.queue_slash(&proof).expect("queued while unbonding");
@@ -1527,7 +1532,7 @@ mod tests {
         // (the proof arrived after the withdrawal completed).
         let burned_genesis = 0u64;
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:02:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:02:00+00:00".into())
             .expect("seal");
         assert_eq!(ledger.pending_slash_count_for_test(), 0, "stale slash gone");
         assert_eq!(ledger.total_burned(), burned_genesis, "nothing burned");
@@ -1550,10 +1555,10 @@ mod tests {
         let addr = a.pq_address_hex().unwrap();
         let pk = a.pq_identity_hex().unwrap();
         ledger
-            .unstake_tx_at(&addr, 5 * MICRO, &a, "2026-07-13T00:00:00+00:00".into(), true)
+            .unstake_tx_at(&addr, 5 * MICRO, &a, "2027-07-13T00:00:00+00:00".into(), true)
             .expect("unstake");
         ledger
-            .seal_if_pending_at(&addr, 0.0, "2026-07-13T00:01:00+00:00".into())
+            .seal_if_pending_at(&addr, 0.0, "2027-07-13T00:01:00+00:00".into())
             .expect("seal unstake");
 
         assert_eq!(

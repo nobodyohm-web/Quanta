@@ -32,6 +32,9 @@
   let sendAmount = $state("");
   let sendBusy = $state(false);
   let preview = $state<null | { toLabel: string; to: string; amount: number; net: number; burn: number; balanceAfter: number }>(null);
+  // BAS-1 — vrai quand le destinataire a été saisi en hexadécimal nu (sans somme
+  // de contrôle). Remis à zéro à chaque préparation d'aperçu.
+  let rawHex = $state(false);
   let preparing = $state(false);
 
   // Pré-remplissage par l'intent inter-vue (Contacts « Envoyer » → single send
@@ -76,6 +79,7 @@
       }
       let to = parsed.to;
       let label = shortAddr(to);
+      rawHex = false;
       if (!isAddress(to)) {
         const uname = to.replace(/^@/, "");
         const resolved = await resolveUsername(uname);
@@ -92,6 +96,14 @@
           onFeedback({ ok: false, msg: t("wallet.err.badRecipient") });
           return;
         }
+      } else {
+        // BAS-1 — hexadécimal nu : aucune somme de contrôle. Un caractère faux
+        // reste 64 caractères hexadécimaux parfaitement valides, donc rien, nulle
+        // part, ne peut détecter la faute — les fonds partiraient vers une adresse
+        // qui n'appartient à personne. On ne bloque pas (une adresse résolue depuis
+        // un `@pseudo` ou lue sur la chaîne est légitime), on le DIT, à l'écran où
+        // la décision se prend.
+        rawHex = true;
       }
       const { net, burn } = splitTransfer(amt);
       const bal = ov?.spendable ?? 0;
@@ -146,6 +158,19 @@
     <div class="s-tray">
       <div class="s-tray-title">{t('wallet.send.verifyBeforeSign')}</div>
       <div class="st-row"><span class="st-k">{t('wallet.send.recipient')}</span><span class="st-v">{preview.toLabel}</span></div>
+      <!--
+        A11 (audit 2026-08-13) — l'écran de confirmation n'affichait QUE le libellé
+        (`@bob`) et jamais l'adresse résolue. Sur le chemin `@pseudo`, un
+        détournement du registre de pseudos (R2) était donc totalement invisible :
+        l'utilisateur relisait « @bob », signait, et les fonds partaient chez le
+        voleur. L'adresse réellement signée est désormais montrée telle quelle —
+        c'est le seul élément que l'écran ait à vérifier, puisque c'est le seul que
+        la transaction porte.
+      -->
+      <div class="st-row"><span class="st-k">{t('wallet.send.recipientAddress')}</span><span class="st-v mono st-addr">{preview.to}</span></div>
+      {#if rawHex}
+        <div class="st-warn">{t('wallet.send.rawHexWarning')}</div>
+      {/if}
       <div class="st-row"><span class="st-k">{t('wallet.send.youSend')}</span><span class="st-v mono">{fmtQ(preview.amount)} {TICKER}</span></div>
       <div class="st-row"><span class="st-k">{t('wallet.send.recipientGets')}</span><span class="st-v mono recv">{fmtQ(preview.net)} {TICKER}</span></div>
       <div class="st-row"><span class="st-k">{t('wallet.send.burned')} <span class="st-pill">{t('wallet.send.deflationary')}</span></span><span class="st-v mono burn">−{fmtQ(preview.burn)} {TICKER}</span></div>
@@ -164,6 +189,20 @@
   .w-panel { margin-bottom: var(--space-3); animation: fadeIn 0.15s ease-out; }
   .w-panel .section-label { margin-bottom: var(--space-4); }
   .w-field-hint { font-size: var(--text-xs); color: var(--color-text-3); margin-top: var(--space-1); line-height: 1.45; }
+
+  /* A11 — l'adresse signée, lisible en entier : elle doit pouvoir être comparée
+     caractère par caractère, donc elle passe à la ligne au lieu d'être tronquée. */
+  .st-warn {
+    margin: 4px 0 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #b45309;
+    background: rgba(180, 83, 9, 0.09);
+    border: 1px solid rgba(180, 83, 9, 0.22);
+  }
+  .st-addr { font-size: var(--text-xs); word-break: break-all; text-align: right; max-width: 60%; }
 
   /* Titre de l'écran de confirmation (« vérifie avant de signer ») — ton sobre
      voulu : même hiérarchie que .section-label mais SANS majuscules forcées. */

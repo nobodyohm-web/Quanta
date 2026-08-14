@@ -112,7 +112,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// tx `Mining` ordinaires.
 ///
 /// La genèse est intacte ; c'est la surface de validation qui diverge, d'où le bump.
-pub const TORUS_PROTOCOL_VERSION: u8 = 9;
+///
+/// **9→10 (CANON-1 + NONCE-ONCHAIN-1, audit externe 2026-08-13) — rupture assumée.**
+/// Deux changements, chacun suffisant à casser la compatibilité :
+///
+/// - **CANON-1 (CRIT-1/MOY-1)** — la préimage signée d'une transaction, la feuille
+///   Merkle et l'en-tête de bloc étaient des `format!` joints par `:`/`|` sur des
+///   champs libres de contenir ces séparateurs : **aucun des trois n'était
+///   injectif**. Deux transactions sémantiquement différentes pouvaient partager
+///   préimage, signature ET `tx.hash` — deux nœuds tenant la même chaîne, les
+///   mêmes hashs de bloc, et des soldes différents. Les trois passent au modèle
+///   déjà correct de `sm/finality_vote.rs` : séparateur de domaine + champs
+///   préfixés en longueur. **Toute signature et tout hash changent, genèse
+///   comprise.**
+/// - **NONCE-ONCHAIN-1 (C-01)** — l'unicité d'une transaction n'avait aucune règle
+///   on-chain : `seen_tx_hashes` ne gardait que l'admission mempool, et le chemin
+///   bloc y insérait sans lire le retour. Une même transaction signée une fois
+///   était incluse autant de fois que le solde de la victime le permettait. Le
+///   nonce de compte est désormais **séquentiel et vérifié à l'inclusion** sur les
+///   quatre chemins d'admission. Un nœud v9 accepte des blocs qu'un v10 rejette.
+///
+/// v9 et v10 ne peuvent pas converger : l'échange est refusé au `Hello`.
+pub const TORUS_PROTOCOL_VERSION: u8 = 10;
 
 // ─── Messages gossip ────────────────────────────────────────────────────────
 
@@ -302,12 +323,24 @@ pub fn compress_blocks(blocks: &[String]) -> Option<Vec<u8>> {
     enc.finish().ok()
 }
 
-/// NET-8: Decompress a gzipped `blocks_json` payload. Hard cap: refuses to
-/// inflate beyond `MAX_DECOMPRESSED_BYTES` (50 MB) to defeat zip-bomb DoS.
+/// NET-8: Decompress a gzipped `blocks_json` payload.
+///
+/// **R4 (AUDIT-2026-08-13)** — la borne était de 50 Mo, et elle ne portait que
+/// sur les OCTETS. Un gzip de 47 Ko décompressait en un tableau JSON de centaines
+/// de milliers d'éléments, chacun devenant une `String` allouée : ~366 Mo de tas
+/// (×2 950) *avant* que la troncature à 50 blocs, qui arrive après le parse, ait
+/// la moindre chance de servir. Deux corrections :
+///
+/// 1. le plafond d'octets descend à [`crate::p2p::dispatcher::MAX_RAW_ENVELOPE_BYTES`]
+///    — décompresser au-delà de ce qu'une enveloppe peut légalement porter n'a
+///    aucun sens ;
+/// 2. le **nombre d'éléments** est borné à `MAX_CHAIN_SEGMENT_RECEIVED`, et ce
+///    n'est pas une troncature après coup : un tableau plus long est REFUSÉ, donc
+///    les `String` correspondantes ne sont jamais allouées.
 pub fn decompress_blocks(compressed: &[u8]) -> Result<Vec<String>, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
-    const MAX_DECOMPRESSED_BYTES: usize = 50 * 1024 * 1024;
+    const MAX_DECOMPRESSED_BYTES: usize = crate::p2p::dispatcher::MAX_RAW_ENVELOPE_BYTES;
     let mut dec = GzDecoder::new(compressed);
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -322,8 +355,18 @@ pub fn decompress_blocks(compressed: &[u8]) -> Result<Vec<String>, String> {
         }
         out.extend_from_slice(&buf[..n]);
     }
-    serde_json::from_slice::<Vec<String>>(&out)
-        .map_err(|e| format!("decompressed JSON parse: {}", e))
+    let blocks = serde_json::from_slice::<Vec<String>>(&out)
+        .map_err(|e| format!("decompressed JSON parse: {}", e))?;
+    // R4 : la cardinalité, pas seulement les octets.
+    let max = crate::p2p::dispatcher::MAX_CHAIN_SEGMENT_RECEIVED;
+    if blocks.len() > max {
+        return Err(format!(
+            "segment décompressé : {} éléments pour un maximum de {} (R4)",
+            blocks.len(),
+            max
+        ));
+    }
+    Ok(blocks)
 }
 
 /// Raison d'un signalement de pair.
@@ -335,6 +378,74 @@ pub enum ReportReason {
     TxReplay,
     RateLimitExceeded,
     Other(String),
+}
+
+// ─── R12 : bornes d'admission de la file de sortie ───────────────────────────
+
+/// **R12 (AUDIT-2026-08-13)** — classe d'un message que le dispatcher produit
+/// **en réponse** à du trafic entrant.
+///
+/// Les quatre variantes concernées (`Pong`, `ChainSegment`, `RequestChain`,
+/// `FinalityFault`) n'ont, dans tout le nœud, qu'un seul producteur :
+/// `dispatcher::broadcast`. Elles sont donc les seules dont un pair distant
+/// cadence l'émission. Tout le reste part d'une horloge locale (`Hello`, `Ping`),
+/// de la boucle de minage (`NewBlock`, `FinalityVote`) ou d'une action de
+/// l'utilisateur (`BroadcastTx`, `PublishUsername`) — un attaquant ne peut pas en
+/// accélérer la production.
+///
+/// La distinction Bulk/Light n'est pas cosmétique : un `ChainSegment` pèse jusqu'à
+/// [`crate::p2p::dispatcher::CHAIN_SEGMENT_BYTE_BUDGET`] (3 Mio) alors qu'un `Pong`
+/// pèse ~11 Ko. Une file bornée en **nombre** serait donc bornée en mémoire à
+/// deux ordres de grandeur près si les deux partageaient le même compteur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressClass {
+    /// Réponse volumineuse : un segment de chaîne.
+    Bulk,
+    /// Réponse courte : liveness, requête de chaîne, preuve de faute.
+    Light,
+}
+
+/// R12 — classe d'admission d'un message sortant, ou `None` s'il n'est pas
+/// produit en réponse à du trafic distant (voir [`EgressClass`]).
+pub fn dispatcher_egress_class(payload: &GossipMessage) -> Option<EgressClass> {
+    match payload {
+        GossipMessage::ChainSegment { .. } => Some(EgressClass::Bulk),
+        GossipMessage::Pong { .. }
+        | GossipMessage::RequestChain { .. }
+        | GossipMessage::FinalityFault { .. } => Some(EgressClass::Light),
+        _ => None,
+    }
+}
+
+/// R12 — segments de chaîne simultanément en attente d'émission. Quatre suffisent
+/// à saturer un lien pendant plusieurs secondes ; au-delà, la file ne sert plus
+/// qu'à stocker du travail périmé (le demandeur aura redemandé).
+pub const MAX_INFLIGHT_EGRESS_BULK: usize = 4;
+
+/// R12 — réponses courtes simultanément en attente d'émission. Large devant le
+/// trafic honnête (un `Pong` par pair toutes les 15 s, quatre `RequestChain` par
+/// rattrapage), étroit devant ce qu'une inondation produirait.
+pub const MAX_INFLIGHT_EGRESS_LIGHT: usize = 64;
+
+/// **R5** — délai minimal entre deux `Pong` adressés au même demandeur. Sous la
+/// cadence de `Ping` (15 s), donc invisible pour un pair honnête ; au-dessus, il
+/// rend l'amplification indépendante du débit de l'attaquant.
+pub const PONG_COOLDOWN_SECS: i64 = 12;
+
+/// R5 — demandeurs dont on mémorise la date du dernier `Pong`. Petit : seuls des
+/// pairs **connus** (donc passés par un `Hello` authentifié) y entrent.
+const MAX_PONG_TRACKED: usize = 1024;
+
+/// **R6 (AUDIT-2026-08-13)** — l'identifiant d'enveloppe à partir de la pré-image
+/// signée déjà calculée.
+///
+/// Même définition que [`GossipRouter::envelope_id`] (dont c'est désormais le
+/// corps), exposée séparément pour que le dispatcher ne re-sérialise pas le payload
+/// une seconde fois : sur le chemin d'entrée, la pré-image est déjà en main parce
+/// que la signature vient d'être vérifiée dessus. Une seule définition du digest,
+/// donc aucun risque de divergence entre producteur et vérificateur.
+pub fn envelope_id_of_signable(signable: &[u8]) -> String {
+    hex::encode(blake3::hash(signable).as_bytes())
 }
 
 // ─── Routeur gossip ─────────────────────────────────────────────────────────
@@ -369,6 +480,25 @@ pub struct GossipStats {
     /// incompatible `TORUS_PROTOCOL_VERSION`.
     #[serde(default)]
     pub dropped_incompatible: u64,
+    /// **R6 (AUDIT-2026-08-13)** — enveloppes rejetées sur la forme avant tout
+    /// décodage : `sender` ou `signature` n'ont pas la longueur d'une clé/signature
+    /// ML-DSA-65. C'est le seul compteur alimenté par du trafic non authentifié, et
+    /// c'est voulu : la mesure du bruit doit rester possible sans rien allouer.
+    #[serde(default)]
+    pub dropped_malformed: u64,
+    /// **R12** — réponses abandonnées faute de place dans la file de sortie.
+    /// Un compteur qui monte ici veut dire « le drain réseau ne suit pas » : le
+    /// nœud a préféré perdre des réponses plutôt que la mémoire.
+    #[serde(default)]
+    pub egress_dropped: u64,
+    /// **R5** — `Pong` non émis parce que le demandeur est inconnu ou qu'il en a
+    /// déjà reçu un dans la fenêtre de refroidissement.
+    #[serde(default)]
+    pub pongs_suppressed: u64,
+    /// **R5** — `ChainSegment` non émis parce qu'un autre pair est élu pour
+    /// répondre à cette requête.
+    #[serde(default)]
+    pub chain_answers_suppressed: u64,
 }
 
 /// MOD-2: Maximum number of message IDs retained for deduplication.
@@ -396,6 +526,21 @@ pub struct GossipRouter {
     /// V2 — unix second of the last stale-envelope warning. Runtime-only, never
     /// persisted: it only paces the log, `stats.dropped_stale` stays exact.
     last_stale_warn_unix: i64,
+    /// R1 — unix second of the last bad-signature warning. Same reasoning as
+    /// `last_stale_warn_unix`: this path is reached by unauthenticated traffic,
+    /// so the log must be paced while `stats.dropped_signature` stays exact.
+    last_bad_sig_warn_unix: i64,
+    /// R12 — segments de chaîne admis dans la file de sortie et pas encore
+    /// dépilés par le drain. Jamais persisté : la file est vide au démarrage.
+    egress_inflight_bulk: usize,
+    /// R12 — réponses courtes admises et pas encore dépilées.
+    egress_inflight_light: usize,
+    /// R12 — unix second du dernier avertissement de file pleine (même pacing que
+    /// les deux au-dessus : le compteur est exact, le journal est rythmé).
+    last_egress_warn_unix: i64,
+    /// R5 — date du dernier `Pong` par demandeur, clé = BLAKE3 de sa clé publique
+    /// (une clé ML-DSA fait 3 904 caractères ; H6 est exactement ce piège).
+    last_pong_unix: std::collections::HashMap<MsgId, i64>,
 }
 
 /// V4 — cap on remembered incompatible senders. Small on purpose: after a fork
@@ -417,6 +562,27 @@ impl GossipRouter {
             outgoing_nonce: AtomicU64::new(1),
             incompatible_senders: std::collections::HashSet::new(),
             last_stale_warn_unix: 0,
+            last_bad_sig_warn_unix: 0,
+            egress_inflight_bulk: 0,
+            egress_inflight_light: 0,
+            last_egress_warn_unix: 0,
+            last_pong_unix: std::collections::HashMap::new(),
+        }
+    }
+
+    /// R1 — say whether this bad-signature drop has earned a log line (at most
+    /// one per [`STALE_WARN_EVERY_SECS`]). Does **not** touch the counter: the
+    /// caller owns `stats.dropped_signature` so the count stays exact under a
+    /// flood. Verification failure is now a silent, cheap drop — it emits no
+    /// `ReportPeer` and no signature of ours, so the log line is the only
+    /// remaining per-message cost and it is paced.
+    pub fn note_bad_signature_drop(&mut self) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        if now - self.last_bad_sig_warn_unix >= STALE_WARN_EVERY_SECS {
+            self.last_bad_sig_warn_unix = now;
+            true
+        } else {
+            false
         }
     }
 
@@ -433,6 +599,122 @@ impl GossipRouter {
         } else {
             false
         }
+    }
+
+    /// **R12 (AUDIT-2026-08-13) — la file de sortie était non bornée.**
+    ///
+    /// Les quatre lanes de `gossip_priority` sont des `mpsc::unbounded_channel`, et
+    /// le commentaire du module justifiait ce choix par « la protection anti-DoS
+    /// vit au niveau du dispatcher ». Elle n'y vivait pas : `Pong`, `ChainSegment`,
+    /// `RequestChain` et `FinalityFault` sont produits **en réponse** à du trafic
+    /// distant, donc à la cadence de l'attaquant, alors que le drain
+    /// (`gossip_tasks::spawn_outgoing_drain`) émet message par message en
+    /// `await`ant le réseau. Dès que le drain descend sous le producteur, la file
+    /// grandit sans limite — ~11 Ko l'entrée pour un `Pong`, jusqu'à 3 Mio pour un
+    /// `ChainSegment`.
+    ///
+    /// La borne est posée ici, à l'**admission**, et non en rendant le canal
+    /// bloquant : bloquer le producteur bloquerait la boucle de dispatch, donc la
+    /// **lecture réseau** elle-même — on aurait échangé une bombe mémoire contre un
+    /// blocage complet du nœud sous inondation. La politique est explicite :
+    /// au-delà de la borne on **jette la réponse**, on compte
+    /// ([`GossipStats::egress_dropped`]) et on le dit (journal rythmé). Perdre un
+    /// `Pong` coûte une mesure de latence ; perdre un `ChainSegment` coûte un tour
+    /// de synchronisation, que le demandeur relance de lui-même.
+    ///
+    /// Retourne `true` si le message peut être mis en file.
+    pub fn try_admit_egress(&mut self, payload: &GossipMessage) -> bool {
+        let Some(class) = dispatcher_egress_class(payload) else {
+            // Cadence locale (Hello/Ping/NewBlock/tx utilisateur) : aucun pair
+            // distant ne peut l'accélérer, donc rien à borner ici.
+            return true;
+        };
+        let (inflight, max) = match class {
+            EgressClass::Bulk => (&mut self.egress_inflight_bulk, MAX_INFLIGHT_EGRESS_BULK),
+            EgressClass::Light => (&mut self.egress_inflight_light, MAX_INFLIGHT_EGRESS_LIGHT),
+        };
+        if *inflight >= max {
+            self.stats.egress_dropped += 1;
+            return false;
+        }
+        *inflight += 1;
+        true
+    }
+
+    /// R12 — un message vient d'être dépilé par le drain : il ne consomme plus de
+    /// place. Appelé **au moment du dépilage**, pas après l'émission réseau : la
+    /// borne compte ce qui est en file, pas ce qui est en vol.
+    pub fn note_egress_drained(&mut self, payload: &GossipMessage) {
+        self.release_egress_slot(dispatcher_egress_class(payload));
+    }
+
+    /// R12 — rendre une place réservée dont le message n'atteindra jamais la file
+    /// (échec de signature, canal fermé). Sans ce chemin la borne se refermerait
+    /// définitivement, message après message.
+    pub fn release_egress_slot(&mut self, class: Option<EgressClass>) {
+        match class {
+            Some(EgressClass::Bulk) => {
+                self.egress_inflight_bulk = self.egress_inflight_bulk.saturating_sub(1)
+            }
+            Some(EgressClass::Light) => {
+                self.egress_inflight_light = self.egress_inflight_light.saturating_sub(1)
+            }
+            None => {}
+        }
+    }
+
+    /// R12 — ce refus a-t-il mérité une ligne de journal ? Même raison que pour les
+    /// deux compteurs de rejet au-dessus : la saturation est justement l'état où le
+    /// journal ne doit pas devenir la deuxième bombe.
+    pub fn note_egress_drop_warn(&mut self) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        if now - self.last_egress_warn_unix >= STALE_WARN_EVERY_SECS {
+            self.last_egress_warn_unix = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// R12 — profondeur courante de la file de sortie (bulk, light), pour les tests
+    /// et le diagnostic.
+    pub fn egress_inflight(&self) -> (usize, usize) {
+        (self.egress_inflight_bulk, self.egress_inflight_light)
+    }
+
+    /// **R5 (AUDIT-2026-08-13)** — un `Pong` par demandeur et par
+    /// [`PONG_COOLDOWN_SECS`].
+    ///
+    /// Toute réponse part en diffusion sur le topic entier (il n'existe aucun
+    /// chemin unicast ici), donc un `Ping` reçu par N nœuds fait émettre N `Pong`
+    /// lus N fois : l'amplification est en O(N²) et son facteur est le **débit de
+    /// pings de l'attaquant**. Le refroidissement casse ce dernier lien : sous la
+    /// cadence honnête (un `Ping` toutes les 15 s), aucun `Pong` légitime n'est
+    /// perdu ; au-dessus, l'attaquant n'obtient plus rien de plus en frappant plus
+    /// vite.
+    ///
+    /// La table est bornée et **échoue fermé** quand elle est pleine : perdre un
+    /// `Pong` ne coûte qu'une mesure de latence, alors qu'une table de
+    /// refroidissement contournable coûterait l'amplification entière.
+    pub fn may_answer_ping(&mut self, sender_pk: &str, now_unix: i64) -> bool {
+        let key = hex::encode(blake3::hash(sender_pk.as_bytes()).as_bytes());
+        if let Some(&last) = self.last_pong_unix.get(&key) {
+            if now_unix - last < PONG_COOLDOWN_SECS {
+                return false;
+            }
+            self.last_pong_unix.insert(key, now_unix);
+            return true;
+        }
+        if self.last_pong_unix.len() >= MAX_PONG_TRACKED {
+            // Purge des entrées dont le refroidissement est de toute façon écoulé.
+            self.last_pong_unix
+                .retain(|_, last| now_unix - *last < PONG_COOLDOWN_SECS);
+            if self.last_pong_unix.len() >= MAX_PONG_TRACKED {
+                return false;
+            }
+        }
+        self.last_pong_unix.insert(key, now_unix);
+        true
     }
 
     /// CRIT-A: Get and increment the outgoing nonce (atomic, no &mut needed).
@@ -600,7 +882,7 @@ impl GossipRouter {
         payload: &GossipMessage,
     ) -> String {
         let full = Self::signable_envelope_bytes(sender, nonce, timestamp, payload);
-        hex::encode(blake3::hash(&full).as_bytes())
+        envelope_id_of_signable(&full)
     }
 
     pub fn signable_envelope_bytes(
@@ -615,36 +897,23 @@ impl GossipRouter {
         serde_json::to_vec(&canonical).unwrap_or_default()
     }
 
-    /// Legacy helper — returns just the payload bytes (for backward compat).
-    /// NEW CODE SHOULD USE `signable_envelope_bytes()` INSTEAD.
-    #[deprecated(note = "Use signable_envelope_bytes() for STRUCT-1 compliant signing")]
-    pub fn payload_bytes(payload: &GossipMessage) -> Vec<u8> {
-        serde_json::to_vec(payload).unwrap_or_default()
-    }
-
-    /// Phase 3 — construit une enveloppe signée prête à être broadcastée.
-    ///
-    /// STRUCT-1: The caller must sign the bytes produced by `signable_envelope_bytes()`
-    /// which covers sender + nonce + timestamp + payload.
-    ///
-    /// The `sig_bytes` MUST be the ML-DSA-65 signature (PQ-ENVELOPE-1) of `signable_envelope_bytes(sender, nonce, &timestamp, &payload)`.
-    pub fn wrap_outgoing(
-        sender: String,
-        payload: GossipMessage,
-        sig_bytes: &[u8],
-    ) -> Result<GossipEnvelope, String> {
-        let payload_json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-        let id = hex::encode(blake3::hash(&payload_json).as_bytes());
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        Ok(GossipEnvelope {
-            id,
-            sender,
-            payload,
-            signature: hex::encode(sig_bytes),
-            timestamp,
-            nonce: 0,
-        })
-    }
+    // **R14 (AUDIT-2026-08-13) — `payload_bytes`, `wrap_outgoing` et
+    // `wrap_outgoing_with_nonce` ont été SUPPRIMÉS. Ne les recréez pas.**
+    //
+    // Les trois étaient du code mort : aucun appelant, ni en production ni en
+    // test. Ce n'était pas un contournement — les enveloppes que `wrap_outgoing`
+    // produisait étaient rejetées deux fois par le dispatcher (identifiant calculé
+    // sur le payload seul au lieu de la préimage signée, donc `validate_envelope_id`
+    // échouait ; et `nonce: 0` figé, donc l'anti-rejeu échouait aussi). C'était un
+    // **piège** : trois fonctions publiques, documentées, portant les noms les plus
+    // évidents du module, qu'un développeur pressé aurait appelées en croyant faire
+    // ce qu'il fallait. Elles auraient produit des enveloppes silencieusement
+    // ignorées par tout le réseau.
+    //
+    // L'API correcte est [`Self::build_signed_envelope`], seule construction
+    // d'enveloppe du binaire : elle dérive l'identifiant de la préimage signée
+    // (H3) et exige le nonce anti-rejeu à l'appel. La signature doit couvrir
+    // [`Self::signable_envelope_bytes`].
 
     /// STRUCT-1: Build + sign a complete envelope in one step.
     ///
@@ -675,17 +944,6 @@ impl GossipRouter {
         })
     }
 
-    /// CRIT-1: wrap_outgoing with explicit nonce for anti-replay.
-    pub fn wrap_outgoing_with_nonce(
-        sender: String,
-        payload: GossipMessage,
-        sig_bytes: &[u8],
-        nonce: u64,
-    ) -> Result<GossipEnvelope, String> {
-        let mut env = Self::wrap_outgoing(sender, payload, sig_bytes)?;
-        env.nonce = nonce;
-        Ok(env)
-    }
 }
 
 impl Default for GossipRouter {
@@ -730,6 +988,14 @@ impl GossipRouter {
             // empty re-evaluates every peer on its next Hello.
             incompatible_senders: std::collections::HashSet::new(),
             last_stale_warn_unix: 0,
+            last_bad_sig_warn_unix: 0,
+            // R12 — la file de sortie est vide au démarrage : un compteur restauré
+            // serait un plafond consommé par une exécution précédente, donc une
+            // panne d'émission permanente.
+            egress_inflight_bulk: 0,
+            egress_inflight_light: 0,
+            last_egress_warn_unix: 0,
+            last_pong_unix: std::collections::HashMap::new(),
         }
     }
 
@@ -757,6 +1023,48 @@ impl GossipRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **R14 (AUDIT-2026-08-13) — le piège a été retiré, qu'il ne repousse pas.**
+    ///
+    /// `wrap_outgoing` / `wrap_outgoing_with_nonce` / `payload_bytes` étaient trois
+    /// fonctions publiques, documentées, portant les noms les plus évidents du
+    /// module — et sans un seul appelant. Les enveloppes qu'elles produisaient
+    /// étaient rejetées deux fois par le dispatcher (identifiant dérivé du payload
+    /// seul, `nonce: 0` figé). Un développeur pressé les aurait appelées en croyant
+    /// bien faire, et aurait émis des messages que tout le réseau ignore en
+    /// silence — la pire classe de panne : celle qui ne lève aucune erreur.
+    ///
+    /// Ce test verrouille l'unique constructeur restant sur la propriété qui
+    /// manquait aux fonctions supprimées : l'identifiant est celui de la préimage
+    /// **signée**, et le nonce est celui qu'on lui passe.
+    #[test]
+    fn r14_the_only_envelope_builder_binds_the_id_to_the_signed_preimage() {
+        let sender = "aa".repeat(32);
+        let payload = GossipMessage::Ping { nonce: 7 };
+        let ts = "2027-01-01T00:00:00+00:00".to_string();
+
+        let env = GossipRouter::build_signed_envelope(
+            sender.clone(),
+            payload.clone(),
+            42,
+            ts.clone(),
+            &[0u8; 8],
+        )
+        .expect("l'enveloppe se construit");
+
+        assert_eq!(env.nonce, 42, "le nonce anti-rejeu est celui demandé, jamais 0");
+        assert_eq!(
+            env.id,
+            GossipRouter::envelope_id(&sender, 42, &ts, &payload),
+            "l'identifiant dérive de la préimage SIGNÉE (sender+nonce+ts+payload), pas du payload seul"
+        );
+        // La propriété qui manquait : deux enveloppes de même payload mais de
+        // nonce différent ne partagent PAS un créneau de déduplication.
+        let other = GossipRouter::build_signed_envelope(sender, payload, 43, ts, &[0u8; 8])
+            .expect("seconde enveloppe");
+        assert_ne!(env.id, other.id, "le nonce doit séparer les identifiants");
+    }
+
 
     #[test]
     fn v1_nonce_is_clock_seeded_so_a_stateless_restart_resumes_above() {

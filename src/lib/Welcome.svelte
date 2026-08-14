@@ -89,7 +89,8 @@
       const id = await createIdentity(name, pass);
       pendingPk = id.public_key_hex;
       // The recovery phrase — the ONLY backup of the funds. Must be saved.
-      phrase = await getRecoveryPhrase();
+      // A2 : la phrase exige le mot de passe côté Rust ; on vient de le saisir.
+      phrase = await getRecoveryPhrase(pass);
       // Pick 3 distinct random positions to verify later.
       checkIdx = pickThree(phraseWords.length);
       checkVals = ["", "", ""];

@@ -46,6 +46,10 @@ pub mod sm;
 /// can hammer it with arbitrary untrusted bytes. See `fuzz/README.md`.
 #[doc(hidden)]
 pub use p2p::dispatcher::try_process_raw_gossip as fuzz_parse_gossip;
+// SC-06 — seconde porte de fuzzing, APRÈS le mur d'authentification (la première
+// n'atteignait jamais un parseur : aucune entrée aléatoire ne porte de signature
+// ML-DSA valide).
+pub use p2p::dispatcher::fuzz_parse_payload;
 
 use security::CryptoEngine;
 use p2p::willow_node::WillowNode;
@@ -59,6 +63,26 @@ use tauri::Manager;
 /// only accepted `min(2^(n−3), 60)` seconds later. In-memory by design — a
 /// reboot resets it, but a reboot also costs the attacker far more than the
 /// wait, and the real wall is Argon2id (64 MiB, 3 iters) per guess.
+/// **H-05 (AUDIT-2026-08-13) — CHAIN-ID-1 : ce que signe une clé nomme le réseau
+/// sur lequel elle le signe.**
+///
+/// Aucune préimage du projet ne liait d'identifiant de réseau. Conséquence
+/// prouvée par l'audit : deux votes de finalité **parfaitement honnêtes**, émis
+/// par la même clé sur deux réseaux Quanta (testnet/mainnet, ou avant/après un
+/// redémarrage de chaîne — il y en a déjà eu un, `GENESIS-V4`), partageaient
+/// l'époque cible et différaient par le checkpoint : `detect_fault` y lisait une
+/// équivocation, `verify_proof` l'acceptait, et le validateur honnête perdait
+/// **100 %** de son enjeu. La même absence rendait une transaction rejouable
+/// d'un réseau à l'autre.
+///
+/// Cette constante est intégrée aux séparateurs de domaine des préimages
+/// signées (transaction, feuille Merkle, en-tête de bloc, vote de finalité). Elle
+/// vit à la racine du crate pour que le cœur déterministe `sm/` et le ledger
+/// partagent le **même** ancrage sans dépendance croisée.
+///
+/// La changer relance une chaîne : c'est exactement la sémantique voulue.
+pub const CHAIN_ID: &str = "quanta-mainnet-v10";
+
 #[derive(Default)]
 pub struct UnlockGuard {
     failures: std::sync::atomic::AtomicU32,
@@ -209,6 +233,9 @@ pub fn run() {
             commands::identity::check_identity,
             commands::identity::create_identity,
             commands::identity::unlock_identity,
+            // A2 (LOCK-1) — le verrouillage a enfin une contrepartie Rust.
+            commands::identity::lock_wallet,
+            commands::identity::is_wallet_unlocked,
             commands::identity::get_public_key,
             commands::identity::get_recovery_key,
             commands::identity::get_recovery_phrase,

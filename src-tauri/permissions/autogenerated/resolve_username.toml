@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-username"
+description = "Enables the resolve_username command without any pre-configured scope."
+commands.allow = ["resolve_username"]
+
+[[permission]]
+identifier = "deny-resolve-username"
+description = "Denies the resolve_username command without any pre-configured scope."
+commands.deny = ["resolve_username"]

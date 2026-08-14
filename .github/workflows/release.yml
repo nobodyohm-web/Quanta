@@ -6,7 +6,12 @@ name: Release
 # Trigger by pushing a tag, e.g.:  git tag v3.3.0 && git push origin v3.3.0
 # or manually via the "Run workflow" button (workflow_dispatch).
 #
-# Required repository secret for the auto-updater signature:
+# AUDIT SC-01 — ces secrets doivent etre declares dans l'ENVIRONNEMENT GitHub
+# `release` (Settings > Environments > release), pas au niveau du depot : sinon
+# n'importe quel workflow du depot peut les lire. Protection recommandee sur cet
+# environnement : required reviewers + restriction aux tags `v*`.
+#
+# Required secret (environment `release`) for the auto-updater signature:
 #   TAURI_SIGNING_PRIVATE_KEY           (minisign private key matching tauri.conf.json pubkey)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  (its password, if any)
 # Optional secrets to sign + notarize the macOS build (left unset = unsigned build):
@@ -19,11 +24,23 @@ on:
       - 'v*'
   workflow_dispatch:
 
-permissions:
-  contents: write
+# AUDIT SC-01 — aucun droit accordé par défaut au niveau du workflow : un job
+# ajouté ici hériterait sinon de `contents: write` sans revue. Le droit d'écrire
+# la release est déclaré sur le seul job qui publie, ci-dessous.
+permissions: {}
 
 jobs:
   release:
+    # AUDIT SC-01 — la clé minisign de l'updater est la racine de confiance de
+    # tout le parc installé : elle sort du pool générique des secrets du dépôt et
+    # vit dans l'environnement `release`, protégé par reviewers obligatoires et
+    # branches/tags autorisés. Un `workflow_dispatch` sur une branche arbitraire
+    # ne peut plus atteindre la clé sans approbation humaine.
+    environment: release
+    # Strict nécessaire : publier la release (assets + latest.json). Aucun droit
+    # sur packages, id-token, actions ou déploiements.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +55,10 @@ jobs:
             args: ''
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      # AUDIT SC-01 — actions épinglées par SHA de commit complet : ce job reçoit
+      # TAURI_SIGNING_PRIVATE_KEY, donc un tag mutable repointé en amont
+      # signerait une mise à jour malveillante avec notre propre clé.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -51,18 +71,21 @@ jobs:
             patchelf
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # branche stable @ 2026-08-05
         with:
+          # Épinglé par SHA : le nom de ref ne porte plus la version, `toolchain`
+          # doit donc être explicite.
+          toolchain: stable
           targets: ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -74,7 +97,7 @@ jobs:
         run: npm ci
 
       - name: Build & release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Updater signature (required for the in-app auto-updater to trust the build):

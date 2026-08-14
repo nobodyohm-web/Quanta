@@ -168,6 +168,17 @@ impl FaultProof {
     pub fn fault(&self) -> Option<Fault> {
         detect_fault(&self.vote_a, &self.vote_b)
     }
+
+    /// **B-15** — l'époque de la faute : la **plus récente** des deux cibles.
+    ///
+    /// La plus récente, et non la plus ancienne : une preuve est recevable tant
+    /// que la faute est récente, et une faute n'est constituée qu'une fois les
+    /// deux votes émis. Prendre la plus ancienne périmerait une preuve dont la
+    /// seconde moitié vient juste d'arriver — on punirait l'accusateur pour la
+    /// lenteur du fautif.
+    pub fn target_epoch(&self) -> u64 {
+        self.vote_a.target.epoch.max(self.vote_b.target.epoch)
+    }
 }
 
 /// **§2 verify a fault proof (pure).** `true` iff:

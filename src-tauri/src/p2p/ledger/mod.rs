@@ -10,7 +10,9 @@
 
 use crate::security::CryptoEngine;
 use chrono::Utc;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 // Re-export all types from ledger_types so external code keeps working
 pub use super::ledger_types::*;
@@ -142,6 +144,154 @@ pub struct MultisigAuth {
 /// value bound into its signing pre-image).
 const MSIG_TAG: &str = "msig1";
 
+/// **Étape 4 de l'audit — BLOCK-SIZE-1 : le nombre maximal de transactions d'un
+/// bloc.** Rien ne le bornait ; un bloc pouvait donc être arbitrairement gros et
+/// faire payer à chaque nœud une vérification ML-DSA-65 par transaction.
+///
+/// 256 est très large devant la cadence réelle (un bloc toutes les 60 s) et
+/// dimensionne le reste : une transaction signée pèse ~11 Ko sur le fil (3 309 o
+/// de signature + 1 952 o de clé, en hexadécimal), donc un bloc légal plafonne
+/// vers 2,8 Mo — c'est ce qui fixe [`crate::p2p::dispatcher::MAX_RAW_ENVELOPE_BYTES`].
+/// **Règle de consensus** : vérifiée à l'identique sur les quatre chemins
+/// d'admission, avant toute vérification de signature.
+pub const MAX_TXS_PER_BLOCK: usize = 256;
+
+/// **C-03 (AUDIT-2026-08-13) — REORG-DEPTH-1 : la profondeur maximale d'une
+/// réorganisation.**
+///
+/// L'attaque *long-range* de l'audit : un ancien validateur (ou n'importe qui
+/// ayant acheté d'anciennes clés — le nothing-at-stake fait qu'il n'a plus rien
+/// à perdre, son enjeu est déjà retiré) reconstruit hors ligne une branche
+/// alternative depuis une hauteur ancienne et la sert d'un coup. Le plancher de
+/// finalité (LIVE-2) la refusait **si la finalité avait progressé** ; tant que
+/// personne ne vote, ce plancher vaut 0, et rien d'autre ne bornait la
+/// profondeur — une branche remontant à la genèse était admissible.
+///
+/// Cette borne est le complément, indépendant de la finalité : au-delà de 128
+/// blocs sous notre tête, **aucune** réorganisation n'est acceptée, quel que soit
+/// son score. Un réseau honnête n'en a jamais besoin — une partition de plus de
+/// 128 blocs (~2 h à un bloc par minute) n'est plus un aléa réseau.
+///
+/// Le prix est nommé : au-delà, une partition ne guérit plus toute seule. C'est
+/// **délibéré**. Un reorg de 128 blocs est soit une attaque, soit un événement
+/// qui mérite qu'un opérateur regarde avant que la monnaie ne se réécrive ; le
+/// resynchroniser demande une action explicite (supprimer l'état local), ce qui
+/// est précisément la « subjectivité faible » que tout PoS finit par assumer.
+pub const MAX_REORG_DEPTH: u64 = 128;
+
+/// **BLOCK-TIME-2** — taille de la fenêtre du *median-time-past*.
+///
+/// 11, comme Bitcoin : impair (la médiane est un élément réel, pas une moyenne)
+/// et assez large pour qu'un menteur isolé ne déplace rien — il faut mentir sur
+/// **6 blocs de la fenêtre** pour bouger la médiane, ce qui suppose déjà de
+/// contrôler la majorité de la production récente.
+pub const MEDIAN_TIME_SPAN: usize = 11;
+
+/// **M-09** — motif binaire canonique d'`energy_kwh` pour la préimage d'en-tête.
+///
+/// Une valeur non finie ou négative est refusée en amont (`validate_block_energy`) ;
+/// ici, on normalise malgré tout `-0.0` en `+0.0`, les deux ayant des motifs
+/// binaires distincts pour une même valeur mathématique. Sans cette
+/// normalisation, deux blocs sémantiquement identiques auraient deux hashs.
+fn canonical_energy_bits(energy_kwh: f64) -> u64 {
+    if energy_kwh == 0.0 { 0.0f64.to_bits() } else { energy_kwh.to_bits() }
+}
+
+/// **HAUT-1 (MSIG-BOUND-1)** — nombre maximal de clés (et de signatures) d'une
+/// politique multisig. Le coût de vérification est quadratique en ce nombre ;
+/// 16-of-16 couvre très largement la garde institutionnelle réelle.
+pub const MAX_MSIG_KEYS: usize = 16;
+
+/// C-01 (NONCE-ONCHAIN-1) — why a transaction is not includable at this height.
+/// The distinction matters at seal time: a stale tx is dead and must be dropped,
+/// an ahead tx is merely early and must be kept pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NonceFault {
+    /// `nonce < expected` — the sender already consumed this nonce on this
+    /// chain. This is the replay. Dead forever on this branch.
+    Stale,
+    /// `nonce > expected` — an earlier transaction of the same sender has not
+    /// landed yet. Valid, just not here.
+    Ahead,
+}
+
+// ─── CANON-1 (CRIT-1 / MOY-1) — canonical, injective encodings ───────────────
+//
+// Every hash and every signature in the ledger now commits to a **domain
+// separator plus length-prefixed fields**, the encoding
+// `sm::finality_vote::Vote::signable_bytes` has used since GADGET-2. Before
+// this, the tx pre-image, the Merkle leaf and the block header were `format!`
+// strings joined by `:` / `|` over fields that may legally contain those
+// separators — so none of the three was injective, and a collision in any of
+// them is a signature or a hash that covers two different meanings.
+//
+// The domain separators must NEVER change without a protocol version bump: they
+// are what makes a tx pre-image un-reinterpretable as a Merkle leaf or a block
+// header, and changing one invalidates every signature already produced.
+
+/// **H-05 — CHAIN-ID-1 : ce que signe une clé nomme le réseau sur lequel elle
+/// le signe.**
+///
+/// Aucune préimage du projet ne liait d'identifiant de réseau. Deux votes de
+/// finalité parfaitement honnêtes, émis par la même clé sur deux réseaux Quanta
+/// (testnet/mainnet, ou avant/après un redémarrage de chaîne — le projet en a
+/// déjà fait un, `GENESIS-V4`), étaient donc lisibles comme une **équivocation**
+/// et déclenchaient un slash de 100 % de l'enjeu d'un validateur honnête. La
+/// même absence rendait une transaction rejouable d'un réseau à l'autre.
+///
+/// L'identifiant est intégré aux séparateurs de domaine ci-dessous. Il fait
+/// partie de la rupture v10 ; le changer relance une chaîne, ce qui est
+/// exactement la sémantique voulue.
+/// Défini à la racine du crate ([`crate::CHAIN_ID`]) pour que le cœur
+/// déterministe `sm/` (votes de finalité) et le ledger partagent le MÊME
+/// ancrage sans dépendance croisée.
+///
+/// Domain separator for the canonical transaction signing pre-image (CRIT-1).
+const TX_SIGN_DOMAIN: &[u8] = b"QUANTA-TX-SIGN-v10|quanta-mainnet-v10";
+
+/// Domain separator for a Merkle **leaf**'s content commitment (MOY-1).
+const TX_LEAF_DOMAIN: &[u8] = b"QUANTA-TX-LEAF-v10|quanta-mainnet-v10";
+
+/// Domain separator for the canonical block header pre-image (MOY-1).
+const BLOCK_HEADER_DOMAIN: &[u8] = b"QUANTA-BLOCK-HEADER-v10|quanta-mainnet-v10";
+
+/// Append a `u64` little-endian length prefix, then the bytes. Length-prefixing
+/// is what makes the concatenations below **injective**: no field boundary can
+/// be moved by choosing a value that contains the old separator.
+fn push_field(buf: &mut Vec<u8>, data: &[u8]) {
+    buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    buf.extend_from_slice(data);
+}
+
+/// Append an `Option<&str>` unambiguously: a presence byte, then the
+/// length-prefixed bytes. `None` and `Some("")` must not encode identically —
+/// stripping an ML-DSA layer is exactly the kind of change a leaf must catch.
+fn push_opt_field(buf: &mut Vec<u8>, data: Option<&str>) {
+    match data {
+        Some(s) => {
+            buf.push(1);
+            push_field(buf, s.as_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
+/// Stable numeric tag for a [`TxType`]. Deliberately **not** `{:?}`: a `Debug`
+/// rename is a source-level refactor that must never silently change what a
+/// signature covers, and two variants whose names share a prefix would not be
+/// distinguishable in a non-length-prefixed concatenation. Tags are frozen —
+/// append new variants, never renumber.
+fn tx_type_tag(t: &TxType) -> u8 {
+    match t {
+        TxType::Mining => 1,
+        TxType::Transfer => 2,
+        TxType::Stake => 3,
+        TxType::Unstake => 4,
+        TxType::Burn => 5,
+        TxType::Slash => 6,
+    }
+}
+
 /// The ATN distributed ledger
 ///
 /// `Clone` backs GADGET-5B's **validate-before-commit** fork reconciliation: a
@@ -156,8 +306,23 @@ pub struct Ledger {
     tx_counter: u64,
     /// V3: Anti-replay — set of all known transaction hashes
     seen_tx_hashes: HashSet<String>,
-    /// B2: Per-account nonce tracking (account_pk → next expected nonce)
+    /// B2: Per-account nonce tracking (account_pk → next nonce to **issue**).
+    /// This is a *wallet/mempool* counter: it advances as this node builds and
+    /// admits transactions, so it can legitimately run ahead of the chain while
+    /// they are pending. It is re-synced down to the truth every time a block
+    /// lands ([`Ledger::resync_account_nonces`]) — see `chain_nonces`.
     account_nonces: HashMap<String, u64>,
+    /// **C-01 (NONCE-ONCHAIN-1)** — per-account next expected nonce **as sealed**,
+    /// i.e. `account_nonces_before(tip)` maintained incrementally. This one is
+    /// consensus state: it is what the inclusion rule compares against, and a
+    /// pure function of the chain, so it is recomputed (never trusted) after any
+    /// truncation and on restore.
+    ///
+    /// Splitting the two is what keeps the new rule from becoming a liveness trap:
+    /// a transaction the wallet signed but that never landed used to leave the
+    /// single counter permanently ahead of the chain, which under strict
+    /// sequencing would have frozen the account forever.
+    chain_nonces: HashMap<String, u64>,
     /// PERF-1: Incremental balance cache (pk → signed balance in µQTA).
     /// Updated on every tx insertion/removal. balance_of() reads this in O(1)
     /// instead of scanning the entire chain O(n).
@@ -245,7 +410,7 @@ impl Ledger {
     pub fn genesis_with_allocation(allocation: &[(&str, u64, u64)]) -> Self {
         let txs = Self::genesis_transactions(allocation);
         let prev_hash = "0".repeat(64);
-        let hash = Self::block_hash_hex(0, &prev_hash, Self::GENESIS_TIMESTAMP, "GENESIS", &txs);
+        let hash = Self::block_hash_hex(0, &prev_hash, Self::GENESIS_TIMESTAMP, "GENESIS", &txs, 0.0);
         let genesis_hashes: Vec<String> = txs.iter().map(|t| t.hash.clone()).collect();
         let genesis = Block {
             index: 0,
@@ -262,6 +427,7 @@ impl Ledger {
             tx_counter: 0,
             seen_tx_hashes: HashSet::new(),
             account_nonces: HashMap::new(),
+            chain_nonces: HashMap::new(),
             balance_cache: HashMap::new(),
             recent_deque: VecDeque::new(),
             staked: HashMap::new(),
@@ -341,7 +507,7 @@ impl Ledger {
     fn genesis_tx(id: &str, from: &str, to: &str, amount: u64, tx_type: TxType) -> Transaction {
         let ts = Self::GENESIS_TIMESTAMP;
         let payload = Self::tx_signing_preimage(id, from, to, amount, ts, &tx_type, 0, "");
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        let hash = hex::encode(blake3::hash(&payload).as_bytes());
         Transaction {
             id: id.to_string(),
             from: from.to_string(),
@@ -367,24 +533,67 @@ impl Ledger {
     /// so the three can never drift — the genesis hash is computed by the SAME block
     /// hashing, domain-separated by `index = 0`, `prev_hash = 0×64`,
     /// `miner = "GENESIS"`.
+    /// MOY-1 (AUDIT-2026-08-13) — the header pre-image is now injective too.
+    /// `timestamp` and `miner` are attacker-chosen free-form strings, so the old
+    /// `:`-joined `format!` allowed two different headers to hash identically
+    /// (move the separator: `ts="a:b" miner="c"` vs `ts="a" miner="b:c"`).
+    /// Same canonical encoding as [`Self::tx_signing_preimage`], separate domain.
     fn block_hash_hex(
         index: u64,
         prev_hash: &str,
         ts: &str,
         miner: &str,
         txs: &[Transaction],
+        energy_kwh: f64,
     ) -> String {
         let tx_root = Self::compute_merkle_root(txs);
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{}",
-            index,
-            prev_hash,
-            ts,
-            miner,
-            txs.len(),
-            tx_root
-        );
-        hex::encode(blake3::hash(payload.as_bytes()).as_bytes())
+        hex::encode(
+            blake3::hash(&Self::block_header_preimage(
+                index,
+                prev_hash,
+                ts,
+                miner,
+                txs.len(),
+                &tx_root,
+                energy_kwh,
+            ))
+            .as_bytes(),
+        )
+    }
+
+    /// The canonical block-header bytes (CANON-1). Shared by `block_hash_hex`
+    /// and the test-only `forge_block_at` so the two can never drift.
+    pub(super) fn block_header_preimage(
+        index: u64,
+        prev_hash: &str,
+        ts: &str,
+        miner: &str,
+        tx_count: usize,
+        tx_root: &str,
+        energy_kwh: f64,
+    ) -> Vec<u8> {
+        let mut b = Vec::with_capacity(BLOCK_HEADER_DOMAIN.len() + 168);
+        b.extend_from_slice(BLOCK_HEADER_DOMAIN);
+        b.extend_from_slice(&index.to_le_bytes());
+        push_field(&mut b, prev_hash.as_bytes());
+        push_field(&mut b, ts.as_bytes());
+        push_field(&mut b, miner.as_bytes());
+        b.extend_from_slice(&(tx_count as u64).to_le_bytes());
+        push_field(&mut b, tx_root.as_bytes());
+        // **M-09 (AUDIT-2026-08-13) — le bloc était MALLÉABLE.** `energy_kwh`
+        // voyageait dans le bloc, s'affichait dans l'explorateur et alimentait le
+        // total d'énergie du réseau, mais n'entrait **pas** dans le hash : deux
+        // blocs de hash identique pouvaient porter des valeurs différentes, et un
+        // relais pouvait réécrire le champ sans invalider quoi que ce soit. Un
+        // champ qui n'est pas dans le hash n'est pas dans la chaîne.
+        //
+        // `to_bits()` plutôt qu'un formatage décimal : le motif IEEE-754 est
+        // exact et identique sur toute plateforme, là où `format!("{}")` dépend
+        // de la précision choisie. La canonicité impose en retour de refuser NaN
+        // (plusieurs motifs pour une même valeur) et les infinis — c'est
+        // `validate_block_energy` qui le fait, avant que ce hash ne soit calculé.
+        b.extend_from_slice(&canonical_energy_bits(energy_kwh).to_le_bytes());
+        b
     }
 
     /// 🛑 PQ-MIG-5 §2 — **PLACEHOLDER DEV** genesis ML-DSA addresses (§12 réglable,
@@ -729,6 +938,64 @@ impl Ledger {
         *entry += 1;
     }
 
+    /// C-01 (NONCE-ONCHAIN-1) — commit a block's nonce effects. Called from
+    /// [`Self::apply_block_stake_effects`], i.e. from every path that pushes a
+    /// block (seal, linear integration, fork tie-break, deep reorg), so the
+    /// sealed expectation can never fall behind the chain.
+    ///
+    /// Also re-syncs the wallet counter: a block landing is exactly the moment we
+    /// learn which of the nonces we had issued actually made it, so a nonce burnt
+    /// on a transaction that was dropped is handed back instead of freezing the
+    /// account.
+    pub(crate) fn apply_block_nonce_effects(&mut self, block: &Block) {
+        if block.index > 0 {
+            // genesis is system-constructed and carries no account nonce
+            for tx in &block.transactions {
+                if Self::tx_carries_account_nonce(tx) {
+                    let e = self.chain_nonces.entry(tx.from.clone()).or_insert(0);
+                    *e = (*e).max(tx.nonce.saturating_add(1));
+                }
+            }
+        }
+        self.resync_account_nonces();
+    }
+
+    /// C-01 — recompute the sealed nonce expectation from scratch. O(chain), used
+    /// after any **truncation** (a `max` cannot be un-done) and on restore. The
+    /// map is a pure function of the chain, so this is always the truth.
+    pub(crate) fn rebuild_chain_nonces(&mut self) {
+        let mut n: HashMap<String, u64> = HashMap::new();
+        for block in self.chain.iter().filter(|b| b.index > 0) {
+            for tx in &block.transactions {
+                if Self::tx_carries_account_nonce(tx) {
+                    let e = n.entry(tx.from.clone()).or_insert(0);
+                    *e = (*e).max(tx.nonce.saturating_add(1));
+                }
+            }
+        }
+        self.chain_nonces = n;
+    }
+
+    /// C-01 — re-derive the wallet's next-nonce-to-issue from the only two things
+    /// that can actually consume a nonce: the chain, and the mempool we still
+    /// hold. Anything above that was issued for a transaction that never landed,
+    /// and is reclaimed.
+    ///
+    /// Without this, strict on-chain sequencing would be a foot-gun: one signed
+    /// transaction dropped at seal (uncovered, unbound, out-of-budget) would leave
+    /// the counter one ahead of the chain forever, and every later transaction
+    /// from that account would be permanently un-includable.
+    pub(crate) fn resync_account_nonces(&mut self) {
+        let mut n = self.chain_nonces.clone();
+        for tx in &self.pending {
+            if Self::tx_carries_account_nonce(tx) {
+                let e = n.entry(tx.from.clone()).or_insert(0);
+                *e = (*e).max(tx.nonce.saturating_add(1));
+            }
+        }
+        self.account_nonces = n;
+    }
+
     /// TX-AUTH-NONCE-1 §1: set an account's nonce high-water directly in **O(1)**
     /// (monotonic — never lowers it). Replaces a `for _ in current..new_hw`
     /// increment loop that, with an attacker-supplied nonce near `u64::MAX`,
@@ -741,11 +1008,34 @@ impl Ledger {
         }
     }
 
-    /// Total circulating supply (mined - burned), in µQTA.
+    /// Total circulating supply (mined − burned), in µQTA.
+    ///
+    /// **B-16 (AUDIT-2026-08-13) — les deux termes ne parlaient pas de la même
+    /// chose.** `stats().total_mined` ne lit que la **chaîne**, tandis que
+    /// `total_burned()` lit la chaîne **plus le mempool** : dès qu'un burn était
+    /// en attente, l'offre affichée était sous-estimée du montant en attente, puis
+    /// remontait quand le bloc était scellé. Aucune règle de consensus ne lit ce
+    /// compteur, mais un chiffre public faux par intermittence est exactement ce
+    /// qui fait douter du reste.
+    ///
+    /// La base retenue est **chaîne + mempool**, des deux côtés — celle que
+    /// `total_minted()` et `total_burned()` emploient déjà, et celle que le test
+    /// de propriété `p3_burn_accounting_correct` épingle depuis l'origine : une
+    /// brûlure admise doit se voir immédiatement. Ce qui était faux n'était pas
+    /// le choix de base, c'était de n'en appliquer qu'un côté.
     pub fn total_supply(&self) -> u64 {
-        let mined = self.stats().total_mined;
-        let burned = self.total_burned();
-        mined.saturating_sub(burned)
+        self.total_minted().saturating_sub(self.total_burned())
+    }
+
+    /// **B-16** — le total brûlé **on-chain uniquement** (le mempool exclu).
+    /// Contrepartie exacte de `stats().total_mined`, pour que `total_supply` ne
+    /// soustraie plus deux bases différentes l'une de l'autre.
+    pub fn onchain_burned(&self) -> u64 {
+        self.chain
+            .iter()
+            .flat_map(|b| b.transactions.iter())
+            .filter(|t| t.to == "BURN")
+            .fold(0u64, |acc, t| acc.saturating_add(t.amount))
     }
 
     /// Current chain height (number of blocks including genesis).
@@ -925,14 +1215,43 @@ impl Ledger {
     /// précisément ce qui permet de partager sans changer le format wire : nul
     /// besoin d'embarquer les votes de finalité dans les blocs pour savoir qui
     /// travaillait.
+    #[cfg(test)]
     pub(crate) fn recent_participants(&self, index: u64) -> BTreeSet<String> {
+        self.recent_participation(index).into_keys().collect()
+    }
+
+    /// **H-08 (AUDIT-2026-08-13) — REWARD-WEIGHT-1 : la participation se compte
+    /// en blocs produits, plus en adresses.**
+    ///
+    /// REWARD-SHARE-1 partageait le pot **à parts égales entre adresses
+    /// distinctes** de la fenêtre. Une adresse ne coûte rien : l'audit a mesuré
+    /// qu'avec 28 identités et 28 QTA d'enjeu — sept blocs de récompense, un quart
+    /// d'heure d'émission — un attaquant captait **45,2 % de chaque récompense**,
+    /// indéfiniment, et 50 % à la borne. Le partage censé récompenser la liveness
+    /// subventionnait la duplication d'identité.
+    ///
+    /// Le correctif ne pondère pas par l'enjeu (qui recréerait la rente de capital
+    /// que la doctrine refuse, et qui divergerait entre produire et vérifier selon
+    /// le chemin d'admission). Il pondère par **le nombre de blocs effectivement
+    /// produits dans la fenêtre**. C'est ce qui annule exactement l'attaque : les
+    /// slots sont une ressource finie, donc scinder son identité en K ne produit
+    /// pas un bloc de plus. Un Sybil devient strictement neutre — même part, même
+    /// coût, pour rien.
+    ///
+    /// Reste une fonction **pure de la chaîne** (`block.miner` est lié au hash par
+    /// BLK-HASH-1), donc produire et vérifier ne peuvent pas diverger.
+    pub(crate) fn recent_participation(&self, index: u64) -> BTreeMap<String, u64> {
         let start = index.saturating_sub(crate::p2p::reputation::SHARE_WINDOW_BLOCKS).max(1);
-        self.chain
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for b in self
+            .chain
             .iter()
             .filter(|b| b.index >= start && b.index < index && b.index > 0)
-            .map(|b| b.miner.clone())
-            .filter(|m| !m.is_empty())
-            .collect()
+            .filter(|b| !b.miner.is_empty())
+        {
+            *counts.entry(b.miner.clone()).or_insert(0) += 1;
+        }
+        counts
     }
 
     /// REWARD-SHARE-1 — le **plan de récompense** d'un bloc d'index `index`
@@ -967,27 +1286,38 @@ impl Ledger {
         if reward == 0 || proposer.is_empty() {
             return Vec::new();
         }
-        let participants: Vec<String> = self
-            .recent_participants(index)
+        // H-08 (REWARD-WEIGHT-1) : le poids d'un participant est son **nombre de
+        // blocs produits** dans la fenêtre, pas sa simple présence. Voir
+        // `recent_participation` — c'est ce qui rend la duplication d'identité
+        // exactement neutre.
+        let participants: Vec<(String, u64)> = self
+            .recent_participation(index)
             .into_iter()
-            .filter(|p| p != proposer)
+            .filter(|(p, _)| p != proposer)
             .collect();
-        if participants.is_empty() {
+        let total_weight: u64 = participants.iter().map(|(_, w)| *w).sum();
+        if participants.is_empty() || total_weight == 0 {
             return vec![(proposer.to_string(), reward)];
         }
         let proposer_cut = reward
             .saturating_mul(crate::p2p::reputation::PROPOSER_SHARE_NUM)
             / crate::p2p::reputation::PROPOSER_SHARE_DEN;
         let pot = reward - proposer_cut;
-        let each = pot / participants.len() as u64;
-        let dust = pot - each * participants.len() as u64;
         let mut plan: Vec<(String, u64)> = Vec::with_capacity(participants.len() + 1);
-        plan.push((proposer.to_string(), proposer_cut + dust));
-        for p in participants {
-            if each > 0 {
-                plan.push((p, each));
+        let mut handed_out: u64 = 0;
+        for (p, w) in participants {
+            // u128 : `pot` et `w` sont des u64, leur produit peut dépasser u64.
+            // La division entière tronque toujours vers le bas, donc `handed_out`
+            // ne peut jamais excéder `pot` et la soustraction ci-dessous est sûre.
+            let share = ((pot as u128 * w as u128) / total_weight as u128) as u64;
+            if share > 0 {
+                handed_out += share;
+                plan.push((p, share));
             }
         }
+        // Le reste de division revient au producteur : aucun µQTA ne se perd, le
+        // plan somme exactement à `reward` (la conservation est vérifiée au µQTA).
+        plan.push((proposer.to_string(), proposer_cut + (pot - handed_out)));
         plan.sort_by(|a, b| a.0.cmp(&b.0));
         plan
     }
@@ -1240,20 +1570,19 @@ impl Ledger {
     /// `Σ spendable + locked_stake + burned == minted` exact across a slash.
     pub fn total_burned(&self) -> u64 {
         let is_burn = |t: &&Transaction| matches!(t.tx_type, TxType::Burn | TxType::Slash);
+        // H-07 : même raisonnement que `stats()` — saturer plutôt que paniquer.
         let chain_burn: u64 = self
             .chain
             .iter()
             .flat_map(|b| b.transactions.iter())
             .filter(is_burn)
-            .map(|t| t.amount)
-            .sum();
+            .fold(0u64, |acc, t| acc.saturating_add(t.amount));
         let pending_burn: u64 = self
             .pending
             .iter()
             .filter(is_burn)
-            .map(|t| t.amount)
-            .sum();
-        chain_burn + pending_burn
+            .fold(0u64, |acc, t| acc.saturating_add(t.amount));
+        chain_burn.saturating_add(pending_burn)
     }
 
     /// Total QUANTA minted (in µQTA), counting BOTH sealed (chain) and pending
@@ -1267,51 +1596,76 @@ impl Ledger {
             .iter()
             .flat_map(|b| b.transactions.iter())
             .filter(|t| t.tx_type == TxType::Mining)
-            .map(|t| t.amount)
-            .sum();
+            .fold(0u64, |acc, t| acc.saturating_add(t.amount));
         let pending_mint: u64 = self
             .pending
             .iter()
             .filter(|t| t.tx_type == TxType::Mining)
-            .map(|t| t.amount)
-            .sum();
-        chain_mint + pending_mint
+            .fold(0u64, |acc, t| acc.saturating_add(t.amount));
+        chain_mint.saturating_add(pending_mint)
     }
 
-    /// BLK-HASH-1: canonical **content** commitment for a tx — a fixed-order,
-    /// domain-separated string of its content. NEVER the positional counter
-    /// `tx.id`, and NO map iteration (determinism, §3). Two txs with different
-    /// content always differ here; the same tx is identical on every node.
-    fn tx_content_bytes(tx: &Transaction) -> String {
-        let base = format!(
-            "from={}|to={}|amount={}|nonce={}|type={:?}|ts={}",
-            tx.from, tx.to, tx.amount, tx.nonce, tx.tx_type, tx.timestamp
-        );
-        // LIVE-3: bind the FULL embedded fault proof into the Merkle leaf for a
-        // Slash, so the block hash commits to it — a relay cannot swap the proof for
-        // another (even a valid one) without changing the block hash. Appended ONLY
-        // when present, so every non-slash tx's content stays byte-identical (no
-        // existing block/genesis hash shifts). Deterministic (the proof JSON is
-        // built from deterministic votes).
-        let base = match &tx.fault_proof {
-            Some(proof) => format!("{base}|slash_proof={proof}"),
-            None => base,
-        };
-        // LIVE-3B: bind the consumed-unbonding breakdown too — it drives BOTH the
-        // apply (which entries die) and the reorg revert (which entries come back),
-        // so a relay must not be able to alter it without changing the block hash.
-        // Appended only when present: purely-bonded slashes and all other txs stay
-        // byte-identical (genesis/history hashes unshifted).
+    /// BLK-HASH-1 + **MOY-1 (AUDIT-2026-08-13)**: canonical **content**
+    /// commitment for a tx. NEVER the positional counter `tx.id`, and NO map
+    /// iteration (determinism, §3).
+    ///
+    /// This used to be a `|`-joined `format!` over `from`, `to` and `ts` — none
+    /// of which forbids `|` — so two different transactions could produce the
+    /// same Merkle leaf and therefore the same block hash. Now the same
+    /// domain-separated, length-prefixed encoding as the signing pre-image, with
+    /// its own domain so a leaf can never be reinterpreted as a signable
+    /// pre-image. The signature and the ML-DSA authority layer are folded in
+    /// here (rather than appended by the caller with bare `update`s, which was a
+    /// second, independent ambiguity), each with a presence byte so a stripped
+    /// layer is distinguishable from an empty one.
+    fn tx_content_bytes(tx: &Transaction) -> Vec<u8> {
+        let mut b = Vec::with_capacity(TX_LEAF_DOMAIN.len() + 256);
+        b.extend_from_slice(TX_LEAF_DOMAIN);
+        push_field(&mut b, tx.from.as_bytes());
+        push_field(&mut b, tx.to.as_bytes());
+        b.extend_from_slice(&tx.amount.to_le_bytes());
+        b.extend_from_slice(&tx.nonce.to_le_bytes());
+        b.push(tx_type_tag(&tx.tx_type));
+        push_field(&mut b, tx.timestamp.as_bytes());
+        // Bind the authority material itself: the ML-DSA key and the ML-DSA
+        // signature. Without ces deux-là dans la feuille, un relais pourrait
+        // arracher ou remplacer la couche post-quantique après le scellement.
+        //
+        // **MOY-6 (AUDIT-2026-08-13) — `tx.signature` n'y est plus.** Le champ
+        // était le vestige Ed25519 : `verify_tx` exigeait qu'il soit **non vide**
+        // sans jamais le vérifier (`CryptoEngine::verify` n'a aucun appelant en
+        // production), et il entrait pourtant dans cette feuille. Résultat : un
+        // champ entièrement libre décidait du hash du bloc. Deux nœuds détenant
+        // des variantes de la MÊME transaction — même autorité, même hash de tx —
+        // scellaient donc des blocs différents ; c'est une source de divergence
+        // gratuite, offerte à n'importe quel relais. L'exigence « non vide » a
+        // sauté avec (elle laissait croire à une vérification qui n'existait pas).
+        push_opt_field(&mut b, tx.pq_public_key.as_deref());
+        push_opt_field(&mut b, tx.pq_signature.as_deref());
+        // LIVE-3: bind the FULL embedded fault proof for a Slash, so the block
+        // hash commits to it — a relay cannot swap the proof for another (even a
+        // valid one) without changing the block hash.
+        push_opt_field(&mut b, tx.fault_proof.as_deref());
+        // LIVE-3B: bind the consumed-unbonding breakdown too — it drives BOTH
+        // the apply (which entries die) and the reorg revert (which entries come
+        // back), so a relay must not be able to alter it without changing the
+        // block hash. Encoded field-by-field rather than through JSON: the leaf
+        // must not depend on a serializer's formatting choices, and a
+        // serialization failure must not be able to collapse two breakdowns onto
+        // the same marker string.
         match &tx.slash_unbonding {
-            Some(consumed) => match serde_json::to_string(consumed) {
-                Ok(j) => format!("{base}|slash_unbonding={j}"),
-                // Serialization of plain structs cannot fail; if it somehow did,
-                // fall back to a marker that still perturbs the leaf (never allow
-                // a silent unbound breakdown).
-                Err(_) => format!("{base}|slash_unbonding=<unserializable>"),
-            },
-            None => base,
+            Some(consumed) => {
+                b.push(1);
+                b.extend_from_slice(&(consumed.len() as u64).to_le_bytes());
+                for e in consumed {
+                    push_field(&mut b, e.tx_hash.as_bytes());
+                    b.extend_from_slice(&e.unlock_height.to_le_bytes());
+                    b.extend_from_slice(&e.amount.to_le_bytes());
+                }
+            }
+            None => b.push(0),
         }
+        b
     }
 
     /// BLAKE3 Merkle root committing each tx's **content + signature**
@@ -1328,14 +1682,14 @@ impl Ledger {
         let mut level: Vec<[u8; 32]> = txs
             .iter()
             .map(|tx| {
+                // MOY-1: the signature and the ML-DSA authority layer used to be
+                // appended here as bare `update`s after a `:`/`|`-joined content
+                // string — a second ambiguity on top of the first. They are now
+                // length-prefixed fields inside `tx_content_bytes`, so this leaf
+                // is a single injective encoding.
                 let mut h = blake3::Hasher::new();
                 h.update(&[0x00]); // leaf domain separator
-                h.update(Self::tx_content_bytes(tx).as_bytes());
-                h.update(tx.signature.as_bytes()); // bind the Ed25519 signature
-                // PQ-MIG-3 §2: bind the ML-DSA authority layer (key + signature)
-                // into the block hash, so a peer cannot strip or swap it post-seal.
-                h.update(tx.pq_public_key.as_deref().unwrap_or("").as_bytes());
-                h.update(tx.pq_signature.as_deref().unwrap_or("").as_bytes());
+                h.update(&Self::tx_content_bytes(tx));
                 *h.finalize().as_bytes()
             })
             .collect();
@@ -1431,13 +1785,18 @@ impl Ledger {
     pub fn stats(&self) -> LedgerStats {
         let total_blocks = self.chain.len() as u64;
         let total_txs: usize = self.chain.iter().map(|b| b.transactions.len()).sum();
+        // H-07 : `saturating_add` plutôt qu'un `sum()` nu. Les blocs de la chaîne
+        // ont tous passé la borne d'émission, donc la somme ne peut pas déborder
+        // en pratique — mais `stats()` est aussi lue sur un état RESTAURÉ, dont la
+        // provenance n'est pas garantie par la validation en ligne. Saturer est
+        // ici le comportement correct : la statistique plafonne, elle ne panique
+        // pas au milieu du chemin de validation qui la consomme.
         let total_mined: u64 = self
             .chain
             .iter()
             .flat_map(|b| b.transactions.iter())
             .filter(|t| t.tx_type == TxType::Mining)
-            .map(|t| t.amount)
-            .sum();
+            .fold(0u64, |acc, t| acc.saturating_add(t.amount));
         let total_energy: f64 = self.chain.iter().map(|b| b.energy_kwh).sum();
         let holders = self.all_balances().len();
         LedgerStats {
@@ -1465,6 +1824,27 @@ impl Ledger {
     /// substituting another key, and the Ed25519 signature that authorizes the
     /// FIRST on-chain binding commits to exactly which key is being bound.
     /// Synthetic/unsigned txs pass `pq_pk = ""` (they are `verify_tx`-exempt).
+    /// **CRIT-1 (AUDIT-2026-08-13) — CANON-TX-1: the pre-image is now injective.**
+    ///
+    /// It used to be `format!("{}:{}:{}:{}:{}:{:?}:{}:{}")`. `:` is not a
+    /// forbidden character in `id`, `to` or `timestamp`, so the concatenation was
+    /// **not injective**: two semantically different transactions could produce
+    /// the same byte string — hence the same ML-DSA signature *and the same
+    /// `tx.hash`*, since the hash is taken over this very pre-image. One
+    /// signature therefore authorised two different money movements, and two
+    /// honest nodes could hold the same chain, the same block hashes, and
+    /// **different balances**. A silent consensus divergence.
+    ///
+    /// The fix is the encoding `sm::finality_vote::Vote::signable_bytes` has been
+    /// doing correctly all along, applied here at last: a **domain separator**
+    /// plus **length-prefixed** fields. Every variable-length field is preceded
+    /// by its `u64` length, so no field boundary can be moved; every fixed-width
+    /// field is a little-endian integer; the tx type is a **stable numeric tag**
+    /// rather than `{:?}` (a `Debug` rename must not change what was signed).
+    /// Injectivity is then structural: distinct field tuples ⇒ distinct bytes.
+    ///
+    /// This is a **protocol break** (`TORUS_PROTOCOL_VERSION` 9 → 10): every
+    /// signature and every tx hash changes, including genesis.
     // The canonical pre-image legitimately commits to all tx fields plus the
     // bound key; bundling them into a struct would only obscure the wire format.
     #[allow(clippy::too_many_arguments)]
@@ -1477,8 +1857,18 @@ impl Ledger {
         tx_type: &TxType,
         nonce: u64,
         pq_pk: &str,
-    ) -> String {
-        format!("{}:{}:{}:{}:{}:{:?}:{}:{}", id, from, to, amount, ts, tx_type, nonce, pq_pk)
+    ) -> Vec<u8> {
+        let mut b = Vec::with_capacity(TX_SIGN_DOMAIN.len() + 96 + pq_pk.len());
+        b.extend_from_slice(TX_SIGN_DOMAIN);
+        push_field(&mut b, id.as_bytes());
+        push_field(&mut b, from.as_bytes());
+        push_field(&mut b, to.as_bytes());
+        b.extend_from_slice(&amount.to_le_bytes());
+        push_field(&mut b, ts.as_bytes());
+        b.push(tx_type_tag(tx_type));
+        b.extend_from_slice(&nonce.to_le_bytes());
+        push_field(&mut b, pq_pk.as_bytes());
+        b
     }
 
     fn next_tx(
@@ -1489,7 +1879,7 @@ impl Ledger {
         tx_type: TxType,
         nonce: u64,
         pq_pk: &str,
-    ) -> (String, String, String, String) {
+    ) -> (String, String, Vec<u8>, String) {
         // Production reads the wall clock at the boundary and delegates to the
         // injected-time core (C7 / Phase 0, Constitution §3 — same pattern as
         // `seal_block`/`seal_block_at`).
@@ -1511,11 +1901,11 @@ impl Ledger {
         ts: String,
         nonce: u64,
         pq_pk: &str,
-    ) -> (String, String, String, String) {
+    ) -> (String, String, Vec<u8>, String) {
         self.tx_counter += 1;
         let id = format!("tx_{}", self.tx_counter);
         let payload = Self::tx_signing_preimage(&id, from, to, amount, &ts, &tx_type, nonce, pq_pk);
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        let hash = hex::encode(blake3::hash(&payload).as_bytes());
         (id, ts, payload, hash)
     }
 
@@ -1605,9 +1995,9 @@ impl Ledger {
         // and `det_sign` can only be set `true` by a `#[cfg(test)]` caller.
         #[cfg(test)]
         let (classical, quantum, signed_pq_pk) = if det_sign {
-            crypto.sign_tx_authority_det(payload.as_bytes())?
+            crypto.sign_tx_authority_det(&payload)?
         } else {
-            crypto.sign_tx_authority(payload.as_bytes())?
+            crypto.sign_tx_authority(&payload)?
         };
         #[cfg(not(test))]
         let (classical, quantum, signed_pq_pk) = {
@@ -1615,7 +2005,7 @@ impl Ledger {
                 !det_sign,
                 "deterministic ML-DSA signing must never reach a non-test build"
             );
-            crypto.sign_tx_authority(payload.as_bytes())?
+            crypto.sign_tx_authority(&payload)?
         };
         // Invariant: the key that signed == the key bound into the pre-image.
         debug_assert_eq!(signed_pq_pk, pq_pk, "authority key must match pre-image key");
@@ -1676,7 +2066,7 @@ impl Ledger {
         );
         let mut signatures = Vec::with_capacity(signers.len());
         for s in signers {
-            signatures.push(hex::encode(s.sign_pq(payload.as_bytes())?));
+            signatures.push(hex::encode(s.sign_pq(&payload)?));
         }
         let auth = MultisigAuth { pubkeys: keys, threshold, signatures };
         let auth_json = serde_json::to_string(&auth).map_err(|_| "sérialisation multisig")?;
@@ -1734,6 +2124,7 @@ impl Ledger {
             tx_counter: snap.tx_counter,
             seen_tx_hashes: seen,
             account_nonces: snap.account_nonces,
+            chain_nonces: HashMap::new(), // C-01: chain-derived, rebuilt below
             balance_cache: HashMap::new(),
             recent_deque: VecDeque::new(),
             staked: HashMap::new(),
@@ -1744,6 +2135,14 @@ impl Ledger {
         // stake state from the restored chain. Both are block-index-anchored, so
         // a restored node reconstructs byte-identical `staked`/`unbonding` maps.
         ledger.rebuild_cache();
+        // C-01 (NONCE-ONCHAIN-1): the nonce high-water is now a **consensus**
+        // quantity, so it is re-derived from the chain rather than trusted from
+        // the snapshot — a snapshot written by an older build, or restored beside
+        // a chain that moved on, must not be able to make us sign a stale nonce.
+        // Monotonic `max`, so pending txs already counted in the snapshot keep
+        // their advance.
+        ledger.rebuild_chain_nonces();
+        ledger.resync_account_nonces();
         ledger
     }
 }

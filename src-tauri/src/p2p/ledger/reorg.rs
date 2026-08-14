@@ -92,11 +92,38 @@ impl Ledger {
         // applied yet).
         let bonded_before_seal = self.validator_stakes();
         let overdrawn = Self::overdrawn_unstake_indices(&bonded_before_seal, &candidate);
+        // C-01 (NONCE-ONCHAIN-1, COVER-2 symmetry): exclude any tx that is not the
+        // exact next transaction of its sender — the SAME rule
+        // `validate_block_against_prev` now rejects a received block with, so a
+        // self-sealed block is nonce-valid by construction and honest peers never
+        // reject our block.
+        //
+        // The two fault classes are treated differently, and that difference is the
+        // whole point: a STALE tx (nonce already consumed on-chain) is a replay and
+        // dies here like any other invalid tx; an AHEAD tx (its predecessor has not
+        // landed yet) is perfectly valid and is **put back in the mempool**, so
+        // unordered gossip costs one block of latency instead of a lost payment.
+        let nonces_before_seal = {
+            let prev = self.chain.last().expect("genesis exists");
+            self.account_nonces_before(prev)
+        };
+        let nonce_faults = Self::nonce_faults(&nonces_before_seal, &candidate);
+        let stale_nonce: Vec<usize> = nonce_faults
+            .iter()
+            .filter(|(_, f)| *f == NonceFault::Stale)
+            .map(|(i, _)| *i)
+            .collect();
+        let defer_nonce: HashSet<usize> = nonce_faults
+            .iter()
+            .filter(|(_, f)| *f == NonceFault::Ahead)
+            .map(|(i, _)| *i)
+            .collect();
         let txs = if uncovered.is_empty()
             && unbound.is_empty()
             && bad_slashes.is_empty()
             && bad_synthetic.is_empty()
             && overdrawn.is_empty()
+            && nonce_faults.is_empty()
         {
             candidate
         } else {
@@ -106,8 +133,10 @@ impl Ledger {
                 .chain(bad_slashes)
                 .chain(bad_synthetic)
                 .chain(overdrawn)
+                .chain(stale_nonce)
                 .collect();
             let mut kept = Vec::with_capacity(candidate.len());
+            let mut deferred = Vec::new();
             for (i, tx) in candidate.into_iter().enumerate() {
                 if drop_idx.contains(&i) {
                     log::warn!(
@@ -117,10 +146,24 @@ impl Ledger {
                         index
                     );
                     self.cache_revert_tx(&tx); // undo its admission-time cache effect
+                } else if defer_nonce.contains(&i) {
+                    // Early, not invalid: keep it pending, cache effect untouched
+                    // (it is still counted by `cache == chain + pending`).
+                    log::debug!(
+                        "◈ [Ledger] NONCE-ONCHAIN-1: tx {} (from {}, nonce {}) différée — \
+                         sa transaction précédente n'est pas encore scellée",
+                        short(&tx.hash, 12),
+                        short(&tx.from, 12),
+                        tx.nonce
+                    );
+                    deferred.push(tx);
                 } else {
                     kept.push(tx);
                 }
             }
+            // `pending` was drained by `std::mem::take` above; the deferred txs go
+            // back in, in their original relative order, for the next seal.
+            self.pending.extend(deferred);
             kept
         };
 
@@ -128,7 +171,7 @@ impl Ledger {
         // (content+signature leaves) AND to the `miner` — via the shared
         // `block_hash_hex` (PQ-MIG-5), used verbatim by genesis and validation so
         // the hashings can never drift.
-        let hash = Self::block_hash_hex(index, &prev_hash, &ts, miner, &txs);
+        let hash = Self::block_hash_hex(index, &prev_hash, &ts, miner, &txs, energy_kwh);
         let block = Block {
             index,
             timestamp: ts,
@@ -221,7 +264,7 @@ impl Ledger {
                 format!("tx_mint_b{index}_{k}")
             };
             let payload = Self::tx_signing_preimage(&id, "NETWORK", &to, total, ts, &TxType::Mining, 0, "");
-            let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+            let hash = hex::encode(blake3::hash(&payload).as_bytes());
             out.push(Transaction {
                 id,
                 from: "NETWORK".into(),
@@ -282,16 +325,11 @@ impl Ledger {
         txs: Vec<Transaction>,
     ) -> Block {
         let tx_root = Self::compute_merkle_root(&txs);
-        let payload = format!(
-            "{}:{}:{}:{}:{}:{}",
-            index,
-            prev_hash,
-            timestamp,
-            miner,
-            txs.len(),
-            tx_root
-        );
-        let hash = hex::encode(blake3::hash(payload.as_bytes()).as_bytes());
+        // CANON-1: shares the canonical header encoding with production, so the
+        // forge helper can never drift from `block_hash_hex`.
+        let payload =
+            Self::block_header_preimage(index, prev_hash, timestamp, miner, txs.len(), &tx_root, 0.0);
+        let hash = hex::encode(blake3::hash(&payload).as_bytes());
         Block {
             index,
             timestamp: timestamp.into(),
@@ -397,11 +435,15 @@ impl Ledger {
                 );
                 return Ok(false); // keep the finalized block
             }
-            // Deterministic tie-break: keep the block with the lexicographically higher
-            // hash. Both nodes will converge to the same choice.
-            if block.hash > tip.hash {
+            // **C-04 (AUDIT-2026-08-13) — FORK-RANK-1.** Le départage était « le
+            // plus grand hash gagne », donc gagnable par n'importe qui pour le
+            // prix d'un broyage. Il passe par le rang d'élection pondéré par
+            // l'enjeu ; le hash ne tranche plus que ce que le rang ne sépare pas.
+            // L'ensemble bondé est pris **as-of-le-parent-du-fork**, c'est-à-dire
+            // `chain[tip.index - 1]`, pour être identique chez les deux nœuds.
+            if self.prefers_same_height(&block, tip) {
                 log::warn!(
-                    "◈ [Ledger] FORK at height {} — remote block wins ({}... > {}...)",
+                    "◈ [Ledger] FORK at height {} — remote block wins (proposeur mieux élu ou hash supérieur: {}... vs {}...)",
                     block.index,
                     short(&block.hash, 12),
                     short(&tip.hash, 12)
@@ -437,7 +479,19 @@ impl Ledger {
                 // O(chain) replay is fine; `staked_before(prev) == validator_stakes()`
                 // at the parent is locked by test, so both paths agree.
                 let bonded_before = self.staked_before(&prev_for_remote);
-                Self::validate_block_against_prev(&block, &prev_for_remote, &onchain_before, &bindings_before, &bonded_before)?;
+                // C-01: same as-of-parent nonce expectation on the fork path.
+                let nonces_before = self.account_nonces_before(&prev_for_remote);
+                // BLOCK-TIME-2 : médiane as-of-parent, comme sur le chemin linéaire.
+                let median_before = self.median_time_before(&prev_for_remote);
+                Self::validate_block_against_prev(
+                    &block,
+                    &prev_for_remote,
+                    &onchain_before,
+                    &bindings_before,
+                    &bonded_before,
+                    &nonces_before,
+                    median_before,
+                )?;
                 // LIVE-3: a fork winner's slashes are re-verified too (same guard as
                 // the linear path). Slashes essentially never appear in a competing
                 // height-1 fork — the honest leader includes them on the canonical
@@ -479,6 +533,12 @@ impl Ledger {
                 // effects (single-block reorg; maturation is height-keyed and the
                 // replacement sits at the same height, so it is left intact).
                 self.revert_block_stake_effects(&our_tip);
+                // C-01 (NONCE-ONCHAIN-1): the sealed nonce expectation is a `max`
+                // over the chain, so it cannot be un-done incrementally — recompute
+                // it from the truncated chain. Without this, a reorg that replaces a
+                // tip carrying nonce 5 with one carrying nonce 3 would leave the
+                // expectation at 6 and freeze the account.
+                self.rebuild_chain_nonces();
 
                 // AUDIT-BLK-1: Re-queue txs from our popped tip that are NOT in
                 // the winning remote block, so they aren't lost in the reorg.
@@ -530,7 +590,7 @@ impl Ledger {
                 return Ok(true);
             } else {
                 log::info!(
-                    "◈ [Ledger] FORK at height {} — our block wins ({}... > {}...)",
+                    "◈ [Ledger] FORK at height {} — our block wins ({}... vs {}...)",
                     block.index,
                     short(&tip.hash, 12),
                     short(&block.hash, 12)
@@ -544,6 +604,101 @@ impl Ledger {
             "block index {} out of range (our tip: {})",
             block.index, tip.index
         ))
+    }
+
+
+    /// **C-04 (AUDIT-2026-08-13) — FORK-RANK-1 : le départage cesse d'être gratuit.**
+    ///
+    /// Le fork-choice était « le plus grand hash gagne ». Un attaquant **sans un
+    /// seul µQTA d'enjeu** rebroyait son bloc (l'ordre des transactions et le
+    /// `timestamp` entrent dans le hash, et rien ne bornait ce dernier avant
+    /// BLOCK-TIME-1) jusqu'à dépasser le hash honnête : il gagnait alors *tous*
+    /// les départages, à volonté. Combiné à OPEN-DOOR-1, cela lui donnait la
+    /// réécriture d'un bloc sur seize pour un coût de calcul dérisoire.
+    ///
+    /// Le correctif n'invente rien : l'élection pondérée par l'enjeu **existait
+    /// déjà** (`pos_consensus::elect_leader`), elle ne servait simplement qu'au
+    /// scellement. On la généralise en classement total ([`election_rank_of`]) et
+    /// on en fait le **premier** critère de départage. Le broyage devient inutile
+    /// : le rang d'un proposeur ne dépend que du beacon enterré, de la hauteur et
+    /// de l'enjeu bondé chez le parent — trois choses qu'un bloc concurrent ne
+    /// peut pas changer.
+    ///
+    /// Déterminisme inter-nœuds (sinon le correctif serait lui-même un fork) :
+    /// les trois entrées sont communes aux deux nœuds — le beacon vient d'un bloc
+    /// **enterré** de `LEADER_ENTROPY_LOOKBACK` hauteurs, donc sous le point de
+    /// fork ; l'ensemble bondé est pris as-of-parent ; le proposeur est dans le
+    /// bloc et lié à son hash par BLK-HASH-1.
+    ///
+    /// **Slot ouvert (OPEN-DOOR-1) : le rang ne s'applique pas.** Un slot ouvert
+    /// existe précisément pour qu'une adresse sans enjeu puisse produire ; y faire
+    /// gagner systématiquement le mieux bondé rendrait la porte décorative et
+    /// refermerait le réseau, ce que OPEN-DOOR-1 avait ouvert exprès. Sur ces
+    /// blocs — un sur seize, borne déjà concédée au trilemme Sybil — le départage
+    /// reste le hash. Hors slot ouvert, PROPOSER-1 garantit que les deux
+    /// concurrents sont bondés, donc les deux ont un rang.
+    ///
+    /// Départage deux blocs **de même hauteur** en dérivant l'ensemble bondé
+    /// as-of-le-parent depuis la chaîne locale. C'est l'entrée unique du
+    /// fork-choice : le départage vit à un seul endroit, donc le chemin vivant
+    /// (`integrate_remote_block`) et le chemin de guérison de partition
+    /// (`fork_heal`) ne peuvent pas diverger — deux règles de fork-choice
+    /// différentes dans un même binaire, c'est un fork garanti.
+    pub(crate) fn prefers_same_height(&self, challenger: &Block, incumbent: &Block) -> bool {
+        let parent_idx = incumbent.index.saturating_sub(1);
+        let bonded = match self.chain.get(parent_idx as usize) {
+            Some(p) => self.staked_before(p),
+            None => self.validator_stakes(),
+        };
+        self.fork_choice_prefers(challenger, incumbent, &bonded)
+    }
+
+    /// Renvoie `true` si `challenger` doit remplacer `incumbent`.
+    pub(crate) fn fork_choice_prefers(
+        &self,
+        challenger: &Block,
+        incumbent: &Block,
+        bonded_before: &HashMap<String, u64>,
+    ) -> bool {
+        match self.election_rank_at(challenger.index, &challenger.miner, bonded_before) {
+            Some(cr) => match self.election_rank_at(incumbent.index, &incumbent.miner, bonded_before) {
+                // Rangs distincts : le mieux élu l'emporte, quel que soit le hash.
+                Some(ir) if cr != ir => cr < ir,
+                // Rangs égaux (même proposeur des deux côtés = auto-équivocation,
+                // que le gadget de finalité punit) : le hash tranche, faute de
+                // mieux, et le broyage n'achète alors qu'une faute slashable.
+                Some(_) => challenger.hash > incumbent.hash,
+                // L'un est classé, l'autre non : seul un slot ouvert permet un
+                // proposeur non classé, et là le classement ne doit pas décider.
+                None => challenger.hash > incumbent.hash,
+            },
+            None => challenger.hash > incumbent.hash,
+        }
+    }
+
+    /// Rang d'élection d'un proposeur à une hauteur donnée, `None` s'il n'est pas
+    /// classé. Le beacon est sourcé d'un bloc **enterré** (`LEADER_ENTROPY_LOOKBACK`)
+    /// pour qu'un proposeur ne puisse pas se réélire en broyant le bloc qu'il vient
+    /// de sceller ; sous cette profondeur on retombe sur la genèse, qui est fixe.
+    pub(crate) fn election_rank_at(
+        &self,
+        index: u64,
+        proposer: &str,
+        bonded_before: &HashMap<String, u64>,
+    ) -> Option<u32> {
+        use crate::p2p::pos_consensus as pos;
+        if pos::is_open_slot(index) && bonded_before.get(proposer).copied().unwrap_or(0) < pos::MIN_VALIDATOR_STAKE {
+            return None;
+        }
+        let buried_idx = index.saturating_sub(pos::LEADER_ENTROPY_LOOKBACK);
+        let buried = self.chain.get(buried_idx as usize).or_else(|| self.chain.first())?;
+        let beacon = pos::leader_beacon(&buried.hash, index);
+        let validators: Vec<pos::Validator> = bonded_before
+            .iter()
+            .filter(|(_, &s)| s >= pos::MIN_VALIDATOR_STAKE)
+            .map(|(pk, &stake)| pos::Validator { pk: pk.clone(), stake, reputation: 0 })
+            .collect();
+        pos::election_rank_of(&beacon, index, &validators, proposer)
     }
 
     /// GADGET-5B — **multi-block fork reconciliation** at partition heal. Adopt
@@ -585,6 +740,24 @@ impl Ledger {
         // Finality floor (absolute): never disturb a block at or below the last
         // finalized one — a fork diverging there contradicts finalized history.
         if fork_point < floor_index {
+            return Ok(false);
+        }
+        // **C-03 (AUDIT-2026-08-13) — REORG-DEPTH-1.** Le plancher ci-dessus ne
+        // protège que ce que la finalité a atteint ; tant que personne ne vote il
+        // vaut 0, et une branche remontant à la genèse passait. On borne donc la
+        // profondeur indépendamment de la finalité : c'est ce qui ferme
+        // l'attaque *long-range* d'un ancien validateur qui n'a plus rien à
+        // perdre. Placé avant tout clone d'essai, donc le rejet est O(1).
+        let our_height = self.chain.last().map(|b| b.index).unwrap_or(0);
+        let depth = our_height.saturating_sub(fork_point);
+        if depth > MAX_REORG_DEPTH {
+            log::warn!(
+                "◈ [Ledger] REORG de {} blocs REFUSÉ (maximum {}) — une branche aussi \
+                 profonde est une attaque ou un incident qui demande une resynchronisation \
+                 explicite (REORG-DEPTH-1)",
+                depth,
+                MAX_REORG_DEPTH
+            );
             return Ok(false);
         }
         // Trial reorg on a clone — commit only if the WHOLE winning fork integrates
@@ -639,6 +812,10 @@ impl Ledger {
             self.revert_block_stake_effects(&blk);
             popped.push(blk);
         }
+        // C-01: same reason as the 1-block path — a `max` cannot be reverted, so
+        // the sealed nonce expectation is recomputed from what is left.
+        self.rebuild_chain_nonces();
+        self.resync_account_nonces();
         popped
     }
 }

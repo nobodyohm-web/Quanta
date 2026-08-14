@@ -132,7 +132,7 @@ pub fn finality_view(ledger: &Ledger) -> FinalityView {
 ///   (the provable-supply transparency pair); the rest of `getinfo` is node status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SupplyView {
-    /// Total ever minted (µQTA) — `stats.total_mined`.
+    /// Total ever minted (µQTA) — `Ledger::total_minted()` (chaîne + mempool, B-16).
     pub minted_uqta: u64,
     /// Total burned (µQTA).
     pub burned_uqta: u64,
@@ -147,11 +147,22 @@ pub struct SupplyView {
     pub emission_next_tick_uqta: u64,
 }
 
-/// Build the [`SupplyView`]. Takes the caller's already-computed [`LedgerStats`]
-/// (each consumer already calls `ledger.stats()`), avoiding a second O(chain)
-/// scan; `minted` comes from there, `burned` from `total_burned()`.
+/// Build the [`SupplyView`].
+///
+/// **B-16 (AUDIT-2026-08-13) — les deux termes ne parlaient pas de la même
+/// chose.** `stats.total_mined` ne lit que la **chaîne** tandis que
+/// `total_burned()` lit la chaîne **plus le mempool** : dès qu'un burn était en
+/// attente, la circulation affichée était sous-estimée du montant en attente,
+/// puis remontait au scellement. Les deux termes sont désormais pris sur la même
+/// base (chaîne + mempool, celle de `Ledger::total_supply`), donc
+/// `circulating == minted − burned` est vrai à tout instant, et pas seulement
+/// entre deux blocs.
+///
+/// `stats` reste dans la signature : les appelants l'ont déjà, et les autres
+/// champs de la vue en dépendent.
 pub fn supply_view(ledger: &Ledger, stats: &LedgerStats) -> SupplyView {
-    let minted_uqta = stats.total_mined;
+    let _ = stats;
+    let minted_uqta = ledger.total_minted();
     let burned_uqta = ledger.total_burned();
     let max_supply_uqta = crate::p2p::reputation::MAX_SUPPLY_MICRO;
     SupplyView {
@@ -399,7 +410,8 @@ mod tests {
         ledger.mine_tx(&addr, 5 * MICRO, 0.0);
         let stats = ledger.stats();
         let v = supply_view(&ledger, &stats);
-        assert_eq!(v.minted_uqta, stats.total_mined);
+        // B-16 : la vue est sur la base chaîne + mempool, des DEUX côtés.
+        assert_eq!(v.minted_uqta, ledger.total_minted());
         assert_eq!(v.max_supply_uqta, crate::p2p::reputation::MAX_SUPPLY_MICRO);
         // circulating == minted − burned == Ledger::total_supply().
         assert_eq!(v.circulating_uqta, ledger.total_supply());

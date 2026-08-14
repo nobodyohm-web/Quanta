@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-identity"
+description = "Enables the check_identity command without any pre-configured scope."
+commands.allow = ["check_identity"]
+
+[[permission]]
+identifier = "deny-check-identity"
+description = "Denies the check_identity command without any pre-configured scope."
+commands.deny = ["check_identity"]

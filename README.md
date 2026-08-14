@@ -52,12 +52,29 @@ Les points durs, dits franchement :
   l'histoire complète est dans [`docs/ARCHITECTURE.md` §7](docs/ARCHITECTURE.md#7-three-bugs-that-shaped-the-design).
   **L'échelle réelle reste non éprouvée** — deux daemons sur une même machine ne prouvent pas la
   traversée de NAT.
-- **Le protocole a rompu neuf fois** (`TORUS_PROTOCOL_VERSION = 9`). Tout binaire, snapshot ou
+- **Le protocole a rompu dix fois** (`TORUS_PROTOCOL_VERSION = 10`). Tout binaire, snapshot ou
   chaîne antérieurs sont incompatibles ; la dernière genèse a été rejouée le 18/07/2026.
-- **Aucun audit externe.** Un [audit interne adversarial](docs/audit/AUDIT-INTERNE-2026-07-25.md)
-  du 25/07/2026 a ouvert 4 critiques, 8 hauts et 4 moyens — tous corrigés derrière le fork v7 —
-  mais un audit interne n'est pas un audit tiers. Le dossier de consultation (threat model,
-  périmètre, RFQ) est prêt dans [`docs/audit/`](docs/audit/).
+- **Un audit externe a eu lieu le 13/08/2026, et il a fait mal.** 85 constats, dont **13
+  critiques** : trois d'entre eux étaient exploitables par un pair quelconque, sans clé, sans enjeu,
+  avec quelques messages — bannir n'importe quel nœud du réseau, faire autoriser deux transactions
+  différentes par une seule signature, et rejouer une transaction signée une seule fois jusqu'à
+  vider sa victime. Le motif dominant n'était pas l'incompétence : *le projet vérifiait très bien ce
+  qu'il avait décidé de vérifier, et ne vérifiait pas ce dont il n'avait jamais écrit la règle.*
+  L'état des corrections, ce qui reste ouvert et pourquoi :
+  [`docs/audit/REMEDIATION-2026-08-13.md`](docs/audit/REMEDIATION-2026-08-13.md).
+  Un [audit interne adversarial](docs/audit/AUDIT-INTERNE-2026-07-25.md) du 25/07/2026 l'avait
+  précédé (4 critiques, 8 hauts, 4 moyens, corrigés derrière le fork v7) — il n'avait vu aucun des
+  treize, ce qui est précisément la valeur d'un regard extérieur.
+- **Le fork-choice est pondéré par l'enjeu depuis le 14/08/2026** (`C-04`). Il était « le plus grand
+  hash gagne » : le `timestamp` entre dans le hash, donc quelques milliers de BLAKE3 suffisaient à
+  gagner *tous* les départages sans posséder un µQTA de plus que son voisin. Le départage passe
+  désormais par le **rang d'élection** — pondéré par l'enjeu bondé, ancré sur un beacon enterré,
+  donc insensible au contenu du bloc concurrent. La profondeur de réorganisation est bornée à 128
+  blocs, indépendamment de la finalité (`C-03`). Conception, limites et ce qui reste ouvert :
+  [`docs/DESIGN-FORK-RANK.md`](docs/DESIGN-FORK-RANK.md).
+- **Ce n'est toujours pas une preuve de sûreté.** Sans VRF post-quantique déployable, l'élection
+  reste prédictible et sa graine partiellement broyable ; le nothing-at-stake n'est borné que par la
+  profondeur de reorg. **Ce réseau ne doit porter aucune valeur.**
 - **Cryptographie et consensus expérimentaux** : n'y stockez aucune valeur réelle.
 - **Un seul bloc `unsafe`** dans tout le backend (interop AppKit pour l'état d'occlusion de la
   fenêtre, `src-tauri/src/guardian.rs`).

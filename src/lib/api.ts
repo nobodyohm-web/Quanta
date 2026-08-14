@@ -293,8 +293,23 @@ export function restoreFromPhrase(
 ): Promise<Identity> {
   return invoke<Identity>("restore_from_phrase", { mnemonic, displayName, password });
 }
-export function getRecoveryPhrase(): Promise<string> {
-  return invoke<string>("get_recovery_phrase");
+/**
+ * A2 (audit 2026-08-13) — la phrase de récupération exige désormais le mot de
+ * passe côté Rust. C'était la commande la plus sensible de tout l'IPC et elle ne
+ * demandait rien : n'importe quel JavaScript du webview repartait avec les 24
+ * mots, donc avec les fonds. La « re-saisie du mot de passe » n'existait que dans
+ * l'écran qui la demandait poliment.
+ */
+export function getRecoveryPhrase(password: string): Promise<string> {
+  return invoke<string>("get_recovery_phrase", { password });
+}
+/** A2 — verrouille réellement le portefeuille (efface l'autorité de dépense en mémoire). */
+export function lockWallet(): Promise<void> {
+  return invoke<void>("lock_wallet");
+}
+/** A2 — état réel du moteur, à préférer au drapeau local de l'interface. */
+export function isWalletUnlocked(): Promise<boolean> {
+  return invoke<boolean>("is_wallet_unlocked");
 }
 export function getRecoveryKey(): Promise<string> {
   return invoke<string>("get_recovery_key");

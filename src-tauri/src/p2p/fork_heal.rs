@@ -318,27 +318,39 @@ impl ForkReconciler {
                 if parent.hash != root.prev_hash {
                     continue;
                 }
-                // Walk forward through the buffer, deterministically choosing
-                // the lexicographically-greatest child when several compete.
+                // Marche avant dans le tampon. **C-04 (AUDIT-2026-08-13) —
+                // FORK-RANK-1** : quand plusieurs enfants concourent, on prenait
+                // le plus grand hash, donc l'assemblage préférait la branche la
+                // plus broyée. On prend désormais celui que le fork-choice
+                // préfère, c'est-à-dire d'abord le proposeur le mieux élu.
+                //
+                // Les deux `expect("run is non-empty")` d'origine ont sauté au
+                // passage : `run` est non vide par construction, mais un
+                // invariant vrai n'est pas une raison de laisser une panique
+                // atteignable dans un chemin nourri par le réseau.
                 let mut run = vec![root.clone()];
-                loop {
-                    let cur = run.last().expect("run is non-empty");
+                while let Some(cur) = run.last().cloned() {
                     let next_idx = cur.index + 1;
                     let Some(cands) = self.buf.get(&next_idx) else {
                         break;
                     };
-                    let next = cands
-                        .iter()
-                        .filter(|c| c.prev_hash == cur.hash)
-                        .max_by(|a, b| a.hash.cmp(&b.hash));
-                    match next {
+                    let mut best: Option<&Block> = None;
+                    for cand in cands.iter().filter(|c| c.prev_hash == cur.hash) {
+                        best = match best {
+                            None => Some(cand),
+                            Some(b) if ledger.prefers_same_height(cand, b) => Some(cand),
+                            keep => keep,
+                        };
+                    }
+                    match best {
                         Some(n) => run.push(n.clone()),
                         None => break,
                     }
                 }
-                let run_tip = run.last().expect("run is non-empty");
+                let Some(run_tip) = run.last() else { continue };
                 let wins = run_tip.index > our_tip.index
-                    || (run_tip.index == our_tip.index && run_tip.hash > our_tip.hash);
+                    || (run_tip.index == our_tip.index
+                        && ledger.prefers_same_height(run_tip, our_tip));
                 if wins {
                     return Some(run);
                 }
@@ -417,14 +429,27 @@ mod tests {
     /// Extend `ledger` linearly with `n` forged empty blocks whose timestamps
     /// embed `tag` (so two branches sealed from the same parent differ), and
     /// return the appended blocks.
+    ///
+    /// **C-02 (BLOCK-TIME-1)** — le timestamp d'un bloc est désormais un champ
+    /// *validé* : RFC3339 et non décroissant le long de la chaîne. Le marqueur de
+    /// branche voyage donc dans une **avance en secondes** dérivée du tag, au
+    /// lieu d'être collé après le fuseau — ce qui produisait `…+00:00-a`, une
+    /// chaîne que rien ne parsait et que rien ne refusait.
     fn extend(ledger: &mut Ledger, n: usize, tag: &str) -> Vec<Block> {
+        // Avance dérivée du tag, bornée sous l'heure : deux branches issues du même
+        // parent restent distinctes, et chaque bloc reste postérieur au sien.
+        let lane = i64::from(blake3::hash(tag.as_bytes()).as_bytes()[0]);
         let mut out = Vec::with_capacity(n);
-        for k in 0..n {
+        for _ in 0..n {
             let tip = ledger.chain.last().expect("tip").clone();
+            let ts = (chrono::DateTime::parse_from_rfc3339(&tip.timestamp)
+                .expect("le timestamp du parent est RFC3339")
+                + chrono::Duration::seconds(3600 + lane))
+            .to_rfc3339();
             let b = Ledger::forge_block_at(
                 tip.index + 1,
                 &tip.hash,
-                &format!("2026-07-13T00:00:{:02}+00:00-{tag}", k % 60),
+                &ts,
                 "miner",
                 vec![],
             );

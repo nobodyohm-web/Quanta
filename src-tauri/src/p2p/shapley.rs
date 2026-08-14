@@ -79,10 +79,18 @@ impl NetworkTotals {
         let mut total_tasks = 0u64;
         let mut total_blocks_verified = 0u64;
         let mut max_uptime_minutes = 0u64;
+        // **M-11 (AUDIT-2026-08-13)** — ces trois compteurs viennent d'un `Hello`
+        // signé mais **auto-déclaré** : seuls les watts étaient bornés à
+        // l'admission. Deux `Hello` annonçant chacun 2^63 tâches faisaient
+        // `attempt to add with overflow` **en debug**, ici, dans le tick de
+        // minage : la tâche mourait et le nœud cessait de sceller et de voter la
+        // finalité. En release la somme s'enroulait et les parts devenaient
+        // absurdes. `saturating_add` — une somme qui plafonne est une statistique
+        // fausse ; une somme qui panique est un nœud mort.
         for c in contribs.values() {
             total_watts += c.watts;
-            total_tasks += c.tasks_completed;
-            total_blocks_verified += c.blocks_verified;
+            total_tasks = total_tasks.saturating_add(c.tasks_completed);
+            total_blocks_verified = total_blocks_verified.saturating_add(c.blocks_verified);
             if c.uptime_minutes > max_uptime_minutes {
                 max_uptime_minutes = c.uptime_minutes;
             }

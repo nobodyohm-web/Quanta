@@ -3,10 +3,10 @@
 #   cargo install cargo-deny
 #   cargo deny --manifest-path src-tauri/Cargo.toml check
 #
-# NB : non exécuté lors de la passe d'activation PQ (cargo-deny non installé en
-# local) — ce fichier est destiné à la CI (.github/workflows/ci.yml). Le premier
-# run peut signaler des licences à revoir : c'est l'objectif (revue explicite,
-# pas d'acceptation silencieuse).
+# Porte BLOQUANTE de la CI (.github/workflows/ci.yml, job `supply-chain`), et
+# reproductible en local par la commande ci-dessus.
+# Etat verifie le 2026-08-14 avec cargo-deny 0.19.8 : advisories ok, bans ok,
+# licenses ok, sources ok. Un advisory non trie fait desormais echouer le job.
 
 [graph]
 targets = [
@@ -17,10 +17,31 @@ targets = [
 ]
 
 [advisories]
-# cargo-deny couvre les advisories RustSec (vulnérabilités + unmaintained). On
-# documente ici les advisories TRANSITIVES non corrigeables en l'état — le fix
-# réel = bumper iroh/libsql, dans une PR dédiée + testée. Triage du 2026-05-31.
+# AUDIT SC-02 (triage du 2026-08-14) — cette porte doit ÉCHOUER, pas prévenir.
+# Les trois classes d'advisories sont déclarées explicitement pour ne dépendre
+# d'aucun défaut de version de cargo-deny : tant qu'elles restaient implicites,
+# RUSTSEC-2026-0253 (lru 0.16.4, use-after-free) traversait la CI en warning
+# sans avoir jamais été trié. Désormais, la SEULE façon de faire passer un
+# advisory est un `ignore` daté et justifié ci-dessous.
 yanked = "deny"
+# "all" (défaut ≥ 0.20) et non "workspace" : la quasi-totalité de l'arbre est
+# transitive, restreindre au workspace reviendrait à relâcher la porte.
+unmaintained = "all"
+# Défaut = "workspace" : ne voyait pas lru (tiré par iroh-relay/mainline).
+unsound = "all"
+# Un `ignore` qui ne correspond plus à aucune crate de l'arbre devient une
+# erreur : c'est exactement ce qui avait laissé 6 exceptions périmées masquer
+# l'état réel de l'arbre. L'exception meurt avec la dépendance qui la motivait.
+unused-ignored-advisory = "deny"
+#
+# Supprimés le 2026-08-14, preuve = src-tauri/Cargo.lock :
+#   RUSTSEC-2025-0134 (rustls-pemfile) et RUSTSEC-2025-0141 (bincode) : crates
+#     absentes de l'arbre.
+#   RUSTSEC-2026-0049/-0098/-0099/-0104 (rustls-webpki, corrigés en 0.103.10 →
+#     0.103.13) : l'arbre ne contient plus que rustls-webpki 0.103.13, donc déjà
+#     patché — libsql est en `default-features = false` et n'amène plus la pile
+#     0.102. Leur justification citait de surcroît une phrase fausse de
+#     SECURITY.md (« aucun client HTTP sortant », cf. SC-05).
 ignore = [
     # ── "unmaintained" transitifs, sans mise à niveau sûre, PAS des vulns ──
     # Bindings GTK3 (gtk-rs) tirés par Tauri sur Linux (résolu au passage GTK4).
@@ -29,33 +50,26 @@ ignore = [
     "RUSTSEC-2024-0417", "RUSTSEC-2024-0418", "RUSTSEC-2024-0419",
     "RUSTSEC-2024-0420",
     # Autres crates non maintenues, transitives (proc-macro-error, paste,
-    # fxhash, unic-*, …) — aucun correctif amont disponible.
+    # fxhash, unic-*) — aucun correctif amont disponible. Triage 2026-08-14.
     "RUSTSEC-2024-0370", "RUSTSEC-2024-0436",
     "RUSTSEC-2025-0057", "RUSTSEC-2025-0075", "RUSTSEC-2025-0080",
     "RUSTSEC-2025-0081", "RUSTSEC-2025-0098", "RUSTSEC-2025-0100",
-    "RUSTSEC-2025-0134", "RUSTSEC-2025-0141",
 
-    # ── Vulnérabilités transitives — verrouillées en amont, exposition évaluée ──
-    # rustls-webpki 0.102.8 via libsql → rustls 0.22. libsql est utilisé EN LOCAL
-    # uniquement (l'app ne fait AUCUNE requête HTTP sortante, cf. SECURITY.md) →
-    # le chemin TLS hyper-rustls/webpki n'est jamais exercé. Le TLS actif (iroh
-    # QUIC) utilise déjà rustls-webpki 0.103.13 (corrigé). Fix = bump libsql.
-    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki via libsql local-only; chemin TLS non exercé; fix = bump libsql (PR dédiée)" },
-    # hickory (DNS) via iroh 0.98.1 qui épingle hickory-resolver =0.26.0-beta.4.
-    # DoS-class sur le chemin de découverte DNS ; fix = bump iroh (transport
-    # cœur — PR dédiée + tests P2P).
-    { id = "RUSTSEC-2026-0119", reason = "hickory-proto via iroh (pin exact =0.26.0-beta.4); DoS découverte DNS; fix = bump iroh (PR dédiée)" },
-    { id = "RUSTSEC-2026-0120", reason = "hickory-net via iroh (pin exact =0.26.0-beta.4); DoS découverte DNS; fix = bump iroh (PR dédiée)" },
-    # quick-xml 0.38.4 via plist → netdev → iroh 0.98.1 (détection d'interfaces
-    # réseau). N'analyse QUE les plist LOCAUX du système (énumération des devices),
-    # jamais du XML distant/attaquant → les classes DoS (attribut dupliqué
-    # quadratique / allocation de namespaces non bornée) ne sont pas exposées.
-    # Fix = bump iroh (transport cœur — PR dédiée). Triage du 2026-07-12.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml via plist/iroh; parse plist LOCAUX seulement (pas de XML distant); fix = bump iroh (PR dédiée)" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml via plist/iroh; parse plist LOCAUX seulement (pas de XML distant); fix = bump iroh (PR dédiée)" },
+    # ── Vulnérabilités transitives — verrouillées en amont, atteignabilité prouvée
+    # au niveau de l'API appelée (et non « pas de réseau », argument invalidé par
+    # SC-05 : tauri-plugin-updater embarque bien reqwest).
+    # hickory 0.26.0-beta.4 : iroh 0.98.1 l'épingle en `=` — le seul levier réel
+    # est un bump d'iroh (PR dédiée + tests P2P).
+    { id = "RUSTSEC-2026-0119", reason = "hickory-proto: l'avis vise l'ENCODAGE; le code compile n'encode que des requetes locales, les reponses distantes ne sont que decodees (DnsResponse::from_buffer) => pas d'amplification. Fix = bump iroh (pin =0.26.0-beta.4). Triage 2026-08-14" },
+    { id = "RUSTSEC-2026-0120", reason = "hickory-net: features dnssec-ring/dnssec-aws-lc-rs/__dnssec non activees (iroh en default-features=false) => module dnssec non compile, DnssecDnsHandle absent du binaire. Fix = bump iroh. Triage 2026-08-14" },
+    # quick-xml 0.38.4 via plist → netdev → iroh, et via plist → tauri.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via plist: plist utilise le Reader nu (stream/xml_reader.rs), aucun appel a attributes()/try_get_attribute/NsReader => l'API vulnerable (attributs dupliques) n'est jamais atteinte. Fix = bump iroh/plist. Triage 2026-08-14" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via plist: pas de NsReader donc pas de resolution de namespaces => non affecte; second verrou, seules des entrees plist LOCALES sont parsees (NetworkInterfaces.plist, Info.plist du bundle). Triage 2026-08-14" },
+
+    # ── "unsound" transitifs — bloquants depuis `unsound = "all"`, donc triés ──
+    { id = "RUSTSEC-2024-0429", reason = "glib 0.18.5 (pile GTK3 de Tauri, Linux uniquement) : UB confine a VariantStrIter::impl_get; Quanta n'appelle aucune API glib::Variant, l'iterateur n'est pas atteignable depuis notre code. Fix = gtk-rs 0.20 (migration GTK4, meme famille que RUSTSEC-2024-041x ci-dessus). Triage 2026-08-14" },
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.16.4 (UAF/double-free) via iroh-relay et mainline, transitif. L'avis exige un Drop de CLE qui panique sous catch_unwind; les cles utilisees sont des EndpointId/hash sans Drop custom => precondition d'exploitation absente. Fix reel = lru >= 0.18.2, verrouille par iroh 0.98/mainline 6 => bump iroh. A RE-TRIER au prochain bump. Triage 2026-08-14" },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.7.3 = build-dependency uniquement (phf_generator 0.8 -> selectors -> kuchikiki -> tauri-utils -> tauri-build), absente du binaire livre; l'avis exige un logger `log` custom appelant rand::rng(), phf_generator n'installe aucun logger. Impact nul. Triage 2026-08-14" },
 ]
 
 [licenses]
