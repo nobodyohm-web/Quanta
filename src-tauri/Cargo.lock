@@ -2769,7 +2769,7 @@ dependencies = [
  "iroh-dns",
  "iroh-metrics",
  "iroh-relay",
- "mainline",
+ "mainline 6.2.0",
  "n0-error",
  "n0-future",
  "n0-watcher",
@@ -3383,6 +3383,28 @@ name = "mainline"
 version = "6.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25fd96e1eb0cff23f7048801d1561336c2e3c9f2b468d0271f27ad3463f583bf"
+dependencies = [
+ "crc",
+ "document-features",
+ "dyn-clone",
+ "ed25519-dalek 3.0.0-pre.6",
+ "flume",
+ "futures-lite",
+ "getrandom 0.4.2",
+ "lru",
+ "serde",
+ "serde_bencode",
+ "serde_bytes",
+ "sha1_smol",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "mainline"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d32eaee3dcba6e0bbbefe8bd896a8bd6039d5e74b199c0fe248e9feb547c2a26"
 dependencies = [
  "crc",
  "document-features",
@@ -4862,7 +4884,7 @@ dependencies = [
  "iroh-gossip",
  "libsql",
  "log",
- "mainline",
+ "mainline 8.0.0",
  "num-traits",
  "objc2-app-kit",
  "objc2-foundation",
